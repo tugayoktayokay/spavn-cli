@@ -526,6 +526,33 @@ const NCCS: usize = 20;
 #[cfg(not(target_os = "macos"))]
 const NCCS: usize = 32;
 
+#[cfg(target_os = "macos")]
+fn empty_termios() -> Termios {
+    Termios {
+        c_iflag: 0,
+        c_oflag: 0,
+        c_cflag: 0,
+        c_lflag: 0,
+        c_cc: [0; NCCS],
+        c_ispeed: 0,
+        c_ospeed: 0,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn empty_termios() -> Termios {
+    Termios {
+        c_iflag: 0,
+        c_oflag: 0,
+        c_cflag: 0,
+        c_lflag: 0,
+        c_line: 0,
+        c_cc: [0; NCCS],
+        c_ispeed: 0,
+        c_ospeed: 0,
+    }
+}
+
 extern "C" {
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32;
@@ -1038,15 +1065,7 @@ pub fn read_bottom_dock_input(
     session_name: &str,
     messages: &[crate::router::ChatMessage],
 ) -> PromptEvent {
-    let mut orig_termios = Termios {
-        c_iflag: 0,
-        c_oflag: 0,
-        c_cflag: 0,
-        c_lflag: 0,
-        c_cc: [0; NCCS],
-        c_ispeed: 0,
-        c_ospeed: 0,
-    };
+    let mut orig_termios = empty_termios();
 
     let has_tty = unsafe { tcgetattr(0, &mut orig_termios) == 0 };
     if !has_tty {
@@ -1562,15 +1581,7 @@ impl LiveSpinner {
         }
 
         let handle = thread::spawn(move || {
-            let mut orig_termios = Termios {
-                c_iflag: 0,
-                c_oflag: 0,
-                c_cflag: 0,
-                c_lflag: 0,
-                c_cc: [0; NCCS],
-                c_ispeed: 0,
-                c_ospeed: 0,
-            };
+            let mut orig_termios = empty_termios();
             let has_tty = unsafe { tcgetattr(0, &mut orig_termios) == 0 };
             if has_tty {
                 let mut raw = orig_termios;
@@ -2143,15 +2154,7 @@ pub fn select_interactive_menu(
         return None;
     }
 
-    let mut orig_termios = Termios {
-        c_iflag: 0,
-        c_oflag: 0,
-        c_cflag: 0,
-        c_lflag: 0,
-        c_cc: [0; NCCS],
-        c_ispeed: 0,
-        c_ospeed: 0,
-    };
+    let mut orig_termios = empty_termios();
 
     let has_tty = unsafe { tcgetattr(0, &mut orig_termios) == 0 };
     if !has_tty {
@@ -2675,15 +2678,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
         return None;
     }
 
-    let mut orig_termios = Termios {
-        c_iflag: 0,
-        c_oflag: 0,
-        c_cflag: 0,
-        c_lflag: 0,
-        c_cc: [0; NCCS],
-        c_ispeed: 0,
-        c_ospeed: 0,
-    };
+    let mut orig_termios = empty_termios();
     let has_tty = unsafe { tcgetattr(0, &mut orig_termios) == 0 };
     if !has_tty {
         return Some(current_key.to_string());
