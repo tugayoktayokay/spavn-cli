@@ -905,14 +905,14 @@ fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
         }
     }
 
-    if ctx.access == AccessMode::Safe {
-        if !prompt_user_approval(
+    if ctx.access == AccessMode::Safe
+        && !prompt_user_approval(
             ctx,
             &format!("Dosya Düzenleme (edit): {}", raw_path),
             new_text,
-        ) {
-            return "User rejected edit in SAFE mode.".to_string();
-        }
+        )
+    {
+        return "User rejected edit in SAFE mode.".to_string();
     }
 
     let mtime_warn = ctx.check_external_mtime_shift(raw_path);
@@ -1210,10 +1210,10 @@ fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
         }
     }
 
-    if ctx.access == AccessMode::Safe {
-        if !prompt_user_approval(ctx, &format!("Dosya Yazma (write): {}", raw_path), content) {
-            return "User rejected write in SAFE mode.".to_string();
-        }
+    if ctx.access == AccessMode::Safe
+        && !prompt_user_approval(ctx, &format!("Dosya Yazma (write): {}", raw_path), content)
+    {
+        return "User rejected write in SAFE mode.".to_string();
     }
 
     let prev = read_target_file(raw_path).ok();
@@ -1513,10 +1513,10 @@ fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
     let cwd = crate::memory::current_workdir();
 
     if op == "remember" {
-        if ctx.access == AccessMode::Safe {
-            if !prompt_user_approval(ctx, "Hafızaya Kayıt (remember)", query) {
-                return "User rejected memory write in SAFE mode.".to_string();
-            }
+        if ctx.access == AccessMode::Safe
+            && !prompt_user_approval(ctx, "Hafızaya Kayıt (remember)", query)
+        {
+            return "User rejected memory write in SAFE mode.".to_string();
         }
         let raw_kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("not");
         let kind = match raw_kind {
@@ -1527,12 +1527,7 @@ fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
             let script_path = expand_tilde(remember_bin);
             if script_path.exists() {
                 if let Ok(out) = Command::new("python3")
-                    .args([
-                        &script_path.to_string_lossy().to_string(),
-                        kind,
-                        query,
-                        "spavn",
-                    ])
+                    .args([script_path.to_string_lossy().as_ref(), kind, query, "spavn"])
                     .output()
                 {
                     if out.status.success() {
@@ -1557,7 +1552,7 @@ fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
         let script_path = expand_tilde(recall_bin);
         if script_path.exists() {
             if let Ok(out) = Command::new("python3")
-                .args([&script_path.to_string_lossy().to_string(), query])
+                .args([script_path.to_string_lossy().as_ref(), query])
                 .output()
             {
                 let text = String::from_utf8_lossy(&out.stdout).to_string();

@@ -284,7 +284,7 @@ pub fn set_spinner_label(label: &str) {
 }
 
 pub fn stream_thinking_delta(think_delta: &str, show_thinking: bool) {
-    STREAM_EXTRA_TOKENS.fetch_add((think_delta.len() + 3) / 4, Ordering::Relaxed);
+    STREAM_EXTRA_TOKENS.fetch_add(think_delta.len().div_ceil(4), Ordering::Relaxed);
     if let Ok(mut state) = SPINNER_SCREEN.lock() {
         state.thinking_chars += think_delta.chars().count();
         state.label = format!(
@@ -454,7 +454,7 @@ pub fn truncate_ansi_to_width(s: &str, max_cols: usize) -> (String, usize) {
                     if let Some(c) = chars.next() {
                         out.push(c);
                     }
-                    while let Some(c) = chars.next() {
+                    for c in chars.by_ref() {
                         out.push(c);
                         if ('@'..='~').contains(&c) {
                             break;
@@ -494,6 +494,7 @@ struct WinSize {
     ws_ypixel: u16,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Termios {
@@ -506,6 +507,25 @@ struct Termios {
     c_ospeed: u64,
 }
 
+#[cfg(not(target_os = "macos"))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Termios {
+    c_iflag: u32,
+    c_oflag: u32,
+    c_cflag: u32,
+    c_lflag: u32,
+    c_line: u8,
+    c_cc: [u8; 32],
+    c_ispeed: u32,
+    c_ospeed: u32,
+}
+
+#[cfg(target_os = "macos")]
+const NCCS: usize = 20;
+#[cfg(not(target_os = "macos"))]
+const NCCS: usize = 32;
+
 extern "C" {
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32;
@@ -513,9 +533,22 @@ extern "C" {
     fn read(fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize;
 }
 
-const TIOCGWINSZ_MACOS: u64 = 0x4008_7468;
-const ICANON: u64 = 0x0000_0100;
-const ECHO: u64 = 0x0000_0008;
+#[cfg(target_os = "macos")]
+type TcFlag = u64;
+#[cfg(not(target_os = "macos"))]
+type TcFlag = u32;
+
+#[cfg(target_os = "macos")]
+const TIOCGWINSZ: u64 = 0x4008_7468;
+#[cfg(not(target_os = "macos"))]
+const TIOCGWINSZ: u64 = 0x5413;
+
+#[cfg(target_os = "macos")]
+const ICANON: TcFlag = 0x0000_0100;
+#[cfg(not(target_os = "macos"))]
+const ICANON: TcFlag = 0x0000_0002;
+
+const ECHO: TcFlag = 0x0000_0008;
 const TCSANOW: i32 = 0;
 
 #[cfg(target_os = "macos")]
@@ -534,7 +567,7 @@ pub fn term_size() -> (usize, usize) {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        if ioctl(1, TIOCGWINSZ_MACOS, &mut ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
+        if ioctl(1, TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
             return (ws.ws_row as usize, ws.ws_col as usize);
         }
     }
@@ -757,6 +790,7 @@ pub fn flex_wrap_items(
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_inline_dock(
     endpoint: &ModelEndpoint,
     access: AccessMode,
@@ -992,6 +1026,7 @@ pub enum PromptEvent {
     Exit,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn read_bottom_dock_input(
     endpoint: &ModelEndpoint,
     access: &mut AccessMode,
@@ -1008,7 +1043,7 @@ pub fn read_bottom_dock_input(
         c_oflag: 0,
         c_cflag: 0,
         c_lflag: 0,
-        c_cc: [0; 20],
+        c_cc: [0; NCCS],
         c_ispeed: 0,
         c_ospeed: 0,
     };
@@ -1532,7 +1567,7 @@ impl LiveSpinner {
                 c_oflag: 0,
                 c_cflag: 0,
                 c_lflag: 0,
-                c_cc: [0; 20],
+                c_cc: [0; NCCS],
                 c_ispeed: 0,
                 c_ospeed: 0,
             };
@@ -2113,7 +2148,7 @@ pub fn select_interactive_menu(
         c_oflag: 0,
         c_cflag: 0,
         c_lflag: 0,
-        c_cc: [0; 20],
+        c_cc: [0; NCCS],
         c_ispeed: 0,
         c_ospeed: 0,
     };
@@ -2159,7 +2194,7 @@ pub fn select_interactive_menu(
         }
 
         if needs_redraw {
-            let max_w = last_cols.saturating_sub(2).min(78).max(4);
+            let max_w = last_cols.saturating_sub(2).clamp(4, 78);
             if resize_clear {
                 print!("\x1b[?25l\x1b[?7l\x1b[2J\x1b[3J\x1b[H");
                 resize_clear = false;
@@ -2172,7 +2207,7 @@ pub fn select_interactive_menu(
             );
             let (trunc_hdr, used_hdr) = truncate_ansi_to_width(&raw_hdr, max_w);
             let hdr_pad = "─".repeat(max_w.saturating_sub(used_hdr));
-            print!("{}{}{}{}\n", trunc_hdr, CYAN, hdr_pad, RESET);
+            println!("{}{}{}{}", trunc_hdr, CYAN, hdr_pad, RESET);
 
             let win_start = if selected >= max_vis_items {
                 selected + 1 - max_vis_items
@@ -2180,8 +2215,8 @@ pub fn select_interactive_menu(
                 0
             };
 
-            for i in win_start..(win_start + max_vis_items).min(items.len()) {
-                let item = &items[i];
+            let end = (win_start + max_vis_items).min(items.len());
+            for (i, item) in items.iter().enumerate().take(end).skip(win_start) {
                 let row_str = if i == selected {
                     format!(
                         "{}│{} \x1b[1;36m❯\x1b[0m \x1b[1;7;36m {:<24} \x1b[0m │ {:<22} │ {}{}{}",
@@ -2194,7 +2229,7 @@ pub fn select_interactive_menu(
                     )
                 };
                 let (trunc_row, _) = truncate_ansi_to_width(&row_str, max_w);
-                print!("{}\n", trunc_row);
+                println!("{}", trunc_row);
             }
             let bot_pad = "─".repeat(max_w.saturating_sub(2).max(10));
             print!("{}╰{}{}\n\x1b[?7h", CYAN, bot_pad, RESET);
@@ -2645,7 +2680,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
         c_oflag: 0,
         c_cflag: 0,
         c_lflag: 0,
-        c_cc: [0; 20],
+        c_cc: [0; NCCS],
         c_ispeed: 0,
         c_ospeed: 0,
     };
@@ -2708,7 +2743,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
         }
 
         if needs_redraw {
-            let max_w = last_cols.saturating_sub(2).min(100).max(20);
+            let max_w = last_cols.saturating_sub(2).clamp(20, 100);
             if resize_clear {
                 print!("\x1b[?25l\x1b[?7l\x1b[2J\x1b[3J\x1b[H");
                 resize_clear = false;
@@ -2728,7 +2763,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
             let raw_hdr = format!("{}{}", raw_hdr, CYAN);
             let (trunc_hdr, used_hdr) = truncate_ansi_to_width(&raw_hdr, max_w);
             let hdr_pad = "─".repeat(max_w.saturating_sub(used_hdr));
-            print!("{}{}{}{}\n", trunc_hdr, CYAN, hdr_pad, RESET);
+            println!("{}{}{}{}", trunc_hdr, CYAN, hdr_pad, RESET);
 
             let left_hdr_style = if !focus_right {
                 tr_en(
@@ -2757,7 +2792,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 CYAN, RESET, left_hdr_style, CYAN, RESET, right_hdr_style
             );
             let (trunc_col_hdr, _) = truncate_ansi_to_width(&col_hdr, max_w);
-            print!("{}\n", trunc_col_hdr);
+            println!("{}", trunc_col_hdr);
 
             let sep_right = "─".repeat(max_w.saturating_sub(32));
             let raw_sep = format!(
@@ -2765,7 +2800,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 CYAN, sep_right, RESET
             );
             let (trunc_sep, _) = truncate_ansi_to_width(&raw_sep, max_w);
-            print!("{}\n", trunc_sep);
+            println!("{}", trunc_sep);
 
             let p_win_start = if prov_idx >= body_rows {
                 prov_idx + 1 - body_rows
@@ -2836,7 +2871,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                     CYAN, RESET, left_cell, CYAN, RESET, right_cell
                 );
                 let (trunc_row, _) = truncate_ansi_to_width(&full_row, max_w);
-                print!("{}\n", trunc_row);
+                println!("{}", trunc_row);
             }
 
             let bot_right = "─".repeat(max_w.saturating_sub(32));
@@ -3981,16 +4016,10 @@ impl MarkdownStreamRenderer {
         }
 
         if rest.starts_with('-') || rest.starts_with('*') {
-            if rest.starts_with("**") && rest.len() >= 3 && !rest.chars().all(|c| c == '*') {
-                let indent = " ".repeat(leading_spaces.min(6));
-                let pending = rest.to_string();
-                self.prefix_buf.clear();
-                self.at_line_start = false;
-                self.out_buf.push_str(&format!("  {}", indent));
-                for c in pending.chars() {
-                    self.emit_inline_char(c);
-                }
-            } else if !rest.chars().all(|c| c == '-' || c == '*') {
+            let is_bold_start =
+                rest.starts_with("**") && rest.len() >= 3 && !rest.chars().all(|c| c == '*');
+            let is_bullet_text = !rest.chars().all(|c| c == '-' || c == '*');
+            if is_bold_start || is_bullet_text {
                 let indent = " ".repeat(leading_spaces.min(6));
                 let pending = rest.to_string();
                 self.prefix_buf.clear();

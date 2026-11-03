@@ -65,7 +65,7 @@ pub fn load_session(path: &PathBuf) -> Vec<ChatMessage> {
     };
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if let Ok(msg) = serde_json::from_str::<ChatMessage>(&line) {
             messages.push(msg);
         }
@@ -186,7 +186,7 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionSummary> {
         }
     }
 
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     let mut summaries = Vec::new();
     for (path, mtime_secs) in files.into_iter().take(limit) {
