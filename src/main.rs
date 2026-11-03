@@ -37,7 +37,7 @@ use spavn_engine::{
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tools::{execute_tool, tool_definitions, AccessMode, ToolContext};
@@ -762,7 +762,7 @@ fn run_agent_turn(
     Ok(())
 }
 
-fn render_session_resume_preview(session_path: &PathBuf, messages: &[ChatMessage]) {
+fn render_session_resume_preview(session_path: &Path, messages: &[ChatMessage]) {
     let fname = session_path
         .file_name()
         .unwrap_or_default()

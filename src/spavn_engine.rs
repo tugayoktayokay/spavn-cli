@@ -240,10 +240,9 @@ pub fn detect_secrets_in_text(text: &str) -> Vec<&'static str> {
             && token
                 .chars()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            && !found.contains(&"aws-access-key")
         {
-            if !found.contains(&"aws-access-key") {
-                found.push("aws-access-key");
-            }
+            found.push("aws-access-key");
         }
         if token.len() >= 38
             && (token.starts_with("ghp_")
@@ -251,30 +250,25 @@ pub fn detect_secrets_in_text(text: &str) -> Vec<&'static str> {
                 || token.starts_with("ghu_")
                 || token.starts_with("ghs_")
                 || token.starts_with("ghr_"))
+            && !found.contains(&"github-token")
         {
-            if !found.contains(&"github-token") {
-                found.push("github-token");
-            }
+            found.push("github-token");
         }
-        if token.len() >= 28 && token.starts_with("sk_live_") {
-            if !found.contains(&"stripe-live-key") {
-                found.push("stripe-live-key");
-            }
+        if token.len() >= 28 && token.starts_with("sk_live_") && !found.contains(&"stripe-live-key")
+        {
+            found.push("stripe-live-key");
         }
         if token.len() >= 15
             && (token.starts_with("xoxb-")
                 || token.starts_with("xoxa-")
                 || token.starts_with("xoxp-")
                 || token.starts_with("xoxr-"))
+            && !found.contains(&"slack-token")
         {
-            if !found.contains(&"slack-token") {
-                found.push("slack-token");
-            }
+            found.push("slack-token");
         }
-        if token.len() == 39 && token.starts_with("AIza") {
-            if !found.contains(&"google-api-key") {
-                found.push("google-api-key");
-            }
+        if token.len() == 39 && token.starts_with("AIza") && !found.contains(&"google-api-key") {
+            found.push("google-api-key");
         }
     }
     found
@@ -354,7 +348,7 @@ pub fn record_audit_action(
     let mut prev_hash = String::new();
     if let Ok(f) = fs::File::open(&file_path) {
         let reader = BufReader::new(f);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if let Ok(rec) = serde_json::from_str::<AuditActionRecord>(&line) {
                 prev_hash = rec.hash;
             }
@@ -426,7 +420,7 @@ pub fn load_audit_records(
         };
         let reader = BufReader::new(file);
         let mut prev_hash = String::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if let Ok(rec) = serde_json::from_str::<AuditActionRecord>(&line) {
                 let payload = format!(
                     "{}|{}|{}|{}|{}|{}|{}|{}",
@@ -647,7 +641,7 @@ pub fn retrieve_relevant_artifacts(cwd: &str, query: &str, k: usize) -> Vec<Know
     let reader = BufReader::new(f);
     let mut items: Vec<KnowledgeArtifact> = reader
         .lines()
-        .flatten()
+        .map_while(Result::ok)
         .filter_map(|l| serde_json::from_str::<KnowledgeArtifact>(&l).ok())
         .collect();
 
@@ -666,7 +660,7 @@ pub fn retrieve_relevant_artifacts(cwd: &str, query: &str, k: usize) -> Vec<Know
         })
         .filter(|(hits, _)| *hits > 0)
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     scored.into_iter().take(k).map(|(_, a)| a).collect()
 }
 
@@ -814,6 +808,7 @@ pub fn render_repo_wiki(cwd: &str) {
     let mut total_files = 0usize;
     let mut total_bytes = 0u64;
 
+    #[allow(clippy::too_many_arguments)]
     fn walk_wiki(
         dir: &Path,
         root: &Path,
@@ -884,7 +879,7 @@ pub fn render_repo_wiki(cwd: &str) {
     );
 
     let mut top_exts: Vec<(String, usize)> = ext_counts.into_iter().collect();
-    top_exts.sort_by(|a, b| b.1.cmp(&a.1));
+    top_exts.sort_by_key(|a| std::cmp::Reverse(a.1));
     let langs: String = top_exts
         .into_iter()
         .take(6)
