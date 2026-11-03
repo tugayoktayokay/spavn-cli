@@ -85,6 +85,28 @@ pub struct DiscoveredLocalModel {
     pub id: String,
     pub loaded: bool,
     pub context_window: Option<usize>,
+    pub spec_badge: String,
+}
+
+fn infer_local_model_spec_badge(id: &str) -> String {
+    let lower = id.to_ascii_lowercase();
+    let quant = if lower.contains("q8") {
+        "Q8"
+    } else if lower.contains("q6") {
+        "Q6"
+    } else if lower.contains("q5") {
+        "Q5"
+    } else {
+        "Q4"
+    };
+    let mut tags = vec![quant];
+    if lower.contains("mtp") || lower.contains("cyber-tiel") || lower.contains("sage") {
+        tags.push("MTP");
+    }
+    if lower.contains("sage") || lower.contains("vl") || lower.contains("vision") {
+        tags.push("Vision");
+    }
+    tags.join("·")
 }
 
 static LOCAL_MODELS_CACHE: std::sync::Mutex<
@@ -124,8 +146,10 @@ pub fn discover_local_models(
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let ctx_win = item
-            .get("max_model_len")
+            .get("loaded_context_length")
+            .or_else(|| item.get("max_model_len"))
             .or_else(|| item.get("context_length"))
+            .or_else(|| item.get("max_context_length"))
             .or_else(|| item.get("n_ctx"))
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
@@ -133,6 +157,7 @@ pub fn discover_local_models(
             id: id.to_string(),
             loaded: status == "loaded",
             context_window: ctx_win,
+            spec_badge: infer_local_model_spec_badge(id),
         });
     }
     if let Ok(mut guard) = LOCAL_MODELS_CACHE.lock() {
@@ -166,6 +191,23 @@ impl ModelEndpoint {
             || self.base_url.contains(".local")
     }
 
+    /// True when the endpoint speaks the native Anthropic Messages API
+    /// (`/v1/messages`, `x-api-key`) rather than the OpenAI chat-completions
+    /// protocol. Auto-detected from an `api.anthropic.com` base URL; the
+    /// `SPAVN_FORCE_ANTHROPIC` env var overrides for custom Anthropic-protocol
+    /// proxies whose host is not anthropic.com.
+    pub fn is_anthropic(&self) -> bool {
+        std::env::var("SPAVN_FORCE_ANTHROPIC")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+            || self
+                .base_url
+                .trim_end_matches('/')
+                .to_lowercase()
+                .contains("anthropic.com")
+    }
+
     pub fn is_smart_pool_proxy(&self) -> bool {
         !self.is_local() && self.has_quota_pool
     }
@@ -178,13 +220,16 @@ impl ModelEndpoint {
         }
         if self.is_local() {
             let k = self.model.to_lowercase();
-            if k.contains("128k") {
-                return 131_072;
+            if k.contains("256k") || k.contains("262k") {
+                return 262_144;
+            }
+            if k.contains("32k") {
+                return 32_768;
             }
             if k.contains("64k") {
                 return 65_536;
             }
-            return 32_768;
+            return 131_072;
         }
         let k = self.model.to_lowercase();
         if k.contains("gemini") || k.contains("gpt-4.1") {
@@ -486,13 +531,71 @@ fn extract_dragged_images(text: &str) -> Vec<(&'static str, String)> {
     results
 }
 
+fn sanitize_messages_for_openai_jinja(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    for (idx, m) in messages.iter().enumerate() {
+        if m.role == "system" && idx > 0 {
+            continue;
+        }
+        if m.role == "user" {
+            if let Some(last) = out.last_mut() {
+                if last.role == "user" {
+                    let prev = last.content.clone().unwrap_or_default();
+                    let cur = m.content.clone().unwrap_or_default();
+                    if !cur.is_empty() {
+                        last.content = Some(if prev.is_empty() {
+                            cur
+                        } else {
+                            format!("{}\n\n{}", prev, cur)
+                        });
+                    }
+                    continue;
+                }
+            }
+        }
+        if m.role == "tool" {
+            let valid_prev = out
+                .last()
+                .map(|p| {
+                    p.role == "tool"
+                        || (p.role == "assistant"
+                            && p.tool_calls
+                                .as_ref()
+                                .map(|t| !t.is_empty())
+                                .unwrap_or(false))
+                })
+                .unwrap_or(false);
+            if !valid_prev {
+                continue;
+            }
+        }
+        let mut clean = m.clone();
+        if let Some(ref mut tcs) = clean.tool_calls {
+            for tc in tcs.iter_mut() {
+                if serde_json::from_str::<Value>(&tc.function.arguments)
+                    .map(|v| !v.is_object())
+                    .unwrap_or(true)
+                {
+                    tc.function.arguments = "{}".to_string();
+                }
+            }
+        }
+        out.push(clean);
+    }
+    out
+}
+
 fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
-    let last_user_idx = messages.iter().rposition(|m| m.role == "user");
-    messages
+    let sanitized = sanitize_messages_for_openai_jinja(messages);
+    let last_user_idx = sanitized.iter().rposition(|m| m.role == "user");
+    sanitized
         .iter()
         .enumerate()
         .map(|(idx, m)| {
             let mut v = serde_json::to_value(m).unwrap_or_else(|_| json!({}));
+            if m.role == "assistant" && v.get("content").is_none() {
+                v["content"] = json!("");
+            }
             if Some(idx) == last_user_idx {
                 if let Some(ref txt) = m.content {
                     let imgs = extract_dragged_images(txt);
@@ -515,7 +618,83 @@ fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
         .collect()
 }
 
+/// Appends the server's `Retry-After` (seconds form) to the error text as `[retry-after=N]`.
+fn retry_after_marker(response: &ureq::http::Response<ureq::Body>) -> String {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|n| format!(" [retry-after={}]", n))
+        .unwrap_or_default()
+}
+
+fn parse_http_status(err: &str) -> Option<u16> {
+    let rest = &err[err.find("HTTP ")? + 5..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+fn parse_retry_after_secs(err: &str) -> Option<u64> {
+    let rest = &err[err.find("[retry-after=")? + 13..];
+    rest.split(']').next()?.parse().ok()
+}
+
+fn is_retryable_upstream_error(err: &str) -> bool {
+    if let Some(status) = parse_http_status(err) {
+        return matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504 | 529);
+    }
+    // No HTTP status: only connection-level failures before any output streamed are safe to redo.
+    err.contains("Upstream request failed")
+        || err.contains("rate_limit")
+        || err.contains("overloaded_error")
+}
+
 pub fn stream_chat_completion<FThink, FContent>(
+    endpoint: &ModelEndpoint,
+    messages: &[ChatMessage],
+    tools: &Value,
+    mut on_thinking: FThink,
+    mut on_content: FContent,
+) -> Result<CompletionResult, String>
+where
+    FThink: FnMut(&str),
+    FContent: FnMut(&str),
+{
+    let delays_ms = [1200u64, 2500u64, 6000u64];
+    let mut attempt = 0usize;
+    loop {
+        let res = if endpoint.is_anthropic() {
+            stream_anthropic(endpoint, messages, tools, &mut on_thinking, &mut on_content)
+        } else {
+            stream_openai(endpoint, messages, tools, &mut on_thinking, &mut on_content)
+        };
+        match res {
+            Ok(ok) => return Ok(ok),
+            Err(err) => {
+                if attempt < delays_ms.len()
+                    && !crate::is_interrupted()
+                    && is_retryable_upstream_error(&err)
+                {
+                    // Honor Retry-After, capped so a hostile value cannot stall the agent.
+                    let wait_ms = delays_ms[attempt]
+                        .max(parse_retry_after_secs(&err).unwrap_or(0).min(30) * 1000);
+                    attempt += 1;
+                    crate::hud::set_spinner_label(&format!(
+                        "⏳ Rate-limit/Yoğunluk — yeniden deneniyor ({}/{})",
+                        attempt,
+                        delays_ms.len()
+                    ));
+                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+}
+
+pub fn stream_openai<FThink, FContent>(
     endpoint: &ModelEndpoint,
     messages: &[ChatMessage],
     tools: &Value,
@@ -539,7 +718,6 @@ where
 
     if endpoint.is_local() {
         payload["cache_prompt"] = json!(true);
-        payload["temperature"] = json!(0.2);
     }
     if endpoint.base_url.contains("minimax") {
         payload["reasoning_split"] = json!(true);
@@ -584,11 +762,12 @@ where
         };
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
+            let retry_after = retry_after_marker(&response);
             let body = response.body_mut().read_to_string().unwrap_or_default();
             let snippet: String = body.trim().chars().take(400).collect();
             let _ = tx.send(StreamEvent::Failed(format!(
-                "Upstream HTTP {}: {}",
-                status, snippet
+                "Upstream HTTP {}: {}{}",
+                status, snippet, retry_after
             )));
             return;
         }
@@ -712,9 +891,14 @@ where
             }
         }
 
+        let mut abort_runaway_tool_stream = false;
         if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
             for tc in tcs {
                 let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                if endpoint.is_local() && idx >= 4 {
+                    abort_runaway_tool_stream = true;
+                    break;
+                }
                 let entry = tool_calls_map.entry(idx).or_insert_with(|| ToolCall {
                     id: format!("call_{}", idx),
                     call_type: "function".to_string(),
@@ -743,11 +927,32 @@ where
                         entry.function.arguments.push_str(a);
                     }
                 }
-                crate::hud::notify_tool_call_streaming(
-                    &entry.function.name,
-                    entry.function.arguments.len(),
-                );
+                let cur_name = entry.function.name.clone();
+                let cur_args = entry.function.arguments.clone();
+                crate::hud::notify_tool_call_streaming(&cur_name, cur_args.len());
+
+                if idx > 0 && cur_args.len() >= 12 {
+                    let prefix_len = cur_args.len().min(18);
+                    let cur_prefix = cur_args.get(..prefix_len).unwrap_or("");
+                    let is_dup = tool_calls_map.iter().any(|(&other_idx, other_tc)| {
+                        other_idx < idx
+                            && other_tc.function.name == cur_name
+                            && (other_tc.function.arguments == cur_args
+                                || (cur_name == "read"
+                                    && prefix_len >= 14
+                                    && !cur_prefix.is_empty()
+                                    && other_tc.function.arguments.starts_with(cur_prefix)))
+                    });
+                    if is_dup {
+                        tool_calls_map.remove(&idx);
+                        abort_runaway_tool_stream = true;
+                        break;
+                    }
+                }
             }
+        }
+        if abort_runaway_tool_stream {
+            break;
         }
     }
 
@@ -767,6 +972,12 @@ where
         let recovered = recover_inline_tool_calls(&content);
         if !recovered.is_empty() {
             tool_calls = recovered;
+        }
+    }
+    if tool_calls.is_empty() && !reasoning.is_empty() {
+        let recovered_from_think = recover_inline_tool_calls(&reasoning);
+        if !recovered_from_think.is_empty() {
+            tool_calls = recovered_from_think;
         }
     }
 
@@ -819,6 +1030,8 @@ fn recover_inline_tool_calls(text: &str) -> Vec<ToolCall> {
             let inner = text[abs_start..abs_start + end].trim();
             if let Some(tc) = parse_candidate_tool_json(inner, calls.len(), &valid_names) {
                 calls.push(tc);
+            } else {
+                calls.extend(parse_xml_tagged_tool_calls(inner, &valid_names));
             }
             search_from = abs_start + end + "</tool_call>".len();
         } else {
@@ -827,6 +1040,12 @@ fn recover_inline_tool_calls(text: &str) -> Vec<ToolCall> {
     }
     if !calls.is_empty() {
         return calls;
+    }
+    if text.contains("<function=") && text.contains("</function>") {
+        let xml_calls = parse_xml_tagged_tool_calls(text, &valid_names);
+        if !xml_calls.is_empty() {
+            return xml_calls;
+        }
     }
 
     let mut fence_from = 0;
@@ -991,4 +1210,644 @@ fn parse_candidate_tool_json(raw: &str, idx: usize, valid_names: &[&str]) -> Opt
         },
         thought_signature: None,
     })
+}
+
+fn parse_xml_tagged_tool_calls(text: &str, valid_names: &[&str]) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(fn_start) = text[search_from..].find("<function=") {
+        let name_start = search_from + fn_start + "<function=".len();
+        let Some(gt_rel) = text[name_start..].find('>') else {
+            break;
+        };
+        let raw_name = text[name_start..name_start + gt_rel]
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
+        let body_start = name_start + gt_rel + 1;
+        let Some(fn_end_rel) = text[body_start..].find("</function>") else {
+            break;
+        };
+        let fn_body = &text[body_start..body_start + fn_end_rel];
+        search_from = body_start + fn_end_rel + "</function>".len();
+
+        if !valid_names.contains(&raw_name) {
+            continue;
+        }
+        let mut params = serde_json::Map::new();
+        let mut p_from = 0usize;
+        while let Some(p_start) = fn_body[p_from..].find("<parameter=") {
+            let k_start = p_from + p_start + "<parameter=".len();
+            let Some(k_gt) = fn_body[k_start..].find('>') else {
+                break;
+            };
+            let param_key = fn_body[k_start..k_start + k_gt]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            let v_start = k_start + k_gt + 1;
+            let Some(p_end) = fn_body[v_start..].find("</parameter>") else {
+                break;
+            };
+            let raw_val = &fn_body[v_start..v_start + p_end];
+            let clean_val = raw_val
+                .strip_prefix('\n')
+                .unwrap_or(raw_val)
+                .strip_suffix('\n')
+                .unwrap_or(raw_val.strip_prefix('\n').unwrap_or(raw_val));
+            if matches!(param_key, "start_line" | "end_line" | "timeout_sec") {
+                if let Ok(n) = clean_val.trim().parse::<u64>() {
+                    params.insert(param_key.to_string(), json!(n));
+                } else {
+                    params.insert(param_key.to_string(), json!(clean_val));
+                }
+            } else {
+                params.insert(param_key.to_string(), json!(clean_val));
+            }
+            p_from = v_start + p_end + "</parameter>".len();
+        }
+        if !params.is_empty() {
+            calls.push(ToolCall {
+                id: format!("xml_call_{}", calls.len()),
+                call_type: "function".to_string(),
+                function: ToolFunction {
+                    name: raw_name.to_string(),
+                    arguments: Value::Object(params).to_string(),
+                },
+                thought_signature: None,
+            });
+        }
+    }
+    calls
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Native Anthropic Messages API (/v1/messages)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn merge_consecutive_same_role(mut blocks: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for b in blocks.drain(..) {
+        if let Some(last) = out.last_mut() {
+            if last.get("role") == b.get("role") {
+                let merged = b
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(l) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                    l.extend(merged);
+                    continue;
+                }
+            }
+        }
+        out.push(b);
+    }
+    out
+}
+
+fn split_and_convert_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) {
+    let mut system = String::new();
+    let mut blocks: Vec<Value> = Vec::new();
+    for m in messages {
+        if m.role == "system" {
+            if let Some(c) = &m.content {
+                if !system.is_empty() {
+                    system.push('\n');
+                }
+                system.push_str(c);
+            }
+        }
+    }
+    let sanitized = sanitize_messages_for_openai_jinja(messages);
+    let last_user_idx = sanitized.iter().rposition(|m| m.role == "user");
+    for (idx, m) in sanitized.iter().enumerate() {
+        match m.role.as_str() {
+            "system" => {}
+            "assistant" => {
+                let mut content: Vec<Value> = Vec::new();
+                if let Some(c) = &m.content {
+                    if !c.trim().is_empty() {
+                        content.push(json!({ "type": "text", "text": c }));
+                    }
+                }
+                if let Some(calls) = &m.tool_calls {
+                    for tc in calls {
+                        let input: Value =
+                            serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                        content.push(json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "input": input,
+                        }));
+                    }
+                }
+                if !content.is_empty() {
+                    blocks.push(json!({ "role": "assistant", "content": content }));
+                }
+            }
+            "tool" => {
+                let tool_use_id = m.tool_call_id.clone().unwrap_or_default();
+                let text = m.content.clone().unwrap_or_default();
+                blocks.push(json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": text,
+                    }],
+                }));
+            }
+            _ => {
+                let text = m.content.clone().unwrap_or_default();
+                if !text.is_empty() {
+                    let mut parts = vec![json!({ "type": "text", "text": text })];
+                    if Some(idx) == last_user_idx {
+                        for (mime, b64) in extract_dragged_images(&text) {
+                            parts.push(json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime,
+                                    "data": b64,
+                                }
+                            }));
+                        }
+                    }
+                    blocks.push(json!({
+                        "role": "user",
+                        "content": parts,
+                    }));
+                }
+            }
+        }
+    }
+    (system, merge_consecutive_same_role(blocks))
+}
+
+fn build_anthropic_payload(
+    endpoint: &ModelEndpoint,
+    messages: &[ChatMessage],
+    tools: &Value,
+) -> Result<Value, String> {
+    let (system, converted) = split_and_convert_messages(messages);
+    let mut payload = json!({
+        "model": endpoint.model,
+        "max_tokens": 16384,
+        "messages": converted,
+        "stream": true,
+    });
+    if !system.trim().is_empty() {
+        payload["system"] = json!(system);
+    }
+    if let Some(arr) = tools.as_array() {
+        if !arr.is_empty() {
+            let mut converted_tools = Vec::new();
+            for t in arr {
+                if let Some(f) = t.get("function") {
+                    let mut out = json!({
+                        "name": f.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "input_schema": f.get("parameters").cloned().unwrap_or(json!({})),
+                    });
+                    if let Some(d) = f.get("description").and_then(|v| v.as_str()) {
+                        if !d.is_empty() {
+                            out["description"] = json!(d);
+                        }
+                    }
+                    converted_tools.push(out);
+                }
+            }
+            if !converted_tools.is_empty() {
+                payload["tools"] = json!(converted_tools);
+            }
+        }
+    }
+    Ok(payload)
+}
+
+pub fn stream_anthropic<FThink, FContent>(
+    endpoint: &ModelEndpoint,
+    messages: &[ChatMessage],
+    tools: &Value,
+    mut on_thinking: FThink,
+    mut on_content: FContent,
+) -> Result<CompletionResult, String>
+where
+    FThink: FnMut(&str),
+    FContent: FnMut(&str),
+{
+    let start = Instant::now();
+    let mut ttft_ms: u128 = 0;
+
+    let payload = build_anthropic_payload(endpoint, messages, tools)?;
+    let body_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    let url = format!("{}/messages", endpoint.base_url.trim_end_matches('/'));
+
+    enum StreamEvent {
+        Line(String),
+        Failed(String),
+        End,
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<StreamEvent>();
+    let api_key = endpoint.api_key.clone();
+    let request_url = url.clone();
+    std::thread::spawn(move || {
+        let agent = crate::http::agent_stream();
+        let response = agent
+            .post(&request_url)
+            .header("Content-Type", "application/json")
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send(body_str.as_str());
+        let mut response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                let _ = tx.send(StreamEvent::Failed(format!(
+                    "Upstream request failed: {}",
+                    err
+                )));
+                return;
+            }
+        };
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let retry_after = retry_after_marker(&response);
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            let snippet: String = body.trim().chars().take(400).collect();
+            let _ = tx.send(StreamEvent::Failed(format!(
+                "Anthropic HTTP {}: {}{}",
+                status, snippet, retry_after
+            )));
+            return;
+        }
+        let reader = BufReader::new(response.body_mut().as_reader());
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(StreamEvent::Line(line)).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(StreamEvent::Failed(format!("Stream read error: {}", err)));
+                    return;
+                }
+            }
+        }
+        let _ = tx.send(StreamEvent::End);
+    });
+
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut usage = TokenUsage::default();
+    let mut stop_reason: Option<String> = None;
+    let mut tool_blocks: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+    let mut seen_data = false;
+
+    loop {
+        if crate::is_interrupted() {
+            return Err("İşlem kullanıcı tarafından (Esc / Ctrl+C) iptal edildi.".to_string());
+        }
+        let line = match rx.recv_timeout(std::time::Duration::from_millis(150)) {
+            Ok(StreamEvent::Line(line)) => line,
+            Ok(StreamEvent::Failed(err)) => return Err(err),
+            Ok(StreamEvent::End) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !trimmed.starts_with("data:") {
+            continue;
+        }
+        let data_str = trimmed.trim_start_matches("data:").trim();
+        if data_str == "[DONE]" {
+            break;
+        }
+        let v: Value = match serde_json::from_str(data_str) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        seen_data = true;
+        let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match typ {
+            "message_start" => {
+                usage.prompt_tokens = v
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(usage.prompt_tokens);
+            }
+            "content_block_start" => {
+                let idx = v.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                if v.pointer("/content_block/type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    let id = v
+                        .pointer("/content_block/id")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = v
+                        .pointer("/content_block/name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    crate::hud::notify_tool_call_streaming(&name, 0);
+                    tool_blocks.insert(idx, (id, name, String::new()));
+                    if ttft_ms == 0 {
+                        ttft_ms = start.elapsed().as_millis();
+                    }
+                }
+            }
+            "content_block_delta" => {
+                let idx = v.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                let dtype = v
+                    .pointer("/delta/type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                match dtype {
+                    "text_delta" => {
+                        if let Some(t) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
+                            if ttft_ms == 0 {
+                                ttft_ms = start.elapsed().as_millis();
+                            }
+                            content.push_str(t);
+                            on_content(t);
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some(p) = v.pointer("/delta/partial_json").and_then(|x| x.as_str()) {
+                            if let Some(slot) = tool_blocks.get_mut(&idx) {
+                                slot.2.push_str(p);
+                                crate::hud::notify_tool_call_streaming(&slot.1, slot.2.len());
+                            }
+                        }
+                    }
+                    "thinking_delta" => {
+                        if let Some(t) = v.pointer("/delta/thinking").and_then(|x| x.as_str()) {
+                            if ttft_ms == 0 {
+                                ttft_ms = start.elapsed().as_millis();
+                            }
+                            reasoning.push_str(t);
+                            on_thinking(t);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "message_delta" => {
+                if let Some(sr) = v.pointer("/delta/stop_reason").and_then(|x| x.as_str()) {
+                    stop_reason = Some(sr.to_string());
+                }
+                usage.completion_tokens = v
+                    .pointer("/usage/output_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(usage.completion_tokens);
+            }
+            "error" => {
+                let msg = v
+                    .pointer("/error/message")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("unknown Anthropic error");
+                return Err(format!("Anthropic API error: {}", msg));
+            }
+            "message_stop" => break,
+            _ => {}
+        }
+    }
+
+    if !seen_data {
+        return Err("Anthropic stream produced no data.".to_string());
+    }
+
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    for (_idx, (id, name, args)) in tool_blocks {
+        tool_calls.push(ToolCall {
+            id,
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name,
+                arguments: if args.is_empty() {
+                    "{}".to_string()
+                } else {
+                    args
+                },
+            },
+            thought_signature: None,
+        });
+    }
+    if tool_calls.is_empty() && !content.is_empty() {
+        let recovered = recover_inline_tool_calls(&content);
+        if !recovered.is_empty() {
+            tool_calls = recovered;
+        }
+    }
+
+    let finish_reason = stop_reason.as_deref().map(|sr| match sr {
+        "end_turn" | "stop_sequence" => "stop".to_string(),
+        "tool_use" => "tool_calls".to_string(),
+        "max_tokens" => "length".to_string(),
+        other => other.to_string(),
+    });
+
+    usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+
+    let message = ChatMessage {
+        role: "assistant".to_string(),
+        content: if content.is_empty() {
+            None
+        } else {
+            Some(content)
+        },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
+        tool_call_id: None,
+        name: None,
+        thought_signature: None,
+        reasoning_content: if reasoning.is_empty() {
+            None
+        } else {
+            Some(reasoning)
+        },
+    };
+
+    Ok(CompletionResult {
+        message,
+        usage,
+        elapsed_ms: start.elapsed().as_millis(),
+        ttft_ms,
+        finish_reason,
+    })
+}
+
+#[cfg(test)]
+mod anthropic_tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: Some(content.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            thought_signature: None,
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn system_is_extracted_and_user_kept() {
+        let msgs = vec![msg("system", "You are X"), msg("user", "hi")];
+        let (system, blocks) = split_and_convert_messages(&msgs);
+        assert_eq!(system, "You are X");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["role"], "user");
+        assert_eq!(blocks[0]["content"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn tool_results_become_user_blocks() {
+        let mut t = msg("tool", "file content");
+        t.tool_call_id = Some("call_1".to_string());
+        let a = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolFunction {
+                    name: "read".to_string(),
+                    arguments: "{\"path\":\"a\"}".to_string(),
+                },
+                thought_signature: None,
+            }]),
+            tool_call_id: None,
+            name: None,
+            thought_signature: None,
+            reasoning_content: None,
+        };
+        let msgs = vec![msg("user", "read a"), a, t, msg("user", "now summarize")];
+        let (_system, blocks) = split_and_convert_messages(&msgs);
+        // user, assistant(tool_use), user(tool_result), user(text) -> the two
+        // trailing user messages must merge into one.
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[2]["role"], "user");
+        assert_eq!(blocks[2]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(blocks[2]["content"][0]["type"], "tool_result");
+        assert_eq!(blocks[2]["content"][1]["type"], "text");
+    }
+
+    #[test]
+    fn assistant_tool_use_keeps_parsed_input() {
+        let a = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some("let me read".to_string()),
+            tool_calls: Some(vec![ToolCall {
+                id: "c9".to_string(),
+                call_type: "function".to_string(),
+                function: ToolFunction {
+                    name: "write".to_string(),
+                    arguments: "{\"path\":\"b\",\"content\":\"x\"}".to_string(),
+                },
+                thought_signature: None,
+            }]),
+            tool_call_id: None,
+            name: None,
+            thought_signature: None,
+            reasoning_content: None,
+        };
+        let (_system, blocks) = split_and_convert_messages(&[a]);
+        let content = blocks[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "tool_use");
+        assert_eq!(content[1]["name"], "write");
+        assert_eq!(content[1]["input"]["path"], "b");
+    }
+
+    #[test]
+    fn anthropic_detection() {
+        let base = |u: &str| ModelEndpoint {
+            key: String::new(),
+            model: String::new(),
+            base_url: u.to_string(),
+            api_key: String::new(),
+            label: String::new(),
+            is_local_flag: false,
+            has_quota_pool: false,
+            configured_context_window: None,
+        };
+        assert!(base("https://api.anthropic.com/v1").is_anthropic());
+        assert!(!base("https://api.openai.com/v1").is_anthropic());
+        assert!(!base("http://127.0.0.1:8080/v1").is_anthropic());
+    }
+
+    #[test]
+    fn openai_jinja_sanitizer_strips_mid_system_and_merges_users() {
+        let msgs = vec![
+            msg("system", "sys1"),
+            msg("user", "u1"),
+            msg("system", "sys2"),
+            msg("user", "u2"),
+            msg("tool", "orphan_tool"),
+        ];
+        let serialized = serialize_messages_with_vision(&msgs);
+        assert_eq!(serialized.len(), 2);
+        assert_eq!(serialized[0]["role"], "system");
+        assert_eq!(serialized[1]["role"], "user");
+        assert_eq!(serialized[1]["content"], "u1\n\nu2");
+    }
+
+    #[test]
+    fn xml_tagged_tool_calls_are_recovered_for_local_qwen35() {
+        let raw = r#"<tool_call>
+<function=edit>
+<parameter=path>src/main.rs</parameter>
+<parameter=old_text>
+fn foo() {}
+</parameter>
+<parameter=new_text>
+fn bar() {}
+</parameter>
+</function>
+</tool_call>"#;
+        let recovered = recover_inline_tool_calls(raw);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].function.name, "edit");
+        let parsed: Value = serde_json::from_str(&recovered[0].function.arguments).unwrap();
+        assert_eq!(parsed["path"], "src/main.rs");
+        assert_eq!(parsed["old_text"], "fn foo() {}");
+        assert_eq!(parsed["new_text"], "fn bar() {}");
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_status_and_retry_after() {
+        for ok in [
+            "Upstream HTTP 429: slow down [retry-after=7]",
+            "Anthropic HTTP 529: overloaded",
+            "Upstream HTTP 500: boom",
+            "Upstream HTTP 504: gateway",
+            "Upstream request failed: connection reset",
+        ] {
+            assert!(is_retryable_upstream_error(ok), "{ok}");
+        }
+        for no in [
+            "Upstream HTTP 400: bad request",
+            "Upstream HTTP 401: unauthorized",
+            "Upstream HTTP 404: model not found",
+            "Stream read error: broken pipe",
+        ] {
+            assert!(!is_retryable_upstream_error(no), "{no}");
+        }
+        assert_eq!(parse_retry_after_secs("x [retry-after=7]"), Some(7));
+        assert_eq!(parse_retry_after_secs("x"), None);
+        assert_eq!(parse_http_status("Upstream HTTP 429: x"), Some(429));
+    }
 }

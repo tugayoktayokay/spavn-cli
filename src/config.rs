@@ -172,7 +172,7 @@ fn default_model_key() -> String {
 }
 
 fn default_busy_mode() -> String {
-    "steer".to_string()
+    "queue".to_string()
 }
 
 fn default_language() -> String {

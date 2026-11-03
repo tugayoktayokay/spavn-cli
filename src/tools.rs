@@ -467,7 +467,11 @@ fn write_target_file(raw_path: &str, content: &str) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("SSH write error: {}", e))?;
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(content.as_bytes());
+            if let Err(e) = stdin.write_all(content.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Remote write error: {}", e));
+            }
         }
         match child.wait() {
             Ok(s) if s.success() => Ok(()),
@@ -479,8 +483,30 @@ fn write_target_file(raw_path: &str, content: &str) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        fs::write(&path, content).map_err(|e| format!("Write error ({}): {}", path.display(), e))
+        write_atomic(&path, content).map_err(|e| format!("Write error ({}): {}", path.display(), e))
     }
+}
+
+/// Temp file in the same dir + rename: a crash or full disk never leaves a truncated target.
+/// Follows symlinks and keeps the existing file's permissions (e.g. the exec bit).
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp = target.with_file_name(format!(".{}.spavn-tmp-{}", name, std::process::id()));
+    let result = (|| {
+        fs::write(&tmp, content)?;
+        if let Ok(meta) = fs::metadata(&target) {
+            fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        fs::rename(&tmp, &target)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn remove_target_file(raw_path: &str) {
@@ -500,40 +526,62 @@ fn remove_target_file(raw_path: &str) {
     }
 }
 
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+const MAX_CAPTURE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Keeps the first MAX_CAPTURE_BYTES, then drains the pipe so the child never blocks.
+fn capture_capped<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = std::io::Read::read_to_end(
+                &mut std::io::Read::take(&mut p, MAX_CAPTURE_BYTES),
+                &mut buf,
+            );
+            let _ = std::io::copy(&mut p, &mut std::io::sink());
+        }
+        buf
+    })
+}
+
+/// SIGKILL the whole process group so grandchildren release the pipes.
+fn kill_group(child: &mut std::process::Child) {
+    unsafe {
+        kill(-(child.id() as i32), 9);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn run_command_with_timeout(
     mut cmd: Command,
     timeout_sec: u64,
 ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), String> {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
     cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .process_group(0);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
-    let out_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut p) = stdout_pipe {
-            let _ = std::io::Read::read_to_end(&mut p, &mut buf);
-        }
-        buf
-    });
-    let err_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut p) = stderr_pipe {
-            let _ = std::io::Read::read_to_end(&mut p, &mut buf);
-        }
-        buf
-    });
+    let out_handle = capture_capped(child.stdout.take());
+    let err_handle = capture_capped(child.stderr.take());
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_sec.max(1));
     let mut timed_out = false;
     let exit_code = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status.code().unwrap_or(0),
+            Ok(Some(status)) => {
+                break status
+                    .code()
+                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+            }
             Ok(None) => {
                 if crate::is_interrupted() {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_group(&mut child);
                     let out_bytes = out_handle.join().unwrap_or_default();
                     let mut err_bytes = err_handle.join().unwrap_or_default();
                     err_bytes
@@ -541,8 +589,7 @@ fn run_command_with_timeout(
                     return Ok((-2, out_bytes, err_bytes, false));
                 }
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_group(&mut child);
                     timed_out = true;
                     break -1;
                 }
@@ -574,15 +621,16 @@ fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str)
         "{}╰─ {}: {}",
         YELLOW,
         crate::config::tr_en(
-            "Onaylıyor musunuz? [E = Evet / h = Hayır / s = Sovereign Moda Geç]",
-            "Approve? [Y = Yes / n = No / s = Switch to Sovereign Mode]"
+            "Onaylıyor musunuz? [e = Evet / H = Hayır / s = Sovereign Moda Geç]",
+            "Approve? [y = Yes / N = No / s = Switch to Sovereign Mode]"
         ),
         RESET
     );
     let _ = io::stdout().flush();
 
     let mut ans = String::new();
-    if io::stdin().read_line(&mut ans).is_err() {
+    // Ok(0) = EOF (closed/piped stdin): never treat it as the empty "default yes" answer.
+    if !matches!(io::stdin().read_line(&mut ans), Ok(n) if n > 0) {
         crate::hud::resume_active_spinner();
         return false;
     }
@@ -601,8 +649,8 @@ fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str)
         crate::hud::resume_active_spinner();
         return true;
     }
-    let approved =
-        clean.is_empty() || clean == "e" || clean == "evet" || clean == "y" || clean == "yes";
+    // Enter alone declines: a stray keypress must not approve a risky action.
+    let approved = matches!(clean.as_str(), "e" | "evet" | "y" | "yes");
     crate::hud::resume_active_spinner();
     approved
 }
@@ -643,12 +691,101 @@ pub fn render_diff_preview(path_display: &str, old_text: &str, new_text: &str) {
     crate::hud::resume_active_spinner();
 }
 
+fn is_structural_outline_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let indent = line.len().saturating_sub(trimmed.len());
+    if indent > 8 || trimmed.starts_with("//") || trimmed.starts_with('#') {
+        return false;
+    }
+    const PREFIXES: &[&str] = &[
+        "pub fn ",
+        "pub async fn ",
+        "pub const fn ",
+        "pub unsafe fn ",
+        "pub(crate) fn ",
+        "pub(crate) async fn ",
+        "pub(crate) const fn ",
+        "pub(super) fn ",
+        "fn ",
+        "async fn ",
+        "const fn ",
+        "unsafe fn ",
+        "pub struct ",
+        "pub(crate) struct ",
+        "struct ",
+        "pub enum ",
+        "pub(crate) enum ",
+        "enum ",
+        "pub trait ",
+        "pub(crate) trait ",
+        "trait ",
+        "impl ",
+        "impl<",
+        "pub type ",
+        "pub(crate) type ",
+        "pub mod ",
+        "mod ",
+        "def ",
+        "async def ",
+        "class ",
+        "export function ",
+        "export async function ",
+        "export default function ",
+        "export class ",
+        "export interface ",
+        "export type ",
+        "function ",
+        "interface ",
+    ];
+    PREFIXES.iter().any(|p| trimmed.starts_with(p))
+}
+
+fn split_inline_line_selector(raw: &str) -> (&str, Option<usize>, Option<usize>) {
+    if Path::new(raw).exists() || expand_tilde(raw).exists() {
+        return (raw, None, None);
+    }
+    if let Some((base, suffix)) = raw.rsplit_once(':') {
+        let is_bare_ssh_host = !base.contains(':') && split_remote_prefix(raw).is_some();
+        if !base.is_empty() && !base.ends_with(':') && !is_bare_ssh_host {
+            let suffix = suffix.strip_prefix('L').unwrap_or(suffix);
+            if let Some((s_str, e_str)) = suffix.split_once('-') {
+                let e_clean = e_str.strip_prefix('L').unwrap_or(e_str);
+                if let (Ok(s), Ok(e)) = (s_str.parse::<usize>(), e_clean.parse::<usize>()) {
+                    return (base, Some(s), Some(e));
+                }
+            } else if let Ok(num) = suffix.parse::<usize>() {
+                // Handle rg-style `path:line:col` by checking if `base` also ends with `:line`
+                if let Some((inner_base, line_str)) = base.rsplit_once(':') {
+                    if !inner_base.is_empty() && !inner_base.ends_with(':') {
+                        if let Ok(line_no) = line_str.parse::<usize>() {
+                            return (inner_base, Some(line_no), Some(line_no + 120));
+                        }
+                    }
+                }
+                return (base, Some(num), Some(num + 120));
+            }
+        }
+    }
+    (raw, None, None)
+}
+
 fn format_lines(content: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
     let s = start_line.unwrap_or(1).max(1);
-    let e = end_line.unwrap_or(total).min(total);
-    if s > total || s > e {
+    if s > total {
+        return format!(
+            "[EOF STOP: File only has {} lines total (1..{}). Requested start_line={} is past EOF — STOP calling read on this file!]",
+            total, total, s
+        );
+    }
+    let default_end = if start_line.is_some() {
+        (s + 199).min(total)
+    } else {
+        total
+    };
+    let e = end_line.unwrap_or(default_end).min(s + 249).min(total);
+    if s > e {
         return format!(
             "(File has {} lines; requested range {}..{} is empty)",
             total, s, e
@@ -656,25 +793,82 @@ fn format_lines(content: &str, start_line: Option<usize>, end_line: Option<usize
     }
 
     let slice = &lines[(s - 1)..e];
-    if slice.len() > 240 && start_line.is_none() && end_line.is_none() {
+    if total > 240 && start_line.is_none() && end_line.is_none() {
         let mut out = String::new();
-        for (i, line) in slice.iter().take(120).enumerate() {
-            out.push_str(&format!("{:>4}: {}\n", s + i, line));
+        for (i, line) in lines.iter().take(100).enumerate() {
+            out.push_str(&format!("{:>4}: {}\n", i + 1, line));
         }
+        let mid_end = total.saturating_sub(60);
         out.push_str(&format!(
-            "\n... [SPAVN Precision Optimizer: omitted {} middle lines of {} total; pass start_line/end_line to inspect] ...\n\n",
-            slice.len() - 180,
-            total
+            "\n... [SPAVN Structural Outline of lines 101..{} ({} total lines) — pass start_line/end_line or path:N-M to read exact function body] ...\n",
+            mid_end, total
         ));
-        for (i, line) in slice.iter().enumerate().skip(slice.len() - 60) {
-            out.push_str(&format!("{:>4}: {}\n", s + i, line));
+        let mut collected_syms: Vec<(usize, &str)> = Vec::new();
+        for (idx, line) in lines.iter().enumerate().take(mid_end).skip(100) {
+            if is_structural_outline_line(line) {
+                collected_syms.push((idx + 1, line));
+            }
         }
+        let max_syms = 120usize;
+        if collected_syms.len() <= max_syms {
+            for (line_no, line) in collected_syms {
+                out.push_str(&format!("{:>4}: {}\n", line_no, line));
+            }
+        } else {
+            let total_syms = collected_syms.len();
+            for (i, (line_no, line)) in collected_syms.iter().enumerate() {
+                if i < 90 || i + 25 >= total_syms {
+                    out.push_str(&format!("{:>4}: {}\n", line_no, line));
+                } else if i == 90 {
+                    out.push_str(&format!(
+                        "  .. [{} middle symbols elided] ..\n",
+                        total_syms.saturating_sub(115)
+                    ));
+                }
+            }
+        }
+        out.push_str("... [End of Structural Outline; showing final 60 lines] ...\n\n");
+        for (i, line) in lines.iter().enumerate().skip(mid_end) {
+            out.push_str(&format!("{:>4}: {}\n", i + 1, line));
+        }
+        out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
         return out;
     }
 
     let mut out = String::new();
     for (i, line) in slice.iter().enumerate() {
         out.push_str(&format!("{:>4}: {}\n", s + i, line));
+    }
+    if e == total {
+        out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
+    } else if s == 1 && total > e + 30 {
+        let tail_start = total.saturating_sub(15).max(e);
+        out.push_str(&format!(
+            "... [Showing lines 1..{} of {} total; Structural Outline of {}..{} + final 15 lines below] ...\n",
+            e,
+            total,
+            e + 1,
+            tail_start
+        ));
+        for (idx, line) in lines.iter().enumerate().take(tail_start).skip(e) {
+            if is_structural_outline_line(line) {
+                out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+            }
+        }
+        out.push_str(&format!(
+            "... [Final lines {}..{}] ...\n",
+            tail_start + 1,
+            total
+        ));
+        for (idx, line) in lines.iter().enumerate().skip(tail_start) {
+            out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+        }
+        out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
+    } else {
+        out.push_str(&format!(
+            "... [Showing lines {}..{} of {} total]\n",
+            s, e, total
+        ));
     }
     out
 }
@@ -691,7 +885,8 @@ fn get_str_alias<'a>(args: &'a Value, keys: &[&str]) -> &'a str {
 }
 
 fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
-    let raw_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
+    let raw_input_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
+    let (raw_path, inline_start, inline_end) = split_inline_line_selector(raw_input_path);
     if let Err(blocked) = ctx.enforce_path(raw_path, false, "read") {
         return blocked;
     }
@@ -700,12 +895,20 @@ fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
         .or_else(|| args.get("offset"))
         .or_else(|| args.get("start"))
         .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .or(inline_start);
+    let limit_lines = args
+        .get("limit")
+        .or_else(|| args.get("num_lines"))
+        .and_then(|v| v.as_u64())
         .map(|v| v as usize);
     let end_line = args
         .get("end_line")
         .or_else(|| args.get("end"))
         .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
+        .map(|v| v as usize)
+        .or_else(|| limit_lines.map(|lim| start_line.unwrap_or(1).max(1) + lim.saturating_sub(1)))
+        .or(inline_end);
     if let Some((ssh_host, remote_path)) = split_remote_prefix(raw_path) {
         let quoted = shell_quote_remote_path(remote_path);
         let remote_cmd = format!(
@@ -812,6 +1015,239 @@ fn normalize_curly_quotes(s: &str) -> String {
         .replace("\r\n", "\n")
 }
 
+fn leading_ws_len(s: &str) -> usize {
+    s.bytes().take_while(|&b| b == b' ' || b == b'\t').count()
+}
+
+fn reindent_replacement_lines(
+    src_matched_lines: &[&str],
+    old_text: &str,
+    new_text: &str,
+) -> Vec<String> {
+    let src_indent = src_matched_lines
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| &l[..leading_ws_len(l)])
+        .unwrap_or("");
+    let old_indent_len = old_text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(leading_ws_len)
+        .unwrap_or(0);
+    let new_min_indent_len = new_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(leading_ws_len)
+        .min()
+        .unwrap_or(0);
+
+    // If the model dropped or shifted base indentation relative to the file's matched block,
+    // re-anchor every non-empty line in `new_text` to `src_indent` while preserving relative nesting!
+    let base_strip = if old_indent_len == 0 && new_min_indent_len == 0 && !src_indent.is_empty() {
+        Some(0usize)
+    } else if old_indent_len != src_indent.len() && old_indent_len == new_min_indent_len {
+        Some(old_indent_len)
+    } else {
+        None
+    };
+
+    new_text
+        .lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                String::new()
+            } else if let Some(strip_n) = base_strip {
+                let take_from = strip_n.min(leading_ws_len(l));
+                format!("{}{}", src_indent, &l[take_from..])
+            } else {
+                l.to_string()
+            }
+        })
+        .collect()
+}
+
+fn find_project_manifest_dir(file_path: &Path, manifest_name: &str) -> Option<PathBuf> {
+    let start_dir = if file_path.is_dir() {
+        file_path.to_path_buf()
+    } else {
+        file_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())?
+    };
+    let mut cur = start_dir.as_path();
+    for _ in 0..5 {
+        if cur.join(manifest_name).is_file() {
+            return Some(cur.to_path_buf());
+        }
+        match cur.parent() {
+            Some(parent) if parent != cur => cur = parent,
+            _ => break,
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join(manifest_name).is_file() {
+            return Some(cwd);
+        }
+    }
+    None
+}
+
+fn first_n_diagnostic_lines(out: &[u8], err: &[u8], max_lines: usize) -> String {
+    let err_str = String::from_utf8_lossy(err);
+    let out_str = String::from_utf8_lossy(out);
+    let combined = if err_str.trim().is_empty() {
+        out_str.trim().to_string()
+    } else if out_str.trim().is_empty() {
+        err_str.trim().to_string()
+    } else {
+        format!("{}\n{}", err_str.trim(), out_str.trim())
+    };
+    combined
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn build_live_project_signatures(cwd: &str) -> String {
+    let root = expand_tilde(cwd);
+    if !root.is_dir() {
+        return String::new();
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    fn collect_src_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 3 || out.len() >= 24 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= 24 {
+                break;
+            }
+            let p = entry.path();
+            let fname = entry.file_name();
+            let name = fname.to_string_lossy();
+            if name.starts_with('.')
+                || matches!(
+                    name.as_ref(),
+                    "target" | "node_modules" | "dist" | "build" | "vendor" | "__pycache__"
+                )
+            {
+                continue;
+            }
+            if p.is_dir() {
+                collect_src_files(&p, depth + 1, out);
+            } else if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                if matches!(ext, "rs" | "ts" | "tsx" | "py" | "go" | "js") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    collect_src_files(&root, 0, &mut files);
+    files.sort();
+    let mut summary = String::new();
+    let mut total_sigs = 0usize;
+    for f in files {
+        if total_sigs >= 65 || summary.len() >= 2400 {
+            break;
+        }
+        let Ok(text) = fs::read_to_string(&f) else {
+            continue;
+        };
+        let rel = f
+            .strip_prefix(&root)
+            .unwrap_or(&f)
+            .to_string_lossy()
+            .to_string();
+        let mut file_sigs = Vec::new();
+        for (idx, line) in text.lines().enumerate() {
+            if is_structural_outline_line(line) {
+                let clean = line.trim().trim_end_matches('{').trim();
+                file_sigs.push(format!("  L{}: {}", idx + 1, clean));
+                total_sigs += 1;
+                if file_sigs.len() >= 12 || total_sigs >= 65 {
+                    break;
+                }
+            }
+        }
+        if !file_sigs.is_empty() {
+            summary.push_str(&format!("{}:\n{}\n", rel, file_sigs.join("\n")));
+        }
+    }
+    summary
+}
+
+pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Option<String> {
+    for raw in modified_files {
+        if split_remote_prefix(raw).is_some() {
+            continue;
+        }
+        let path = expand_tilde(raw);
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if !matches!(ext, "rs" | "ts" | "tsx" | "py" | "go" | "js") {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(&path) {
+            for (idx, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") || trimmed.starts_with('#') {
+                    continue;
+                }
+                if (trimmed.contains("todo!()") || trimmed.contains("unimplemented!()"))
+                    && !trimmed.contains('"')
+                    && !trimmed.contains('\'')
+                {
+                    return Some(format!(
+                        "[SPAVN ZERO-STOP GATE]: File `{}` (line {}) still contains an unfinished placeholder (`{}`). Implement the complete production logic before finishing.",
+                        raw,
+                        idx + 1,
+                        trimmed
+                    ));
+                }
+            }
+        }
+    }
+
+    let root = expand_tilde(cwd);
+    if let Some(cargo_dir) = find_project_manifest_dir(&root, "Cargo.toml") {
+        let mut cmd = Command::new("cargo");
+        cmd.args(["check", "--message-format=short", "-q"])
+            .current_dir(&cargo_dir);
+        if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 15) {
+            if !timed_out && code != 0 {
+                let diag = first_n_diagnostic_lines(&out, &err, 20);
+                if !diag.is_empty() {
+                    return Some(format!(
+                        "[SPAVN ZERO-STOP COMPILER GATE]: `cargo check` failed with errors. Fix these compilation errors immediately before finishing:\n{}",
+                        diag
+                    ));
+                }
+            }
+        }
+    } else if let Some(ts_dir) = find_project_manifest_dir(&root, "tsconfig.json") {
+        let mut cmd = Command::new("tsc");
+        cmd.args(["--noEmit", "--pretty", "false"])
+            .current_dir(&ts_dir);
+        if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 12) {
+            if !timed_out && code != 0 {
+                let diag = first_n_diagnostic_lines(&out, &err, 20);
+                if !diag.is_empty() {
+                    return Some(format!(
+                        "[SPAVN ZERO-STOP COMPILER GATE]: `tsc --noEmit` failed with errors. Fix these type/syntax errors immediately before finishing:\n{}",
+                        diag
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn run_instant_syntax_check(raw_path: &str, content: &str) -> String {
     if split_remote_prefix(raw_path).is_some() {
         return String::new();
@@ -829,17 +1265,18 @@ fn run_instant_syntax_check(raw_path: &str, content: &str) -> String {
             ),
         },
         "py" => {
-            if let Ok(out) = Command::new("python3")
-                .args(["-m", "py_compile", &path.to_string_lossy()])
-                .output()
-            {
-                if out.status.success() {
+            let mut cmd = Command::new("python3");
+            cmd.args(["-m", "py_compile", &path.to_string_lossy()]);
+            if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 8) {
+                if timed_out {
+                    String::new()
+                } else if code == 0 {
                     " [Syntax Check: Python OK]".to_string()
                 } else {
                     format!(
                         "\n[AUTO-DIAGNOSTIC ERROR in {}]:\n{}",
                         raw_path,
-                        String::from_utf8_lossy(&out.stderr).trim()
+                        first_n_diagnostic_lines(&out, &err, 15)
                     )
                 }
             } else {
@@ -847,17 +1284,18 @@ fn run_instant_syntax_check(raw_path: &str, content: &str) -> String {
             }
         }
         "js" | "mjs" | "cjs" => {
-            if let Ok(out) = Command::new("node")
-                .args(["--check", &path.to_string_lossy()])
-                .output()
-            {
-                if out.status.success() {
+            let mut cmd = Command::new("node");
+            cmd.args(["--check", &path.to_string_lossy()]);
+            if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 8) {
+                if timed_out {
+                    String::new()
+                } else if code == 0 {
                     " [Syntax Check: JS OK]".to_string()
                 } else {
                     format!(
                         "\n[AUTO-DIAGNOSTIC ERROR in {}]:\n{}",
                         raw_path,
-                        String::from_utf8_lossy(&out.stderr).trim()
+                        first_n_diagnostic_lines(&out, &err, 15)
                     )
                 }
             } else {
@@ -875,14 +1313,80 @@ fn run_instant_syntax_check(raw_path: &str, content: &str) -> String {
                     format!(
                         "\n[AUTO-DIAGNOSTIC ERROR in {}]:\n{}",
                         raw_path,
-                        String::from_utf8_lossy(&out.stderr).trim()
+                        first_n_diagnostic_lines(&out.stdout, &out.stderr, 15)
                     )
                 }
             } else {
                 String::new()
             }
         }
-        "rs" | "ts" | "tsx" | "go" | "swift" => {
+        "rs" => {
+            let open_braces = content.matches('{').count();
+            let close_braces = content.matches('}').count();
+            let brace_note = if open_braces != close_braces {
+                format!(
+                    "\n[AUTO-DIAGNOSTIC WARNING in {}: Brace count mismatch ('{{': {}, '}}': {}) — verify block closure]",
+                    raw_path, open_braces, close_braces
+                )
+            } else {
+                " [Syntax Check: RS Braces Balanced]".to_string()
+            };
+            if let Some(cargo_dir) = find_project_manifest_dir(&path, "Cargo.toml") {
+                let mut cmd = Command::new("cargo");
+                cmd.args(["check", "--message-format=short", "-q"])
+                    .current_dir(&cargo_dir);
+                if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 12) {
+                    if !timed_out {
+                        if code == 0 {
+                            return format!("{} [Compiler Check: cargo check OK]", brace_note);
+                        } else {
+                            let diag = first_n_diagnostic_lines(&out, &err, 15);
+                            if !diag.is_empty() {
+                                return format!(
+                                    "{}\n[AUTO-DIAGNOSTIC COMPILER ERROR in {}]:\n{}",
+                                    brace_note, raw_path, diag
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            brace_note
+        }
+        "ts" | "tsx" => {
+            let open_braces = content.matches('{').count();
+            let close_braces = content.matches('}').count();
+            let brace_note = if open_braces != close_braces {
+                format!(
+                    "\n[AUTO-DIAGNOSTIC WARNING in {}: Brace count mismatch ('{{': {}, '}}': {}) — verify block closure]",
+                    raw_path, open_braces, close_braces
+                )
+            } else {
+                format!(" [Syntax Check: {} Braces Balanced]", ext.to_uppercase())
+            };
+            if let Some(ts_dir) = find_project_manifest_dir(&path, "tsconfig.json") {
+                let mut cmd = Command::new("tsc");
+                cmd.args(["--noEmit", "--pretty", "false"])
+                    .current_dir(&ts_dir);
+                if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 10) {
+                    if !timed_out {
+                        if code == 0 {
+                            return format!("{} [Compiler Check: tsc OK]", brace_note);
+                        } else {
+                            let diag = first_n_diagnostic_lines(&out, &err, 15);
+                            if !diag.is_empty() {
+                                return format!(
+                                    "{}\n[AUTO-DIAGNOSTIC COMPILER ERROR in {}]:\n{}",
+                                    brace_note, raw_path, diag
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            brace_note
+        }
+        "go" | "swift" => {
             let open_braces = content.matches('{').count();
             let close_braces = content.matches('}').count();
             if open_braces != close_braces {
@@ -1053,8 +1557,9 @@ fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
             for l in &src_lines[..start_idx] {
                 new_lines.push((*l).to_string());
             }
-            for l in new_text.lines() {
-                new_lines.push(l.to_string());
+            let matched_slice = &src_lines[start_idx..start_idx + needle_lines.len()];
+            for l in reindent_replacement_lines(matched_slice, old_text, new_text) {
+                new_lines.push(l);
             }
             for l in &src_lines[start_idx + needle_lines.len()..] {
                 new_lines.push((*l).to_string());
@@ -1139,8 +1644,9 @@ fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 for l in &src_lines[..first_src_line] {
                     new_lines.push((*l).to_string());
                 }
-                for l in new_text.lines() {
-                    new_lines.push(l.to_string());
+                let matched_slice = &src_lines[first_src_line..=last_src_line];
+                for l in reindent_replacement_lines(matched_slice, old_text, new_text) {
+                    new_lines.push(l);
                 }
                 for l in &src_lines[last_src_line + 1..] {
                     new_lines.push((*l).to_string());
@@ -1348,6 +1854,27 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
     } else {
         let mut c = Command::new(crate::config::shell_bin());
         c.args(["-c", command]);
+        let home = home_dir();
+        let extra_dirs = [
+            home.join(".cargo/bin"),
+            home.join(".local/bin"),
+            home.join("bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ];
+        let cur_path = std::env::var("PATH").unwrap_or_default();
+        let mut path_parts: Vec<String> = extra_dirs
+            .iter()
+            .filter(|d| d.is_dir())
+            .map(|d| d.to_string_lossy().to_string())
+            .filter(|s| !cur_path.split(':').any(|p| p == s))
+            .collect();
+        if !cur_path.is_empty() {
+            path_parts.push(cur_path);
+        }
+        if !path_parts.is_empty() {
+            c.env("PATH", path_parts.join(":"));
+        }
         if let Some(dir) = cwd {
             let expanded = expand_tilde(dir);
             if expanded.exists() {
@@ -1745,10 +2272,12 @@ fn strip_html_to_clean_text(html: &str) -> String {
 }
 
 fn call_exa_mcp(tool_name: &str, arguments: Value) -> Option<String> {
-    let endpoint = match std::env::var("EXA_API_KEY") {
-        Ok(k) if !k.trim().is_empty() => format!("https://mcp.exa.ai/mcp?exaApiKey={}", k.trim()),
-        _ => "https://mcp.exa.ai/mcp".to_string(),
-    };
+    // Key goes in a header (documented by Exa), never in the URL where logs and proxies keep it.
+    let api_key = std::env::var("EXA_API_KEY").unwrap_or_default();
+    let mut headers = vec![("Accept", "application/json, text/event-stream")];
+    if !api_key.trim().is_empty() {
+        headers.push(("x-api-key", api_key.trim()));
+    }
     let payload = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -1758,13 +2287,9 @@ fn call_exa_mcp(tool_name: &str, arguments: Value) -> Option<String> {
             "arguments": arguments
         }
     });
-    let (status, raw) = crate::http::post_json(
-        &endpoint,
-        &payload.to_string(),
-        &[("Accept", "application/json, text/event-stream")],
-        15,
-    )
-    .ok()?;
+    let (status, raw) =
+        crate::http::post_json("https://mcp.exa.ai/mcp", &payload.to_string(), &headers, 15)
+            .ok()?;
     if !(200..300).contains(&status) {
         return None;
     }
@@ -1973,5 +2498,80 @@ mod phase_tests {
         assert!(!names.contains(&"edit"));
         assert!(!names.contains(&"write"));
         assert!(!names.contains(&"bash"));
+    }
+
+    #[test]
+    fn reindent_replacement_preserves_file_base_indent_and_nesting() {
+        let matched = ["        if cond {", "            do_a();", "        }"];
+        let old_text = "if cond {\n    do_a();\n}";
+        let new_text = "if cond {\n    do_b();\n}";
+        let out = super::reindent_replacement_lines(&matched, old_text, new_text);
+        assert_eq!(
+            out,
+            vec![
+                "        if cond {".to_string(),
+                "            do_b();".to_string(),
+                "        }".to_string()
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn timeout_kills_grandchildren_and_does_not_hang() {
+        let mut c = Command::new("sh");
+        c.args(["-c", "sleep 30 & sleep 30"]);
+        let t = std::time::Instant::now();
+        let (_, _, _, timed_out) = run_command_with_timeout(c, 1).unwrap();
+        assert!(timed_out && t.elapsed().as_secs() < 5);
+    }
+
+    #[test]
+    fn signal_exit_is_nonzero() {
+        let mut c = Command::new("sh");
+        c.args(["-c", "kill -9 $$"]);
+        assert_eq!(run_command_with_timeout(c, 5).unwrap().0, 137);
+    }
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn keeps_mode_follows_symlink_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("spavn-atomic-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("run.sh");
+        fs::write(&real, "old").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.join("link.sh");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(
+            fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            2,
+            "temp file left behind"
+        );
+        let fresh = dir.join("new.txt");
+        write_atomic(&fresh, "x").unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "x");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -16,6 +16,7 @@ static LAST_TERM_ROWS: AtomicUsize = AtomicUsize::new(0);
 static LAST_TERM_COLS: AtomicUsize = AtomicUsize::new(0);
 static STICKY_DOCK_STATUS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 static SPINNER_PAUSED: AtomicBool = AtomicBool::new(false);
+static IDLE_RECAP_ENABLED: AtomicBool = AtomicBool::new(true);
 static USED_CONTEXT_TOKENS: AtomicUsize = AtomicUsize::new(1_200);
 static MAX_CONTEXT_TOKENS: AtomicUsize = AtomicUsize::new(200_000);
 static STREAM_EXTRA_TOKENS: AtomicUsize = AtomicUsize::new(0);
@@ -24,6 +25,110 @@ pub fn set_context_window_usage(used_tokens: usize, max_tokens: usize) {
     USED_CONTEXT_TOKENS.store(used_tokens, Ordering::Relaxed);
     MAX_CONTEXT_TOKENS.store(max_tokens.max(1), Ordering::Relaxed);
     STREAM_EXTRA_TOKENS.store(0, Ordering::Relaxed);
+}
+
+pub fn toggle_idle_recap() -> bool {
+    let prev = IDLE_RECAP_ENABLED.load(Ordering::Relaxed);
+    let next = !prev;
+    IDLE_RECAP_ENABLED.store(next, Ordering::Relaxed);
+    next
+}
+
+pub fn set_idle_recap(enabled: bool) -> bool {
+    IDLE_RECAP_ENABLED.store(enabled, Ordering::Relaxed);
+    enabled
+}
+
+pub fn is_idle_recap_enabled() -> bool {
+    IDLE_RECAP_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn build_session_recap_line(
+    messages: &[crate::router::ChatMessage],
+    max_cols: usize,
+) -> Option<String> {
+    let mut last_user = String::new();
+    let mut last_assistant = String::new();
+    let mut turn_count = 0usize;
+
+    for m in messages.iter().skip(1) {
+        if m.role == "user" {
+            if let Some(ref raw) = m.content {
+                if raw.starts_with("[SPAVN VERIFICATION GATE]")
+                    || raw.starts_with("[SPAVN Auto-Compact")
+                    || raw.starts_with("[LIVE USER STEERING")
+                {
+                    continue;
+                }
+                let cleaned = strip_internal_tags_for_display(raw);
+                let flat = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !flat.is_empty() {
+                    last_user = flat;
+                    turn_count += 1;
+                }
+            }
+        } else if m.role == "assistant" {
+            if let Some(ref raw) = m.content {
+                let first_meaningful = raw
+                    .lines()
+                    .map(|l| {
+                        l.trim()
+                            .trim_start_matches(['#', '-', '*', '>', '•'])
+                            .trim()
+                    })
+                    .find(|l| !l.is_empty() && !l.starts_with("```"))
+                    .unwrap_or("");
+                let clean_inline = first_meaningful.replace(['*', '`'], "");
+                let flat = clean_inline
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !flat.is_empty() {
+                    last_assistant = flat;
+                }
+            }
+        }
+    }
+
+    if last_user.is_empty() && last_assistant.is_empty() {
+        return None;
+    }
+
+    let summary = if !last_user.is_empty() && !last_assistant.is_empty() {
+        let u_short: String = last_user.chars().take(38).collect();
+        let u_disp = if last_user.chars().count() > 38 {
+            format!("{}…", u_short)
+        } else {
+            u_short
+        };
+        format!(
+            "\"{}\"{} → {}",
+            u_disp,
+            if turn_count > 1 {
+                format!(" (#{})", turn_count)
+            } else {
+                String::new()
+            },
+            last_assistant
+        )
+    } else if !last_assistant.is_empty() {
+        last_assistant
+    } else {
+        format!("\"{}\"", last_user)
+    };
+
+    let prefix = format!(
+        "{}│{}  {}※ {}:{} {}",
+        CYAN,
+        RESET,
+        MAGENTA,
+        tr_en("recap", "recap"),
+        RESET,
+        DIM
+    );
+    let raw_line = format!("{}{}{}", prefix, summary, RESET);
+    let (trunc, _) = truncate_ansi_to_width(&raw_line, max_cols.saturating_sub(2).max(16));
+    Some(format!("{}{}", trunc, RESET))
 }
 
 pub fn update_max_context_window(max_tokens: usize) {
@@ -62,9 +167,9 @@ pub fn format_token_short(tokens: usize) -> String {
     } else if tokens == 65_536 {
         "64k".to_string()
     } else if tokens == 131_072 {
-        "128k".to_string()
+        "131k".to_string()
     } else if tokens == 262_144 {
-        "256k".to_string()
+        "262k".to_string()
     } else if tokens >= 1_000 {
         let k = tokens as f64 / 1_000.0;
         if k >= 100.0 || (k - k.round()).abs() < 0.05 {
@@ -151,6 +256,7 @@ struct SpinnerScreenState {
     active: bool,
     paused: bool,
     label: String,
+    started_at: Option<Instant>,
     dock_lines: [String; 3],
     partial_line: String,
     partial_prefix: String,
@@ -167,6 +273,7 @@ static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
         active: false,
         paused: false,
         label: String::new(),
+        started_at: None,
         dock_lines: [String::new(), String::new(), String::new()],
         partial_line: String::new(),
         partial_prefix: String::new(),
@@ -177,6 +284,122 @@ static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
         is_typing: false,
         steer_mode: None,
     });
+
+fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, cols: usize) {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let max_w = cols.saturating_sub(6).max(20);
+    let elapsed = state
+        .started_at
+        .map(|s| s.elapsed().as_secs_f32())
+        .unwrap_or(0.0);
+    let frame_idx = ((elapsed * 12.5) as usize) % FRAMES.len();
+    let steer_mode = state.steer_mode.unwrap_or(false);
+    let mode_tag = if steer_mode {
+        format!(
+            "{}⚡{}{}",
+            YELLOW,
+            tr_en("Anında Müdahale", "Live Steer"),
+            RESET
+        )
+    } else {
+        format!("{}📥{}{}", GREEN, tr_en("Sıraya Al", "Queue"), RESET)
+    };
+    let q_cnt = crate::queued_message_count();
+    let s_cnt = crate::steer_message_count();
+    let queue_status = if s_cnt > 0 {
+        format!(
+            " {}│{} {}⚡ {} {}{}",
+            CYAN,
+            RESET,
+            YELLOW,
+            s_cnt,
+            tr_en("müdahale hazır", "steer ready"),
+            RESET
+        )
+    } else if q_cnt > 0 {
+        format!(
+            " {}│{} {}📥 {} {}{}",
+            CYAN,
+            RESET,
+            GREEN,
+            q_cnt,
+            tr_en("kuyrukta", "queued"),
+            RESET
+        )
+    } else {
+        String::new()
+    };
+
+    let top_raw = format!(
+        "{} {}│{} {}{}{} {} ({:.1}s){}",
+        status_hdr, CYAN, RESET, CYAN, FRAMES[frame_idx], RESET, state.label, elapsed, queue_status
+    );
+    let (top_line, _) = truncate_ansi_to_width(&top_raw, max_w);
+    let has_typed = state.is_typing || !state.typing_buf.is_empty();
+    let mid_raw = if has_typed {
+        let avail_cols = max_w.saturating_sub(7).max(10);
+        let mut tail_chars: Vec<char> = Vec::new();
+        let mut used_w = 0usize;
+        let mut truncated_left = false;
+        for &ch in state.typing_buf.iter().rev() {
+            let cw = char_display_width(ch).max(1);
+            if used_w + cw > avail_cols {
+                truncated_left = true;
+                break;
+            }
+            used_w += cw;
+            tail_chars.push(ch);
+        }
+        tail_chars.reverse();
+        let visible_typed: String = tail_chars.into_iter().collect();
+        let ellipsis = if truncated_left { "…" } else { "" };
+        format!(
+            "{}│{} {}❯{} {}{}{}{}█{}",
+            CYAN, RESET, BOLD, RESET, DIM, ellipsis, RESET, visible_typed, CYAN
+        ) + RESET
+    } else {
+        format!(
+            "{}│{} {}❯{} {}{}{}",
+            CYAN,
+            RESET,
+            BOLD,
+            RESET,
+            DIM,
+            tr_en(
+                "Mesaj yazın (işlem sürerken anında gönderin veya sıraya alın)...",
+                "Type a message (send immediately to steer or queue for next turn)..."
+            ),
+            RESET
+        )
+    };
+    let (mid_line, _) = truncate_ansi_to_width(&mid_raw, max_w);
+    let esc_hint = if has_typed {
+        tr_en(
+            "Tab: Mod · Esc/Ctrl+U: Metni Sil",
+            "Tab: Mode · Esc/Ctrl+U: Clear Text",
+        )
+    } else {
+        tr_en(
+            "Tab: Mod Değiştir · Esc: İptal",
+            "Tab: Toggle Mode · Esc: Cancel",
+        )
+    };
+    let bot_raw = format!(
+        "{}╰─{} {} {}·{} {}{} ({}) · {}{}",
+        CYAN,
+        RESET,
+        format_context_usage_badge(),
+        DIM,
+        RESET,
+        DIM,
+        tr_en("Enter: Gönder", "Enter: Send"),
+        mode_tag,
+        esc_hint,
+        RESET
+    );
+    let (bot_line, _) = truncate_ansi_to_width(&bot_raw, max_w);
+    state.dock_lines = [top_line, mid_line, bot_line];
+}
 
 fn in_incomplete_ansi(s: &str) -> bool {
     if let Some(pos) = s.rfind('\x1b') {
@@ -196,12 +419,22 @@ fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
         return;
     }
     let (_, cols) = term_size();
-    let max_w = cols.saturating_sub(4).max(20);
-    let prev_lines = if state.partial_shown { 4 } else { 3 };
-    let mut out = format!("\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[{}A\r\x1b[J", prev_lines);
-
+    let max_w = cols.saturating_sub(6).max(20);
+    let status_hdr = get_sticky_dock_status();
+    rebuild_spinner_dock_lines(state, &status_hdr, cols);
+    let mut out = String::from("\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J");
     for ch in text.chars() {
+        if ch == '\r' {
+            continue;
+        }
         if ch == '\n' {
+            if state.thinking_box_open
+                && !state.partial_prefix.is_empty()
+                && state.partial_line == state.partial_prefix
+            {
+                state.partial_line.clear();
+                continue;
+            }
             out.push_str("\x1b[?7h");
             out.push_str(&state.partial_line);
             out.push_str("\x1b[0m\n");
@@ -210,10 +443,20 @@ fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
             state.partial_line.push(ch);
             if !in_incomplete_ansi(&state.partial_line) {
                 let (_, vw) = truncate_ansi_to_width(&state.partial_line, usize::MAX);
-                if (ch == ' ' && vw >= max_w.saturating_sub(10)) || vw >= max_w {
+                let is_table_box_line = !state.thinking_box_open
+                    && (state.partial_line.contains('│')
+                        || state.partial_line.contains('╭')
+                        || state.partial_line.contains('├')
+                        || state.partial_line.contains('╰'));
+                let should_wrap = if is_table_box_line {
+                    vw >= cols.saturating_sub(2).max(20)
+                } else {
+                    (ch == ' ' && vw >= max_w.saturating_sub(10)) || vw >= max_w
+                };
+                if should_wrap {
                     out.push_str("\x1b[?7h");
                     out.push_str(&state.partial_line);
-                    out.push('\n');
+                    out.push_str("\x1b[0m\n");
                     state.partial_line.clear();
                     if !state.partial_prefix.is_empty() {
                         state.partial_line.push_str(&state.partial_prefix);
@@ -226,17 +469,19 @@ fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
     }
 
     out.push_str("\x1b[?7l");
-    if !state.partial_line.is_empty() {
+    let up_rows = if !state.partial_line.is_empty() {
         let (preview, _) = truncate_ansi_to_width(&state.partial_line, max_w);
         out.push_str(&preview);
         out.push_str("\x1b[0m\n");
         state.partial_shown = true;
+        3usize
     } else {
         state.partial_shown = false;
-    }
+        2usize
+    };
     out.push_str(&format!(
-        "{}\n{}\n{}\n\x1b[?7h\x1b[?2026l",
-        state.dock_lines[0], state.dock_lines[1], state.dock_lines[2]
+        "{}\n{}\n{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
+        state.dock_lines[0], state.dock_lines[1], state.dock_lines[2], up_rows
     ));
     print!("{}", out);
     let _ = io::stdout().flush();
@@ -249,21 +494,9 @@ fn close_thinking_box_locked(state: &mut SpinnerScreenState) {
         let pfx = std::mem::take(&mut state.partial_prefix);
         if !pfx.is_empty() && state.partial_line == pfx {
             state.partial_line.clear();
-            spinner_print_locked(
-                state,
-                &format!(
-                    "{}╰────────────────────────────────────────────────────────────{}\n",
-                    DIM, RESET
-                ),
-            );
+            spinner_print_locked(state, &format!("{}╰─{}\n", DIM, RESET));
         } else {
-            spinner_print_locked(
-                state,
-                &format!(
-                    "\n{}╰────────────────────────────────────────────────────────────{}\n",
-                    DIM, RESET
-                ),
-            );
+            spinner_print_locked(state, &format!("\n{}╰─{}\n", DIM, RESET));
         }
     }
 }
@@ -298,7 +531,7 @@ pub fn stream_thinking_delta(think_delta: &str, show_thinking: bool) {
                 state.thinking_box_open = true;
                 state.partial_prefix = format!("{}{}│ ", DIM, CYAN);
                 let hdr = format!(
-                    "{}╭─ 💭 {} ─────────────────────────────────────────{}\n{}{}│ ",
+                    "{}╭─ 💭 {}{}\n{}{}│ ",
                     DIM,
                     tr_en("Düşünce Akışı", "Thinking Stream"),
                     RESET,
@@ -341,8 +574,7 @@ pub fn pause_active_spinner() {
         if let Ok(mut state) = SPINNER_SCREEN.lock() {
             if state.active && !state.paused {
                 state.paused = true;
-                let prev_lines = if state.partial_shown { 4 } else { 3 };
-                let mut out = format!("\x1b[?2026h\x1b[?7l\x1b[{}A\r\x1b[J", prev_lines);
+                let mut out = String::from("\x1b[?2026h\x1b[?7l\r\x1b[J");
                 if !state.partial_line.is_empty() {
                     out.push_str("\x1b[?7h");
                     out.push_str(&state.partial_line);
@@ -365,7 +597,7 @@ pub fn resume_active_spinner() {
                 state.paused = false;
                 state.partial_shown = false;
                 print!(
-                    "\x1b[?2026h\x1b[?25l\x1b[?7l{}\n{}\n{}\n\x1b[?7h\x1b[?2026l",
+                    "\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J{}\n{}\n{}\x1b[2A\r\x1b[?7h\x1b[?2026l",
                     state.dock_lines[0], state.dock_lines[1], state.dock_lines[2]
                 );
                 let _ = io::stdout().flush();
@@ -379,7 +611,7 @@ pub fn set_sticky_dock_status(
     access: AccessMode,
     phase: &crate::spavn_engine::AgentPhase,
     default_host: &str,
-    quota_badge: &str,
+    _quota_badge: &str,
 ) {
     update_max_context_window(endpoint.context_window_tokens());
     let access_color = match access {
@@ -396,9 +628,8 @@ pub fn set_sticky_dock_status(
     } else {
         format!("🧠 {}{}{}", GREEN, endpoint.key, RESET)
     };
-    let eff_quota = effective_quota_badge(endpoint, quota_badge);
     let line = format!(
-        "{}╭─{} {}{}{}{} {}│{} {}{}{} {}│{} {} {}│{} 🖥️  {}{}{} {}│{} {}",
+        "{}╭─{} {}{}{}{} {}│{} {}{}{} {}│{} {} {}│{} 🖥️  {}{}{}",
         CYAN,
         RESET,
         BOLD,
@@ -417,10 +648,7 @@ pub fn set_sticky_dock_status(
         RESET,
         MAGENTA,
         default_host,
-        RESET,
-        CYAN,
-        RESET,
-        eff_quota
+        RESET
     );
     if let Ok(mut guard) = STICKY_DOCK_STATUS.lock() {
         *guard = Some(line);
@@ -588,6 +816,17 @@ const ICANON: TcFlag = 0x0000_0002;
 const ECHO: TcFlag = 0x0000_0008;
 const TCSANOW: i32 = 0;
 
+/// Restores the saved termios on drop, so a missed return path or a panic never leaves the tty raw.
+struct TermiosGuard(Termios);
+
+impl Drop for TermiosGuard {
+    fn drop(&mut self) {
+        unsafe {
+            tcsetattr(0, TCSANOW, &self.0);
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 const VMIN_IDX: usize = 16;
 #[cfg(target_os = "macos")]
@@ -655,6 +894,13 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                 tr_en("/local (Yerel Modeller)", "/local (Local Models)"),
             ),
             (
+                "/bench",
+                tr_en(
+                    "/bench (Model Hız & Tool-Call Testi)",
+                    "/bench (Model Speed & Tool-Call Benchmark)",
+                ),
+            ),
+            (
                 "/queue",
                 tr_en(
                     "/queue (Mesaj Kuyruğu & Gönderim Modu)",
@@ -672,6 +918,13 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                 "/resume",
                 tr_en("/resume (Geçmiş Oturumlar)", "/resume (Recent Sessions)"),
             ),
+            (
+                "/recap",
+                tr_en(
+                    "/recap (Oturum Özeti & Idle Recap Aç/Kapat)",
+                    "/recap (Session Recap & Toggle Idle Recap)",
+                ),
+            ),
             ("/new", tr_en("/new (Yeni Oturum)", "/new (New Session)")),
             (
                 "/fork",
@@ -680,6 +933,20 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
             (
                 "/role",
                 tr_en("/role (Uzmanlık Rolü Seç)", "/role (Select Agent Role)"),
+            ),
+            (
+                "/plan",
+                tr_en(
+                    "/plan (📐 Salt-Okunur Tasarım Fazı)",
+                    "/plan (📐 Read-Only Plan Phase)",
+                ),
+            ),
+            (
+                "/code",
+                tr_en(
+                    "/code (💻 Kodlama & Uygulama Fazı)",
+                    "/code (💻 Coding & Execution Phase)",
+                ),
             ),
             (
                 "/janitor",
@@ -827,6 +1094,54 @@ pub fn flex_wrap_items(
     lines
 }
 
+fn wrap_input_lines_with_cursor(
+    chars: &[char],
+    cursor_pos: usize,
+    max_line_cols: usize,
+) -> (Vec<String>, usize, usize) {
+    let cap = max_line_cols.max(8);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur_line = String::new();
+    let mut cur_w = 0usize;
+    let mut cursor_row = 0usize;
+    let mut cursor_col_offset = 0usize;
+    let mut cursor_recorded = false;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if i == cursor_pos {
+            cursor_row = lines.len();
+            cursor_col_offset = cur_w;
+            cursor_recorded = true;
+        }
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut cur_line));
+            cur_w = 0;
+            continue;
+        }
+        let w = char_display_width(ch).max(1);
+        if cur_w + w > cap && !cur_line.is_empty() {
+            lines.push(std::mem::take(&mut cur_line));
+            cur_w = 0;
+            if i == cursor_pos {
+                cursor_row = lines.len();
+                cursor_col_offset = 0;
+            }
+        }
+        cur_line.push(ch);
+        cur_w += w;
+    }
+
+    if !cursor_recorded {
+        cursor_row = lines.len();
+        cursor_col_offset = cur_w;
+    }
+    lines.push(cur_line);
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    (lines, cursor_row, cursor_col_offset)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_inline_dock(
     endpoint: &ModelEndpoint,
@@ -834,12 +1149,13 @@ fn render_inline_dock(
     phase: &crate::spavn_engine::AgentPhase,
     default_host: &str,
     quota_badge: &str,
-    visible_input: &str,
-    cursor_display_offset: usize,
+    input_chars: &[char],
+    cursor_pos: usize,
     suggestions: &[(String, String)],
     selected_idx: Option<usize>,
     queued_count: usize,
     busy_mode: &str,
+    recap_line: Option<&str>,
     prev_top_w: &mut usize,
     prev_cursor_col: &mut usize,
     cols: usize,
@@ -885,18 +1201,39 @@ fn render_inline_dock(
     let top_prefix_first = format!("{}╭─{} ", CYAN, RESET);
     let top_prefix_cont = format!("{}│{}  ", CYAN, RESET);
     let top_sep = format!(" {}│{} ", CYAN, RESET);
-    let top_lines = flex_wrap_items(
+    let mut top_lines = flex_wrap_items(
         &top_prefix_first,
         &top_prefix_cont,
         &top_sep,
         &status_items,
         full_w,
     );
+    if let Some(recap) = recap_line {
+        if input_chars.is_empty() && suggestions.is_empty() {
+            top_lines.push(recap.to_string());
+        }
+    }
     let top_count = top_lines.len().max(1);
     let top_joined = top_lines.join("\n");
 
-    let raw_input = format!("{}│{} {}❯{} {}", CYAN, RESET, BOLD, RESET, visible_input);
-    let (trunc_input, _) = truncate_ansi_to_width(&raw_input, full_w);
+    let max_input_cols = full_w.saturating_sub(5).max(8);
+    let (wrapped_input_lines, cursor_row, cursor_col_offset) =
+        wrap_input_lines_with_cursor(input_chars, cursor_pos, max_input_cols);
+    let formatted_input_lines: Vec<String> = wrapped_input_lines
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            let raw = if idx == 0 {
+                format!("{}│{} {}❯{} {}", CYAN, RESET, BOLD, RESET, line)
+            } else {
+                format!("{}│{}   {}", CYAN, RESET, line)
+            };
+            let (trunc, _) = truncate_ansi_to_width(&raw, full_w);
+            trunc
+        })
+        .collect();
+    let input_joined = formatted_input_lines.join("\n");
+    let input_line_count = formatted_input_lines.len().max(1);
 
     let bot_prefix_first = format!("{}╰─{} ", CYAN, RESET);
     let bot_prefix_cont = "   ".to_string();
@@ -936,6 +1273,7 @@ fn render_inline_dock(
                 tr_en("Shift+Tab: Yetki", "Shift+Tab: Access"),
                 RESET
             ),
+            format!("{}{}{}", DIM, tr_en("\\: Faz", "\\: Phase"), RESET),
             format!("{}{}{}", DIM, tr_en("Esc: Sil", "Esc: Clear"), RESET),
         ];
         flex_wrap_items(
@@ -951,18 +1289,19 @@ fn render_inline_dock(
     let bottom_joined = bottom_lines.join("\n");
 
     let up_to_start = (*prev_top_w).max(1);
-    let cursor_col = (5 + cursor_display_offset).min(full_w);
+    let cursor_col = (5 + cursor_col_offset).min(full_w);
+    let lines_below_cursor = bottom_count + input_line_count.saturating_sub(1 + cursor_row);
     print!(
         "\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[{}A\r\x1b[J{}\n{}\n{}\x1b[?7h\x1b[{}A\r\x1b[{}G\x1b[?25h\x1b[?2026l",
         up_to_start,
         top_joined,
-        trunc_input,
+        input_joined,
         bottom_joined,
-        bottom_count,
+        lines_below_cursor,
         cursor_col
     );
     let _ = io::stdout().flush();
-    *prev_top_w = top_count;
+    *prev_top_w = top_count + cursor_row;
     *prev_cursor_col = cursor_col;
 }
 
@@ -974,30 +1313,33 @@ fn erase_inline_dock(prev_top_w: usize, _prev_cursor_col: usize) {
 
 pub fn strip_internal_tags_for_display(raw: &str) -> String {
     let mut s = raw.trim();
-    while let Some(start) = s.find("<spavn_knowledge_artifacts>") {
-        if let Some(end) = s[start..].find("</spavn_knowledge_artifacts>") {
-            s = s[start + end + "</spavn_knowledge_artifacts>".len()..].trim();
-        } else {
-            break;
+    loop {
+        if let Some(start) = s.find("<spavn_knowledge_artifacts>") {
+            if let Some(end) = s[start..].find("</spavn_knowledge_artifacts>") {
+                s = s[start + end + "</spavn_knowledge_artifacts>".len()..].trim();
+                continue;
+            }
         }
-    }
-    while let Some(start) = s.find("<active_skill") {
-        if let Some(end) = s[start..].find("</active_skill>") {
-            s = s[start + end + "</active_skill>".len()..].trim();
-        } else {
-            break;
+        if let Some(start) = s.find("<active_skill") {
+            if let Some(end) = s[start..].find("</active_skill>") {
+                s = s[start + end + "</active_skill>".len()..].trim();
+                continue;
+            }
         }
-    }
-    if s.starts_with("[SPAVN ROLE:") {
-        if let Some(nl) = s.find("\n\n") {
-            s = s[nl + 2..].trim();
-        } else if let Some(nl) = s.find('\n') {
-            s = s[nl + 1..].trim();
+        if s.starts_with("[SPAVN ROLE:") || s.starts_with("[SPAVN PHASE:") {
+            if let Some(nl) = s.find("\n\n") {
+                s = s[nl + 2..].trim();
+                continue;
+            } else if let Some(nl) = s.find('\n') {
+                s = s[nl + 1..].trim();
+                continue;
+            }
         }
+        break;
     }
     s.to_string()
 }
-
+#[allow(dead_code)]
 pub fn redraw_full_viewport(
     endpoint: &ModelEndpoint,
     access: AccessMode,
@@ -1058,6 +1400,7 @@ pub fn redraw_full_viewport(
             println!("{}╰─{}", CYAN, RESET);
         }
     }
+    print!("\x1b[?25h\x1b[?2026l");
     let _ = io::stdout().flush();
 }
 
@@ -1079,8 +1422,8 @@ pub fn read_bottom_dock_input(
     quota_badge: &str,
     history: &[String],
     initial_prefill: Option<&str>,
-    cwd: &str,
-    session_name: &str,
+    _cwd: &str,
+    _session_name: &str,
     messages: &[crate::router::ChatMessage],
 ) -> PromptEvent {
     let mut orig_termios = empty_termios();
@@ -1094,6 +1437,7 @@ pub fn read_bottom_dock_input(
         return PromptEvent::Submit(line.trim().to_string());
     }
 
+    let _term_guard = TermiosGuard(orig_termios);
     let mut raw = orig_termios;
     raw.c_lflag &= !(ICANON | ECHO);
     raw.c_cc[VMIN_IDX] = 0;
@@ -1101,21 +1445,24 @@ pub fn read_bottom_dock_input(
     unsafe {
         tcsetattr(0, TCSANOW, &raw);
     }
-    print!("\x1b[?2004l\n\n\n\n\x1b[2A\r");
+    print!("\x1b[?2004h\n\n\n\n\x1b[2A\r");
     let _ = io::stdout().flush();
 
     let mut chars: Vec<char> = initial_prefill.unwrap_or("").chars().collect();
     let mut cursor_pos: usize = chars.len();
     let mut hist_idx = history.len();
     let mut suggestion_idx: Option<usize> = None;
-    let mut kbuf = [0u8; 1024];
+    let mut kbuf = [0u8; 4096];
+    let mut in_paste = false;
+    let _ = crate::take_resized();
     let (mut last_rows, mut last_cols) = term_size();
     let mut needs_redraw = true;
     let mut full_resize_pending = false;
     let busy_mode = load_user_config().busy_input_mode;
     let mut prev_top_w: usize = 0;
     let mut prev_cursor_col: usize = 1;
-
+    let mut last_input_at = Instant::now();
+    let mut idle_recap_shown = false;
     loop {
         let (rows, cols) = term_size();
         if (rows, cols) != (last_rows, last_cols) || crate::take_resized() {
@@ -1136,7 +1483,6 @@ pub fn read_bottom_dock_input(
             needs_redraw = true;
         }
 
-        let max_vis_cols = last_cols.saturating_sub(8).max(4);
         let buf: String = chars.iter().collect();
         let suggestions = compute_input_suggestions(&buf);
         if suggestions.is_empty() {
@@ -1149,36 +1495,30 @@ pub fn read_bottom_dock_input(
             suggestion_idx = Some(0);
         }
 
+        let want_idle_recap = is_idle_recap_enabled()
+            && messages.len() > 1
+            && chars.is_empty()
+            && suggestions.is_empty()
+            && last_input_at.elapsed() >= Duration::from_secs(6);
+        if want_idle_recap != idle_recap_shown {
+            idle_recap_shown = want_idle_recap;
+            needs_redraw = true;
+        }
+
         if needs_redraw {
             if full_resize_pending {
-                redraw_full_viewport(endpoint, *access, default_host, cwd, session_name, messages);
-                print!("\n\n\n\n\x1b[2A\r");
+                erase_inline_dock(prev_top_w, prev_cursor_col);
+                print!("\n\r");
                 prev_top_w = 0;
                 prev_cursor_col = 1;
                 full_resize_pending = false;
             }
 
-            let mut win_start = cursor_pos;
-            let mut used_cols = 0usize;
-            while win_start > 0 {
-                let w = char_display_width(chars[win_start - 1]);
-                if used_cols + w > max_vis_cols {
-                    break;
-                }
-                used_cols += w;
-                win_start -= 1;
-            }
-            let cursor_display_offset = used_cols;
-            let mut win_end = cursor_pos;
-            while win_end < chars.len() {
-                let w = char_display_width(chars[win_end]);
-                if used_cols + w > max_vis_cols {
-                    break;
-                }
-                used_cols += w;
-                win_end += 1;
-            }
-            let visible_slice: String = chars[win_start..win_end].iter().collect();
+            let recap_str = if idle_recap_shown {
+                build_session_recap_line(messages, last_cols)
+            } else {
+                None
+            };
 
             render_inline_dock(
                 endpoint,
@@ -1186,12 +1526,13 @@ pub fn read_bottom_dock_input(
                 phase,
                 default_host,
                 quota_badge,
-                &visible_slice,
-                cursor_display_offset,
+                &chars,
+                cursor_pos,
                 &suggestions,
                 suggestion_idx,
                 crate::queued_message_count(),
                 &busy_mode,
+                recap_str.as_deref(),
                 &mut prev_top_w,
                 &mut prev_cursor_col,
                 last_cols,
@@ -1213,6 +1554,7 @@ pub fn read_bottom_dock_input(
             }
             return PromptEvent::Exit;
         } else {
+            last_input_at = Instant::now();
             needs_redraw = true;
             n_read as usize
         };
@@ -1233,7 +1575,13 @@ pub fn read_bottom_dock_input(
 
             if b == 27 {
                 let rem = &kbuf[idx - 1..n];
-                if rem.starts_with(b"\x1b[200~") || rem.starts_with(b"\x1b[201~") {
+                if rem.starts_with(b"\x1b[200~") {
+                    in_paste = true;
+                    idx += 5;
+                    continue;
+                }
+                if rem.starts_with(b"\x1b[201~") {
+                    in_paste = false;
                     idx += 5;
                     continue;
                 }
@@ -1322,10 +1670,13 @@ pub fn read_bottom_dock_input(
             }
 
             // Also strip any orphaned `[200~` or `[201~` if ESC was read in a prior chunk
-            if b == b'['
-                && idx + 3 < n
-                && (&kbuf[idx..idx + 4] == b"200~" || &kbuf[idx..idx + 4] == b"201~")
-            {
+            if b == b'[' && idx + 3 < n && &kbuf[idx..idx + 4] == b"200~" {
+                in_paste = true;
+                idx += 4;
+                continue;
+            }
+            if b == b'[' && idx + 3 < n && &kbuf[idx..idx + 4] == b"201~" {
+                in_paste = false;
                 idx += 4;
                 continue;
             }
@@ -1389,10 +1740,15 @@ pub fn read_bottom_dock_input(
                     return PromptEvent::ShowSkills;
                 }
                 b'\r' | b'\n' => {
-                    // If there are more printable bytes in this same pasted chunk, convert newline to space
-                    if idx < n && kbuf[idx..n].iter().any(|&c| c >= 32) {
-                        chars.insert(cursor_pos, ' ');
-                        cursor_pos += 1;
+                    // Never auto-submit when pasting (either bracketed paste or multi-byte chunk)
+                    if in_paste || n > 1 {
+                        if idx < n
+                            && kbuf[idx..n].iter().any(|&c| c >= 32 && c != b'~')
+                            && chars.last().copied() != Some(' ')
+                        {
+                            chars.insert(cursor_pos, ' ');
+                            cursor_pos += 1;
+                        }
                         continue;
                     }
                     let cur_buf: String = chars.iter().collect();
@@ -1417,6 +1773,7 @@ pub fn read_bottom_dock_input(
                     } else {
                         cur_buf.trim().to_string()
                     };
+                    print!("\x1b[?2004l");
                     erase_inline_dock(prev_top_w, prev_cursor_col);
                     unsafe {
                         tcsetattr(0, TCSANOW, &orig_termios);
@@ -1546,6 +1903,7 @@ impl LiveSpinner {
             state.active = true;
             state.paused = false;
             state.label = initial_label;
+            state.started_at = Some(Instant::now());
             state.partial_line.clear();
             state.partial_prefix.clear();
             state.partial_shown = false;
@@ -1555,65 +1913,9 @@ impl LiveSpinner {
                 state.steer_mode = Some(load_user_config().busy_input_mode != "queue");
             }
             let (_, cols) = term_size();
-            let max_w = cols.saturating_sub(2).max(20);
-            let steer_mode = state.steer_mode.unwrap_or(true);
-            let mode_tag = if steer_mode {
-                format!(
-                    "{}⚡{}{}",
-                    YELLOW,
-                    tr_en("Anında Müdahale", "Live Steer"),
-                    RESET
-                )
-            } else {
-                format!("{}📥{}{}", GREEN, tr_en("Sıraya Al", "Queue"), RESET)
-            };
-            let top_raw = format!(
-                "{} {}│{} {}⠋{} {} (0.0s)",
-                status_hdr_init, CYAN, RESET, CYAN, RESET, state.label
-            );
-            let (top_line, _) = truncate_ansi_to_width(&top_raw, max_w);
-            let typed: String = state.typing_buf.iter().collect();
-            let mid_raw = if state.is_typing || !typed.is_empty() {
-                format!(
-                    "{}│{} {}❯{} {}{}█{}",
-                    CYAN, RESET, BOLD, RESET, typed, CYAN, RESET
-                )
-            } else {
-                format!(
-                    "{}│{} {}❯{} {}{}{}",
-                    CYAN,
-                    RESET,
-                    BOLD,
-                    RESET,
-                    DIM,
-                    tr_en(
-                        "Mesaj yazın (işlem sürerken anında gönderin veya sıraya alın)...",
-                        "Type a message (send immediately to steer or queue for next turn)..."
-                    ),
-                    RESET
-                )
-            };
-            let (mid_line, _) = truncate_ansi_to_width(&mid_raw, max_w);
-            let bot_raw = format!(
-                "{}╰─{} {} {}·{} {}{} ({}) · {}{}",
-                CYAN,
-                RESET,
-                format_context_usage_badge(),
-                DIM,
-                RESET,
-                DIM,
-                tr_en("Enter: Gönder", "Enter: Send"),
-                mode_tag,
-                tr_en(
-                    "Tab: Mod Değiştir · Esc: İptal",
-                    "Tab: Toggle Mode · Esc: Cancel"
-                ),
-                RESET
-            );
-            let (bot_line, _) = truncate_ansi_to_width(&bot_raw, max_w);
-            state.dock_lines = [top_line, mid_line, bot_line];
+            rebuild_spinner_dock_lines(&mut state, &status_hdr_init, cols);
             print!(
-                "\x1b[?2026h\x1b[?25l\x1b[?7l{}\n{}\n{}\n\x1b[?7h\x1b[?2026l",
+                "\x1b[?2004h\x1b[?2026h\x1b[?25l\x1b[?7l{}\n{}\n{}\x1b[2A\r\x1b[?7h\x1b[?2026l",
                 state.dock_lines[0], state.dock_lines[1], state.dock_lines[2]
             );
             let _ = io::stdout().flush();
@@ -1622,6 +1924,7 @@ impl LiveSpinner {
         let handle = thread::spawn(move || {
             let mut orig_termios = empty_termios();
             let has_tty = unsafe { tcgetattr(0, &mut orig_termios) == 0 };
+            let _term_guard = has_tty.then(|| TermiosGuard(orig_termios));
             if has_tty {
                 let mut raw = orig_termios;
                 raw.c_lflag &= !(ICANON | ECHO);
@@ -1631,11 +1934,9 @@ impl LiveSpinner {
                     tcsetattr(0, TCSANOW, &raw);
                 }
             }
-            let mut kbuf = [0u8; 32];
-            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let start = Instant::now();
-            let mut idx = 0usize;
+            let mut kbuf = [0u8; 4096];
             let status_hdr = get_sticky_dock_status();
+            let (_, mut last_cols) = term_size();
 
             while !flag_clone.load(Ordering::Relaxed) {
                 if SPINNER_PAUSED.load(Ordering::Relaxed) {
@@ -1680,19 +1981,70 @@ impl LiveSpinner {
                             } else if kbuf[..n].contains(&3) {
                                 crate::trigger_interrupt();
                                 should_break = true;
-                            } else if kbuf[0] == 27 {
-                                // Ignore ANSI escape sequences (arrow keys, etc.) while busy
                             } else {
                                 let mut bi = 0usize;
                                 while bi < n {
                                     let b = kbuf[bi];
+                                    if b == 27 {
+                                        let rem = &kbuf[bi..n];
+                                        if rem.starts_with(b"\x1b[200~")
+                                            || rem.starts_with(b"\x1b[201~")
+                                        {
+                                            bi += 6;
+                                            continue;
+                                        }
+                                        if bi + 1 < n && (kbuf[bi + 1] == 127 || kbuf[bi + 1] == 8)
+                                        {
+                                            while state.typing_buf.last() == Some(&' ') {
+                                                state.typing_buf.pop();
+                                            }
+                                            while let Some(&c) = state.typing_buf.last() {
+                                                if c == ' ' {
+                                                    break;
+                                                }
+                                                state.typing_buf.pop();
+                                            }
+                                            if state.typing_buf.is_empty() {
+                                                state.is_typing = false;
+                                            }
+                                            bi += 2;
+                                            continue;
+                                        }
+                                        bi += 1;
+                                        if bi < n && (kbuf[bi] == b'[' || kbuf[bi] == b'O') {
+                                            bi += 1;
+                                            while bi < n && !(b'@'..=b'~').contains(&kbuf[bi]) {
+                                                bi += 1;
+                                            }
+                                            if bi < n {
+                                                bi += 1;
+                                            }
+                                        } else if state.is_typing || !state.typing_buf.is_empty() {
+                                            state.typing_buf.clear();
+                                            state.is_typing = false;
+                                        }
+                                        continue;
+                                    }
                                     match b {
                                         b'\t' => {
-                                            let cur = state.steer_mode.unwrap_or(true);
+                                            let cur = state.steer_mode.unwrap_or(false);
                                             state.steer_mode = Some(!cur);
                                             bi += 1;
                                         }
                                         b'\r' | b'\n' => {
+                                            if n > 1 {
+                                                if bi + 1 < n
+                                                    && kbuf[bi + 1..n].iter().any(|&c| c >= 32)
+                                                {
+                                                    state.is_typing = true;
+                                                    if state.typing_buf.last().copied() != Some(' ')
+                                                    {
+                                                        state.typing_buf.push(' ');
+                                                    }
+                                                }
+                                                bi += 1;
+                                                continue;
+                                            }
                                             let msg: String = state.typing_buf.iter().collect();
                                             let trimmed = msg.trim().to_string();
                                             state.typing_buf.clear();
@@ -1716,7 +2068,7 @@ impl LiveSpinner {
                                                         crate::trigger_interrupt();
                                                         should_break = true;
                                                     }
-                                                } else if state.steer_mode.unwrap_or(true) {
+                                                } else if state.steer_mode.unwrap_or(false) {
                                                     crate::push_steer_message(trimmed);
                                                 } else {
                                                     crate::push_queued_message(trimmed);
@@ -1734,6 +2086,21 @@ impl LiveSpinner {
                                         21 => {
                                             state.typing_buf.clear();
                                             state.is_typing = false;
+                                            bi += 1;
+                                        }
+                                        23 => {
+                                            while state.typing_buf.last() == Some(&' ') {
+                                                state.typing_buf.pop();
+                                            }
+                                            while let Some(&c) = state.typing_buf.last() {
+                                                if c == ' ' {
+                                                    break;
+                                                }
+                                                state.typing_buf.pop();
+                                            }
+                                            if state.typing_buf.is_empty() {
+                                                state.is_typing = false;
+                                            }
                                             bi += 1;
                                         }
                                         b if b >= 32 => {
@@ -1776,109 +2143,28 @@ impl LiveSpinner {
                 if should_break {
                     break;
                 }
-                let elapsed = start.elapsed().as_secs_f32();
-                let (_, cols) = term_size();
-                let max_w = cols.saturating_sub(2).max(20);
+                let (_, mut cols) = term_size();
+                if cols != last_cols || crate::take_resized() {
+                    let mut stable_cols = cols;
+                    for _ in 0..8 {
+                        thread::sleep(Duration::from_millis(20));
+                        let _ = crate::take_resized();
+                        let (_, next_cols) = term_size();
+                        if next_cols == stable_cols {
+                            break;
+                        }
+                        stable_cols = next_cols;
+                    }
+                    cols = stable_cols;
+                    last_cols = cols;
+                }
+                let max_w = cols.saturating_sub(6).max(20);
 
                 if let Ok(mut state) = SPINNER_SCREEN.lock() {
                     if state.active && !state.paused {
-                        let steer_mode = state.steer_mode.unwrap_or(true);
-                        let mode_tag = if steer_mode {
-                            format!(
-                                "{}⚡{}{}",
-                                YELLOW,
-                                tr_en("Anında Müdahale", "Live Steer"),
-                                RESET
-                            )
-                        } else {
-                            format!("{}📥{}{}", GREEN, tr_en("Sıraya Al", "Queue"), RESET)
-                        };
-                        let q_cnt = crate::queued_message_count();
-                        let s_cnt = crate::steer_message_count();
-                        let queue_status = if s_cnt > 0 {
-                            format!(
-                                " {}│{} {}⚡ {} {}{}",
-                                CYAN,
-                                RESET,
-                                YELLOW,
-                                s_cnt,
-                                tr_en("müdahale hazır", "steer ready"),
-                                RESET
-                            )
-                        } else if q_cnt > 0 {
-                            format!(
-                                " {}│{} {}📥 {} {}{}",
-                                CYAN,
-                                RESET,
-                                GREEN,
-                                q_cnt,
-                                tr_en("kuyrukta", "queued"),
-                                RESET
-                            )
-                        } else {
-                            String::new()
-                        };
-
-                        let top_raw = format!(
-                            "{} {}│{} {}{}{} {} ({:.1}s){}",
-                            status_hdr,
-                            CYAN,
-                            RESET,
-                            CYAN,
-                            frames[idx % frames.len()],
-                            RESET,
-                            state.label,
-                            elapsed,
-                            queue_status
-                        );
-                        let (top_line, _) = truncate_ansi_to_width(&top_raw, max_w);
-
-                        let typed: String = state.typing_buf.iter().collect();
-                        let mid_raw = if state.is_typing || !typed.is_empty() {
-                            format!(
-                                "{}│{} {}❯{} {}{}█{}",
-                                CYAN, RESET, BOLD, RESET, typed, CYAN, RESET
-                            )
-                        } else {
-                            format!(
-                                "{}│{} {}❯{} {}{}{}",
-                                CYAN,
-                                RESET,
-                                BOLD,
-                                RESET,
-                                DIM,
-                                tr_en(
-                                    "Mesaj yazın (işlem sürerken anında gönderin veya sıraya alın)...",
-                                    "Type a message (send immediately to steer or queue for next turn)..."
-                                ),
-                                RESET
-                            )
-                        };
-                        let (mid_line, _) = truncate_ansi_to_width(&mid_raw, max_w);
-
-                        let bot_raw = format!(
-                            "{}╰─{} {} {}·{} {}{} ({}) · {}{}",
-                            CYAN,
-                            RESET,
-                            format_context_usage_badge(),
-                            DIM,
-                            RESET,
-                            DIM,
-                            tr_en("Enter: Gönder", "Enter: Send"),
-                            mode_tag,
-                            tr_en(
-                                "Tab: Mod Değiştir · Esc: İptal",
-                                "Tab: Toggle Mode · Esc: Cancel"
-                            ),
-                            RESET
-                        );
-                        let (bot_line, _) = truncate_ansi_to_width(&bot_raw, max_w);
-
-                        state.dock_lines = [top_line, mid_line, bot_line];
-                        let prev_lines = if state.partial_shown { 4 } else { 3 };
-                        let mut out =
-                            format!("\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[{}A\r\x1b[J", prev_lines);
-                        if !state.partial_line.is_empty() {
+                        rebuild_spinner_dock_lines(&mut state, &status_hdr, cols);
+                        let mut out = String::from("\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J");
+                        let up_rows = if !state.partial_line.is_empty() {
                             let (preview, _) = truncate_ansi_to_width(
                                 &state.partial_line,
                                 max_w.saturating_sub(2),
@@ -1886,18 +2172,19 @@ impl LiveSpinner {
                             out.push_str(&preview);
                             out.push_str("\x1b[0m\n");
                             state.partial_shown = true;
+                            3usize
                         } else {
                             state.partial_shown = false;
-                        }
+                            2usize
+                        };
                         out.push_str(&format!(
-                            "{}\n{}\n{}\n\x1b[?7h\x1b[?2026l",
-                            state.dock_lines[0], state.dock_lines[1], state.dock_lines[2]
+                            "{}\n{}\n{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
+                            state.dock_lines[0], state.dock_lines[1], state.dock_lines[2], up_rows
                         ));
                         print!("{}", out);
                         let _ = io::stdout().flush();
                     }
                 }
-                idx += 1;
                 thread::sleep(Duration::from_millis(80));
             }
             if has_tty {
@@ -1909,8 +2196,7 @@ impl LiveSpinner {
             if let Ok(mut state) = SPINNER_SCREEN.lock() {
                 close_thinking_box_locked(&mut state);
                 if state.active && !state.paused {
-                    let prev_lines = if state.partial_shown { 4 } else { 3 };
-                    let mut out = format!("\x1b[?2026h\x1b[?7l\x1b[{}A\r\x1b[J", prev_lines);
+                    let mut out = String::from("\x1b[?2026h\x1b[?7l\r\x1b[J");
                     if !state.partial_line.is_empty() {
                         out.push_str("\x1b[?7h");
                         out.push_str(&state.partial_line);
@@ -1973,9 +2259,9 @@ pub fn fetch_quick_quota_line() -> String {
 }
 
 pub fn render_welcome_header(
-    endpoint: &ModelEndpoint,
-    access: AccessMode,
-    default_host: &str,
+    _endpoint: &ModelEndpoint,
+    _access: AccessMode,
+    _default_host: &str,
     cwd: &str,
     session_name: &str,
 ) {
@@ -1998,14 +2284,9 @@ pub fn render_welcome_header(
     let p_mid = format!("{}│{}  ", CYAN, RESET);
     let p_bot = format!("{}╰─{} ", CYAN, RESET);
     let sep = " · ".to_string();
-    let row1_items = vec![
-        format!("{}⚡ SPAVN v0.1 (spavn.dev){}", BOLD, RESET),
-        format!("🧠 {}{}{}", GREEN, endpoint.label, RESET),
-        format!("🛡️  {}{}{}", YELLOW, access.badge(), RESET),
-    ];
+    let row1_items = vec![format!("{}⚡ SPAVN v0.1 (spavn.dev){}", BOLD, RESET)];
     let row2_items = vec![
         format!("📂 {}{}{}", DIM, short_cwd, RESET),
-        format!("🖥️  {}{}{}", MAGENTA, default_host, RESET),
         format!("💬 {}{}{}", DIM, short_session, RESET),
     ];
 
@@ -2200,6 +2481,7 @@ pub fn select_interactive_menu(
         return Some(items[initial_idx.min(items.len() - 1)].key.clone());
     }
 
+    let _term_guard = TermiosGuard(orig_termios);
     let mut raw = orig_termios;
     raw.c_lflag &= !(ICANON | ECHO);
     raw.c_cc[VMIN_IDX] = 0;
@@ -2220,10 +2502,10 @@ pub fn select_interactive_menu(
     let mut stdin = io::stdin();
     let mut kbuf = [0u8; 8];
     let mut result: Option<String> = None;
+    let _ = crate::take_resized();
     let (mut last_rows, mut last_cols) = term_size();
     let mut needs_redraw = true;
 
-    let mut resize_clear = false;
     loop {
         let (rows, cols) = term_size();
         if (rows, cols) != (last_rows, last_cols) || crate::take_resized() {
@@ -2231,18 +2513,12 @@ pub fn select_interactive_menu(
             let (r2, c2) = term_size();
             last_rows = r2;
             last_cols = c2;
-            resize_clear = true;
             needs_redraw = true;
         }
 
         if needs_redraw {
             let max_w = last_cols.saturating_sub(2).clamp(4, 78);
-            if resize_clear {
-                print!("\x1b[?25l\x1b[?7l\x1b[2J\x1b[3J\x1b[H");
-                resize_clear = false;
-            } else {
-                print!("\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
-            }
+            print!("\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
             let raw_hdr = format!(
                 "{}╭─ {} {}(↑/↓/Tab: Gezin · Enter: Seç · Esc/q: İptal){} ",
                 CYAN, title, YELLOW, CYAN
@@ -2429,6 +2705,20 @@ pub fn interactive_select_slash_command() -> Option<String> {
             .to_string(),
         },
         MenuItem {
+            key: "/recap".to_string(),
+            badge: format!(
+                "{}{}{}",
+                MAGENTA,
+                tr_en("※ Oturum Özeti", "※ Session Recap"),
+                RESET
+            ),
+            desc: tr_en(
+                "Oturumun son adım özetini göster veya otomatik boşta kalma (idle) özetini aç/kapat",
+                "Show current session recap or toggle automatic idle recap line",
+            )
+            .to_string(),
+        },
+        MenuItem {
             key: "/new".to_string(),
             badge: format!(
                 "{}{}{}",
@@ -2461,6 +2751,34 @@ pub fn interactive_select_slash_command() -> Option<String> {
                 RESET
             ),
             desc: "Auto / Coder / Reviewer / Security / Test / Docs / Refactor".to_string(),
+        },
+        MenuItem {
+            key: "/plan".to_string(),
+            badge: format!(
+                "{}{}{}",
+                MAGENTA,
+                tr_en("📐 PLAN Fazı", "📐 PLAN Phase"),
+                RESET
+            ),
+            desc: tr_en(
+                "Salt-okunur mimari tasarım fazına geç (write/edit/bash kilitli, kısayol: \\)",
+                "Switch to read-only planning phase (write/edit/bash locked, shortcut: \\)",
+            )
+            .to_string(),
+        },
+        MenuItem {
+            key: "/code".to_string(),
+            badge: format!(
+                "{}{}{}",
+                GREEN,
+                tr_en("💻 CODE Fazı", "💻 CODE Phase"),
+                RESET
+            ),
+            desc: tr_en(
+                "Tam uygulama fazına geç (tüm araçlar aktif, kısayol: \\)",
+                "Switch to coding/implementation phase (all tools active, shortcut: \\)",
+            )
+            .to_string(),
         },
         MenuItem {
             key: "/janitor".to_string(),
@@ -2668,13 +2986,14 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                     RESET
                 )
             };
-            let ctx_label = format_token_short(m.context_window.unwrap_or(32_768));
+            let ctx_label = format_token_short(m.context_window.unwrap_or(131_072));
             local_models.push(MenuItem {
                 key: format!("local:{}", m.id),
                 badge,
                 desc: format!(
-                    "{} · {} ctx",
-                    tr_en("Yerel GPU Sunucusu", "Local GPU Server"),
+                    "{} · {} · {} ctx",
+                    m.spec_badge,
+                    tr_en("Yerel GPU", "Local GPU"),
                     ctx_label
                 ),
             });
@@ -2723,6 +3042,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
         return Some(current_key.to_string());
     }
 
+    let _term_guard = TermiosGuard(orig_termios);
     let mut raw = orig_termios;
     raw.c_lflag &= !(ICANON | ECHO);
     raw.c_cc[VMIN_IDX] = 0;
@@ -2761,10 +3081,10 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
     let mut stdin = io::stdin();
     let mut kbuf = [0u8; 8];
     let mut result: Option<String> = None;
+    let _ = crate::take_resized();
     let (mut last_rows, mut last_cols) = term_size();
     let mut needs_redraw = true;
 
-    let mut resize_clear = false;
     loop {
         let (rows, cols) = term_size();
         if (rows, cols) != (last_rows, last_cols) || crate::take_resized() {
@@ -2772,18 +3092,12 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
             let (r2, c2) = term_size();
             last_rows = r2;
             last_cols = c2;
-            resize_clear = true;
             needs_redraw = true;
         }
 
         if needs_redraw {
             let max_w = last_cols.saturating_sub(2).clamp(20, 100);
-            if resize_clear {
-                print!("\x1b[?25l\x1b[?7l\x1b[2J\x1b[3J\x1b[H");
-                resize_clear = false;
-            } else {
-                print!("\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
-            }
+            print!("\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
             let raw_hdr = format!(
                 "{}╭─ {} {}{} ",
                 CYAN,
@@ -3753,371 +4067,63 @@ pub fn render_assistant_footer(
     ));
 }
 
-pub struct MarkdownStreamRenderer {
-    at_line_start: bool,
-    prefix_buf: String,
-    in_code_block: bool,
-    in_heading: bool,
-    in_quote: bool,
-    in_bold: bool,
-    in_italic: bool,
-    in_inline_code: bool,
-    star_count: usize,
-    out_buf: String,
-}
+pub use crate::markdown::MarkdownStreamRenderer;
 
-impl MarkdownStreamRenderer {
-    pub fn new() -> Self {
-        Self {
-            at_line_start: true,
-            prefix_buf: String::new(),
-            in_code_block: false,
-            in_heading: false,
-            in_quote: false,
-            in_bold: false,
-            in_italic: false,
-            in_inline_code: false,
-            star_count: 0,
-            out_buf: String::new(),
-        }
+#[cfg(test)]
+mod recap_tests {
+    use super::*;
+    use crate::markdown::render_markdown_table;
+    use crate::router::ChatMessage;
+
+    #[test]
+    fn recap_line_summarizes_latest_turn_and_ignores_system_only() {
+        let sys_only = vec![ChatMessage::system("sys prompt")];
+        assert!(build_session_recap_line(&sys_only, 100).is_none());
+
+        let msgs = vec![
+            ChatMessage::system("sys prompt"),
+            ChatMessage::user("[SPAVN ROLE: CODER] Implement\n\nrecap özelliğini kodlayalım"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(
+                    "### Durum\n- **Idle Recap**: 6 saniye sonra alt dock'ta gösterilir."
+                        .to_string(),
+                ),
+                reasoning_content: None,
+                thought_signature: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+        let line = build_session_recap_line(&msgs, 120).expect("recap should be generated");
+        assert!(line.contains("recap:"));
+        assert!(line.contains("recap özelliğini kodlayalım"));
+        assert!(line.contains("Durum"));
     }
 
-    pub fn push(&mut self, chunk: &str) {
-        for ch in chunk.chars() {
-            self.push_char(ch);
-        }
-        if !self.out_buf.is_empty() {
-            let text = std::mem::take(&mut self.out_buf);
-            spinner_print(&text);
-        }
-    }
-
-    pub fn finish(&mut self) {
-        if self.at_line_start && !self.prefix_buf.is_empty() {
-            let pending = std::mem::take(&mut self.prefix_buf);
-            self.at_line_start = false;
-            self.out_buf.push_str("  ");
-            for ch in pending.chars() {
-                self.emit_inline_char(ch);
-            }
-        }
-        self.flush_stars(true);
-        if !self.at_line_start {
-            self.out_buf.push_str(RESET);
-            self.out_buf.push('\n');
-            self.at_line_start = true;
-        } else {
-            self.out_buf.push_str(RESET);
-        }
-        if !self.out_buf.is_empty() {
-            let text = std::mem::take(&mut self.out_buf);
-            spinner_print(&text);
-        }
-    }
-
-    fn reset_line_styles(&mut self) {
-        self.flush_stars(true);
-        self.in_heading = false;
-        self.in_quote = false;
-        self.in_bold = false;
-        self.in_italic = false;
-        self.in_inline_code = false;
-        self.out_buf.push_str(RESET);
-        self.out_buf.push('\n');
-        self.at_line_start = true;
-    }
-
-    fn flush_stars(&mut self, at_eol: bool) {
-        if self.star_count == 0 {
-            return;
-        }
-        let count = self.star_count;
-        self.star_count = 0;
-        if count >= 2 {
-            self.in_bold = !self.in_bold;
-            if self.in_heading {
-                self.out_buf.push_str("\x1b[1;36m");
-            } else if self.in_bold {
-                self.out_buf.push_str("\x1b[1;97m");
-            } else {
-                self.out_buf.push_str("\x1b[22;39m");
-            }
-        } else if count == 1 && !at_eol {
-            self.in_italic = !self.in_italic;
-            if self.in_italic {
-                self.out_buf.push_str("\x1b[3m");
-            } else {
-                self.out_buf.push_str("\x1b[23m");
-            }
-        }
-    }
-
-    fn emit_inline_char(&mut self, ch: char) {
-        if self.in_code_block {
-            if ch == '\n' {
-                self.out_buf.push_str(RESET);
-                self.out_buf.push('\n');
-                self.at_line_start = true;
-            } else {
-                self.out_buf.push(ch);
-            }
-            return;
-        }
-
-        if ch == '\n' {
-            self.reset_line_styles();
-            return;
-        }
-
-        if ch == '*' {
-            self.star_count += 1;
-            if self.star_count == 2 {
-                self.flush_stars(false);
-            }
-            return;
-        }
-
-        if self.star_count == 1 && ch == ' ' {
-            self.star_count = 0;
-            self.out_buf.push_str("* ");
-            return;
-        }
-        self.flush_stars(false);
-
-        if ch == '`' {
-            self.in_inline_code = !self.in_inline_code;
-            if self.in_inline_code {
-                self.out_buf.push_str("\x1b[36m");
-            } else if self.in_heading {
-                self.out_buf.push_str("\x1b[1;36m");
-            } else if self.in_bold {
-                self.out_buf.push_str("\x1b[1;97m");
-            } else {
-                self.out_buf.push_str("\x1b[39m");
-            }
-            return;
-        }
-
-        if ch == '|' && !self.in_inline_code {
-            self.out_buf.push_str(&format!(
-                "{}│{}",
-                DIM,
-                if self.in_heading {
-                    "\x1b[1;36m"
-                } else if self.in_bold {
-                    "\x1b[1;97m"
-                } else {
-                    RESET
-                }
-            ));
-            return;
-        }
-
-        self.out_buf.push(ch);
-    }
-
-    fn push_char(&mut self, ch: char) {
-        if !self.at_line_start {
-            self.emit_inline_char(ch);
-            return;
-        }
-
-        if self.in_code_block {
-            self.prefix_buf.push(ch);
-            if ch == '\n' {
-                let line = self.prefix_buf.trim_end_matches(['\r', '\n']);
-                if line.trim().starts_with("```") {
-                    self.in_code_block = false;
-                    let rule_w = term_size().1.saturating_sub(8).clamp(16, 60);
-                    self.out_buf
-                        .push_str(&format!("  {}╰{}{}\n", DIM, "─".repeat(rule_w), RESET));
-                } else {
-                    self.out_buf
-                        .push_str(&format!("  {}│{} {}{}{}\n", DIM, RESET, CYAN, line, RESET));
-                }
-                self.prefix_buf.clear();
-                self.at_line_start = true;
-            } else {
-                let trimmed = self.prefix_buf.trim_start();
-                if !trimmed.is_empty() && !trimmed.starts_with('`') {
-                    let pending = std::mem::take(&mut self.prefix_buf);
-                    self.at_line_start = false;
-                    self.out_buf
-                        .push_str(&format!("  {}│{} {}", DIM, RESET, CYAN));
-                    for c in pending.chars() {
-                        self.emit_inline_char(c);
-                    }
-                }
-            }
-            return;
-        }
-
-        self.prefix_buf.push(ch);
-
-        if ch == '\n' {
-            let full_line = std::mem::take(&mut self.prefix_buf);
-            let trimmed = full_line.trim();
-            if trimmed.is_empty() {
-                self.out_buf.push('\n');
-                self.at_line_start = true;
-                return;
-            }
-            if trimmed.starts_with("```") {
-                let lang = trimmed.trim_start_matches('`').trim();
-                let label = if lang.is_empty() { "kod" } else { lang };
-                self.in_code_block = true;
-                let rule_w = term_size()
-                    .1
-                    .saturating_sub(14 + label.chars().count())
-                    .clamp(8, 52);
-                self.out_buf.push_str(&format!(
-                    "  {}╭─ 💻 {} {}{}\n",
-                    DIM,
-                    label,
-                    "─".repeat(rule_w),
-                    RESET
-                ));
-                self.at_line_start = true;
-                return;
-            }
-            if trimmed.len() >= 3
-                && (trimmed.chars().all(|c| c == '-')
-                    || trimmed.chars().all(|c| c == '*')
-                    || trimmed.chars().all(|c| c == '─'))
-            {
-                let rule_w = term_size().1.saturating_sub(6).clamp(16, 60);
-                self.out_buf
-                    .push_str(&format!("  {}{}{}\n", DIM, "─".repeat(rule_w), RESET));
-                self.at_line_start = true;
-                return;
-            }
-            self.at_line_start = false;
-            self.out_buf.push_str("  ");
-            for c in full_line.chars() {
-                self.emit_inline_char(c);
-            }
-            return;
-        }
-
-        let leading_spaces = self.prefix_buf.chars().take_while(|&c| c == ' ').count();
-        let rest = &self.prefix_buf[leading_spaces..];
-        if rest.is_empty() {
-            if leading_spaces >= 8 {
-                let pending = std::mem::take(&mut self.prefix_buf);
-                self.at_line_start = false;
-                self.out_buf.push_str(&format!("  {}", pending));
-            }
-            return;
-        }
-
-        if rest.starts_with('#') {
-            let hashes = rest.chars().take_while(|&c| c == '#').count();
-            if rest.len() > hashes {
-                let next_c = rest[hashes..].chars().next().unwrap_or(' ');
-                if next_c == ' ' && hashes <= 6 {
-                    self.prefix_buf.clear();
-                    self.at_line_start = false;
-                    self.in_heading = true;
-                    self.out_buf.push_str("\n  \x1b[1;36m▍ ");
-                } else {
-                    let pending = rest.to_string();
-                    self.prefix_buf.clear();
-                    self.at_line_start = false;
-                    self.out_buf.push_str("  ");
-                    for c in pending.chars() {
-                        self.emit_inline_char(c);
-                    }
-                }
-            }
-            return;
-        }
-
-        if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("• ") {
-            let indent = " ".repeat(leading_spaces.min(6));
-            self.prefix_buf.clear();
-            self.at_line_start = false;
-            self.out_buf
-                .push_str(&format!("  {}{}\x1b[36m•{} ", indent, BOLD, RESET));
-            return;
-        }
-
-        if rest.starts_with("> ") {
-            self.prefix_buf.clear();
-            self.at_line_start = false;
-            self.in_quote = true;
-            self.out_buf.push_str("  \x1b[2;36m▎\x1b[0m \x1b[3m");
-            return;
-        }
-
-        if rest.starts_with('-') || rest.starts_with('*') {
-            let is_bold_start =
-                rest.starts_with("**") && rest.len() >= 3 && !rest.chars().all(|c| c == '*');
-            let is_bullet_text = !rest.chars().all(|c| c == '-' || c == '*');
-            if is_bold_start || is_bullet_text {
-                let indent = " ".repeat(leading_spaces.min(6));
-                let pending = rest.to_string();
-                self.prefix_buf.clear();
-                self.at_line_start = false;
-                self.out_buf.push_str(&format!("  {}", indent));
-                for c in pending.chars() {
-                    self.emit_inline_char(c);
-                }
-            }
-            return;
-        }
-
-        if rest.starts_with('`') {
-            if !rest.chars().all(|c| c == '`') && !rest.starts_with("```") {
-                let indent = " ".repeat(leading_spaces.min(6));
-                let pending = rest.to_string();
-                self.prefix_buf.clear();
-                self.at_line_start = false;
-                self.out_buf.push_str(&format!("  {}", indent));
-                for c in pending.chars() {
-                    self.emit_inline_char(c);
-                }
-            }
-            return;
-        }
-
-        if rest
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_digit())
-            .unwrap_or(false)
-        {
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            let after = &rest[digits.len()..];
-            if after == ". " || after == ") " {
-                let indent = " ".repeat(leading_spaces.min(6));
-                self.prefix_buf.clear();
-                self.at_line_start = false;
-                self.out_buf
-                    .push_str(&format!("  {}\x1b[1;36m{}.\x1b[0m ", indent, digits));
-            } else if after.len() >= 2 || (!after.is_empty() && after != "." && after != ")") {
-                let indent = " ".repeat(leading_spaces.min(6));
-                let pending = rest.to_string();
-                self.prefix_buf.clear();
-                self.at_line_start = false;
-                self.out_buf.push_str(&format!("  {}", indent));
-                for c in pending.chars() {
-                    self.emit_inline_char(c);
-                }
-            }
-            return;
-        }
-
-        if rest == ">" {
-            return;
-        }
-
-        let indent = " ".repeat(leading_spaces.min(6));
-        let pending = rest.to_string();
-        self.prefix_buf.clear();
-        self.at_line_start = false;
-        self.out_buf.push_str(&format!("  {}", indent));
-        for c in pending.chars() {
-            self.emit_inline_char(c);
+    #[test]
+    fn markdown_table_renders_box_borders_and_wraps_wide_cells() {
+        let rows = vec![
+            "| # | Dosya | Tespit Edilen Kusur | Uygulanan Çözüm |".to_string(),
+            "|---|---|---|---|".to_string(),
+            "| **1** | `src/hud.rs` | **Hızlı Düşünce Akışı:** `stream_thinking_delta` ve `spinner_print_locked` güncellendi. | Ortak `rebuild_spinner_dock_lines()` fonksiyonu çıkarıldı. |".to_string(),
+            "| **2** | `src/router.rs` | Anthropic native akışında araç bildirimi eklendi. | `notify_tool_call_streaming` devreye alındı. |".to_string(),
+        ];
+        let rendered = render_markdown_table(&rows, 100);
+        assert!(rendered.contains('╭'));
+        assert!(rendered.contains('┬'));
+        assert!(rendered.contains('┼'));
+        assert!(rendered.contains('╰'));
+        assert!(!rendered.contains("|---|"));
+        for line in rendered.lines() {
+            let (_, vw) = truncate_ansi_to_width(line, usize::MAX);
+            assert!(
+                vw <= 100,
+                "table line visual width {} exceeded 100 cols: {}",
+                vw,
+                line
+            );
         }
     }
 }

@@ -35,11 +35,15 @@ pub fn sessions_dir() -> PathBuf {
 }
 
 pub fn new_session_path() -> PathBuf {
-    let ts = SystemTime::now()
+    let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let path = sessions_dir().join(format!("session-{}.jsonl", ts));
+        .unwrap_or_default();
+    let ts = dur.as_secs();
+    let dir = sessions_dir();
+    let mut path = dir.join(format!("session-{}.jsonl", ts));
+    if path.exists() && fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false) {
+        path = dir.join(format!("session-{}-{}.jsonl", ts, dur.subsec_millis()));
+    }
     if let Ok(file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
         drop(file);
     }
@@ -67,6 +71,9 @@ pub fn load_session(path: &PathBuf) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     for line in reader.lines().map_while(Result::ok) {
         if let Ok(msg) = serde_json::from_str::<ChatMessage>(&line) {
+            if !messages.is_empty() && msg.role == "system" {
+                continue;
+            }
             messages.push(msg);
         }
     }
