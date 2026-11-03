@@ -2188,11 +2188,17 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
             }
         }
         return match cmd_obj.spawn() {
-            Ok(child) => format!(
-                "Background job started (PID: {}). Output is streaming to `{}` — use `read` or `bash` to inspect progress.",
-                child.id(),
-                log_path.display()
-            ),
+            Ok(mut child) => {
+                let pid = child.id();
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                format!(
+                    "Background job started (PID: {}). Output is streaming to `{}` — use `read` or `bash` to inspect progress.",
+                    pid,
+                    log_path.display()
+                )
+            }
             Err(e) => format!("Background spawn error: {}", e),
         };
     }
@@ -2758,10 +2764,13 @@ fn run_single_subagent_worker(
         if let Some(tcs) = msg.tool_calls {
             for tc in tcs.into_iter().take(4) {
                 let tname = tc.function.name.trim().to_string();
-                let out = if matches!(tname.as_str(), "read" | "search" | "memory" | "web") {
+                let out = if matches!(
+                    tname.as_str(),
+                    "read" | "search" | "memory" | "web" | "lsp" | "skill"
+                ) {
                     execute_tool(&mut sub_ctx, &tname, &tc.function.arguments)
                 } else {
-                    "Subagent error: only read-only tools (read, search, memory, web) are allowed."
+                    "Subagent error: only read-only tools (read, search, memory, web, lsp, skill) are allowed."
                         .to_string()
                 };
                 msgs.push(crate::router::ChatMessage::tool_result(tc.id, tname, out));
@@ -2931,16 +2940,36 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                 );
                 let _ = writeln!(stdin, "{}", call_msg);
             }
-            let out_handle = capture_capped(child.stdout.take());
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            if let Some(stdout) = child.stdout.take() {
+                std::thread::spawn(move || {
+                    use std::io::BufRead;
+                    let reader = std::io::BufReader::new(stdout);
+                    let mut last_json = String::new();
+                    for line in reader.lines().map_while(Result::ok) {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with('{') {
+                            last_json = trimmed.to_string();
+                            if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                                if v.get("id").and_then(|id| id.as_i64()) == Some(2) {
+                                    let _ = tx.send(trimmed.to_string());
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    if !last_json.is_empty() {
+                        let _ = tx.send(last_json);
+                    }
+                });
+            }
+            let received = rx.recv_timeout(std::time::Duration::from_secs(15)).ok();
             let _ = child.kill();
             let _ = child.wait();
-            let out_bytes = out_handle.join().unwrap_or_default();
-            let out_str = String::from_utf8_lossy(&out_bytes);
-            if let Some(last_line) = out_str.lines().rev().find(|l| l.trim().starts_with('{')) {
-                return last_line.chars().take(8000).collect();
+            if let Some(json_line) = received {
+                return json_line.chars().take(8000).collect();
             }
-            return out_str.chars().take(4000).collect();
+            return "(MCP server returned no response within 15s)".to_string();
         }
         return format!(
             "MCP server '{}' has neither `command` nor `url`.",

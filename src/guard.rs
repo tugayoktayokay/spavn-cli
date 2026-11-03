@@ -179,14 +179,11 @@ impl PathPolicy {
             }
         }
 
-        if under_any(&path, &self.workspace_roots) {
+        if under_any(&path, &self.workspace_roots) || is_temp_path(&path) {
             return PathRisk::Allow;
         }
 
         if write {
-            if is_temp_path(&path) {
-                return PathRisk::Allow;
-            }
             for sys in SYSTEM_WRITE_DENY {
                 let root = PathBuf::from(sys);
                 if path == root || path.starts_with(&root) {
@@ -1355,5 +1352,12 @@ mod tests {
         ] {
             assert_eq!(assess_shell_command(c, &policy()), ShellRisk::None, "{c}");
         }
+    }
+
+    #[test]
+    fn temp_path_allows_both_read_and_write_without_prompt() {
+        let p = policy();
+        assert_eq!(p.check("/tmp/wrd_p1.png", false), PathRisk::Allow);
+        assert_eq!(p.check("/tmp/wrd_p1.png", true), PathRisk::Allow);
     }
 }
