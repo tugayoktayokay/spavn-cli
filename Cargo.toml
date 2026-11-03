@@ -3,6 +3,9 @@ name = "spavn"
 version = "0.1.0"
 edition = "2021"
 description = "SPAVN v0.1 (spavn.dev) — High-performance native Rust coding agent and harness"
+license = "MIT"
+authors = ["Tugay Oktay Okay"]
+repository = "https://github.com/tugayoktayokay/spavn-cli"
 
 [[bin]]
 name = "spavn"
