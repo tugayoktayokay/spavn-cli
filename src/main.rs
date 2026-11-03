@@ -60,6 +60,16 @@ pub fn steer_message_count() -> usize {
     STEER_QUEUE.lock().map(|q| q.len()).unwrap_or(0)
 }
 
+pub fn pop_last_steer_message() -> Option<String> {
+    STEER_QUEUE.lock().ok()?.pop_back()
+}
+
+pub fn clear_steer_messages() {
+    if let Ok(mut q) = STEER_QUEUE.lock() {
+        q.clear();
+    }
+}
+
 pub fn push_queued_message(msg: String) {
     if let Ok(mut q) = PROMPT_QUEUE.lock() {
         q.push_back(msg);
@@ -68,6 +78,34 @@ pub fn push_queued_message(msg: String) {
 
 pub fn pop_next_queued_message() -> Option<String> {
     PROMPT_QUEUE.lock().ok()?.pop_front()
+}
+
+pub fn pop_last_queued_message() -> Option<String> {
+    PROMPT_QUEUE.lock().ok()?.pop_back()
+}
+
+pub fn peek_last_pending_message() -> Option<(bool, String)> {
+    if let Ok(sq) = STEER_QUEUE.lock() {
+        if let Some(last) = sq.back() {
+            return Some((true, last.clone()));
+        }
+    }
+    if let Ok(pq) = PROMPT_QUEUE.lock() {
+        if let Some(last) = pq.back() {
+            return Some((false, last.clone()));
+        }
+    }
+    None
+}
+
+pub fn pop_last_pending_message() -> Option<(bool, String)> {
+    if let Some(s) = pop_last_steer_message() {
+        return Some((true, s));
+    }
+    if let Some(q) = pop_last_queued_message() {
+        return Some((false, q));
+    }
+    None
 }
 
 pub fn list_queued_messages() -> Vec<String> {
@@ -105,23 +143,46 @@ pub fn queued_message_count() -> usize {
     PROMPT_QUEUE.lock().map(|q| q.len()).unwrap_or(0)
 }
 
+#[cfg(unix)]
 extern "C" fn handle_sigint(_sig: i32) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
+#[cfg(unix)]
 extern "C" fn handle_sigwinch(_sig: i32) {
     RESIZED.store(true, Ordering::SeqCst);
 }
 
+#[cfg(unix)]
 #[link(name = "c")]
 unsafe extern "C" {
     fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
 }
 
+#[cfg(windows)]
+extern "system" fn handle_win_ctrl(ctrl_type: u32) -> i32 {
+    if ctrl_type == 0 || ctrl_type == 1 {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+        return 1;
+    }
+    0
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+}
+
 pub fn install_sigint_handler() {
+    #[cfg(unix)]
     unsafe {
         let _ = signal(2, handle_sigint);
         let _ = signal(28, handle_sigwinch);
+    }
+    #[cfg(windows)]
+    unsafe {
+        let _ = SetConsoleCtrlHandler(Some(handle_win_ctrl), 1);
     }
 }
 
@@ -196,6 +257,14 @@ fn summarize_tool_args(name: &str, args_json: &str, default_host: &str) -> Strin
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        "subagent" | "spawn_submodels" | "task" => val
+            .get("task")
+            .or_else(|| val.get("prompt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(64)
+            .collect(),
         _ => String::new(),
     }
 }
@@ -412,13 +481,22 @@ pub(crate) fn perform_manual_compact(
 /// True when the reply announces an action ("let me read...", "şimdi ... okuyacağım", trailing `:`)
 /// but stops without calling a tool. Questions and "let me know" sign-offs are final answers.
 fn is_premature_stop(text: &str) -> bool {
-    let lower_tail: String = text
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.contains('?') || trimmed.ends_with("```") {
+        return false;
+    }
+    let tail_lines: Vec<&str> = trimmed
         .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
         .rev()
         .take(3)
         .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
+        .into_iter()
+        .rev()
+        .collect();
+    let last_line = tail_lines.last().copied().unwrap_or("");
+    let lower_tail = tail_lines.join(" ").to_lowercase();
     let announces_en = (lower_tail.contains("let me ") && !lower_tail.contains("let me know"))
         || lower_tail.contains("i will now ")
         || lower_tail.contains("i'll now ");
@@ -427,7 +505,7 @@ fn is_premature_stop(text: &str) -> bool {
             || lower_tail.contains("düzenleyeceğim")
             || lower_tail.contains("okuyacağım")
             || lower_tail.contains("inceleyeceğim"));
-    !text.contains('?') && (lower_tail.ends_with(':') || announces_tr || announces_en)
+    last_line.ends_with(':') || announces_tr || announces_en
 }
 
 fn run_agent_turn(
@@ -451,6 +529,7 @@ fn run_agent_turn(
     let mut last_tool_sig = String::new();
     let mut repeat_count = 0usize;
     let mut unverified_edits = false;
+    let mut compiler_verified_in_edit = false;
     let mut verification_nudged = false;
     let mut modified_files_in_turn: Vec<String> = Vec::new();
     let mut auto_verify_rounds = 0usize;
@@ -732,24 +811,49 @@ fn run_agent_turn(
                     repeat_count = 0;
                 }
 
+                let (mut tool_output, tool_ms) = if quiet {
+                    let t0 = std::time::Instant::now();
+                    let out = execute_tool(ctx, &tool_name, &tc.function.arguments);
+                    (out, t0.elapsed().as_millis())
+                } else {
+                    let summary =
+                        summarize_tool_args(&tool_name, &tc.function.arguments, &ctx.default_host);
+                    println!(
+                        "{}╭─ ⚡ {}{} {}{}{}",
+                        YELLOW, BOLD, tool_name, RESET, DIM, summary
+                    );
+                    let tool_started = std::time::Instant::now();
+                    let mut tool_spinner =
+                        LiveSpinner::start(&format!("⚡ {} çalıştırılıyor", tool_name));
+                    let out = execute_tool(ctx, &tool_name, &tc.function.arguments);
+                    tool_spinner.stop();
+                    (out, tool_started.elapsed().as_millis())
+                };
+
                 if ctx.phase == AgentPhase::Code
                     && matches!(
                         tool_name.as_str(),
                         "edit" | "edit_file" | "replace" | "write" | "write_file"
                     )
                 {
-                    unverified_edits = true;
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    {
-                        if let Some(p) = v
-                            .get("path")
-                            .or_else(|| v.get("file_path"))
-                            .or_else(|| v.get("file"))
-                            .and_then(|s| s.as_str())
+                    if tool_output.starts_with("Successfully ") {
+                        unverified_edits = true;
+                        compiler_verified_in_edit = tool_output
+                            .contains("[Compiler Check: cargo check OK]")
+                            || tool_output.contains("[Compiler Check: tsc OK]");
+                        if let Ok(v) =
+                            serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                         {
-                            let p_str = p.trim().to_string();
-                            if !p_str.is_empty() && !modified_files_in_turn.contains(&p_str) {
-                                modified_files_in_turn.push(p_str);
+                            if let Some(p) = v
+                                .get("path")
+                                .or_else(|| v.get("file_path"))
+                                .or_else(|| v.get("file"))
+                                .and_then(|s| s.as_str())
+                            {
+                                let p_str = p.trim().to_string();
+                                if !p_str.is_empty() && !modified_files_in_turn.contains(&p_str) {
+                                    modified_files_in_turn.push(p_str);
+                                }
                             }
                         }
                     }
@@ -759,22 +863,6 @@ fn run_agent_turn(
                 ) {
                     unverified_edits = false;
                 }
-
-                let mut tool_output = if quiet {
-                    execute_tool(ctx, &tool_name, &tc.function.arguments)
-                } else {
-                    let summary =
-                        summarize_tool_args(&tool_name, &tc.function.arguments, &ctx.default_host);
-                    println!(
-                        "{}╭─ ⚡ {}{} {}{}{}",
-                        YELLOW, BOLD, tool_name, RESET, DIM, summary
-                    );
-                    let mut tool_spinner =
-                        LiveSpinner::start(&format!("⚡ {} çalıştırılıyor", tool_name));
-                    let out = execute_tool(ctx, &tool_name, &tc.function.arguments);
-                    tool_spinner.stop();
-                    out
-                };
                 if repeat_count >= 2 || tool_output.starts_with("[EOF STOP:") {
                     tool_output.push_str(&format!(
                         "\n\n[SPAVN LOOP GUARD (count={})]: Stop repeating `{}` or reading past EOF. Proceed directly to your analysis or edit using the context already gathered.",
@@ -791,12 +879,24 @@ fn run_agent_turn(
                         .chars()
                         .take(80)
                         .collect::<String>();
+                    let is_err = tool_output.starts_with("Edit error:")
+                        || tool_output.starts_with("Read error")
+                        || tool_output.starts_with("Write error")
+                        || tool_output.starts_with("BLOCKED")
+                        || tool_output.starts_with("Execution error:");
+                    let status_mark = if is_err {
+                        format!("{}✗{}", RED, YELLOW)
+                    } else {
+                        format!("{}✓{}", GREEN, YELLOW)
+                    };
                     println!(
-                        "{}╰─ ↳ {}{} ({} satır){}",
+                        "{}╰─ {} {}{} ({} satır · {}ms){}",
                         YELLOW,
+                        status_mark,
                         DIM,
                         preview_line,
                         tool_output.lines().count().max(1),
+                        tool_ms,
                         RESET
                     );
                 }
@@ -911,11 +1011,16 @@ fn run_agent_turn(
 
         // 4. Autonomous Zero-Stop Verification Gate after file edits (up to 4 auto-fix rounds)
         if !modified_files_in_turn.is_empty() && auto_verify_rounds < 4 {
-            if let Some(gate_err) =
-                tools::run_project_verification_gate(".", &modified_files_in_turn)
-            {
+            let cwd_str = ctx.policy.cwd.to_string_lossy();
+            let gate_res = if compiler_verified_in_edit {
+                tools::check_unfinished_placeholders(&modified_files_in_turn)
+            } else {
+                tools::run_project_verification_gate(&cwd_str, &modified_files_in_turn)
+            };
+            if let Some(gate_err) = gate_res {
                 auto_verify_rounds += 1;
                 unverified_edits = false;
+                compiler_verified_in_edit = false;
                 if !quiet {
                     println!(
                         "\n{}⚡ [SPAVN Zero-Stop Doğrulama Kapısı ({}/4): Derleme/eksik kod tespit edildi -> Otomatik düzeltme tetikleniyor...]{}",
@@ -926,8 +1031,9 @@ fn run_agent_turn(
                 append_message(session_file, &gate_msg);
                 messages.push(gate_msg);
                 continue;
-            } else if std::path::Path::new("Cargo.toml").is_file()
-                || std::path::Path::new("tsconfig.json").is_file()
+            } else if compiler_verified_in_edit
+                || ctx.policy.cwd.join("Cargo.toml").is_file()
+                || ctx.policy.cwd.join("tsconfig.json").is_file()
             {
                 unverified_edits = false;
             }
@@ -970,6 +1076,9 @@ pub(crate) fn render_session_resume_preview(session_path: &Path, messages: &[Cha
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
+    let short_name = fname
+        .trim_start_matches("session-")
+        .trim_end_matches(".jsonl");
     let text_msgs: Vec<&ChatMessage> = messages
         .iter()
         .filter(|m| {
@@ -980,58 +1089,43 @@ pub(crate) fn render_session_resume_preview(session_path: &Path, messages: &[Cha
                     .unwrap_or(false)
         })
         .collect();
-    let recent: Vec<&ChatMessage> = text_msgs
+    let last_user_preview = text_msgs
         .iter()
         .rev()
-        .take(2)
-        .copied()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_deref())
+        .map(hud::strip_internal_tags_for_display)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains('╭') && !l.contains('╰') && !l.contains('│'))
         .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+        .join(" ");
+    let snippet: String = last_user_preview.chars().take(56).collect();
+    let suffix = if snippet.is_empty() {
+        String::new()
+    } else if last_user_preview.chars().count() > 56 {
+        format!(" · \"{}…\"", snippet)
+    } else {
+        format!(" · \"{}\"", snippet)
+    };
 
     let (_, cols) = term_size();
     let full_w = cols.saturating_sub(2).max(6);
-    println!(
-        "\n{}╭─ 🗂️  {}: {}{} ({} {}){}",
+    let raw = format!(
+        "{}╭─ 🗂️  {}{}{} {}({} {}{}){}",
         CYAN,
-        tr_en("Oturum Yüklendi", "Session Loaded"),
         BOLD,
-        fname,
+        short_name,
+        RESET,
+        DIM,
         text_msgs.len(),
-        tr_en("mesaj", "messages"),
+        tr_en("mesaj", "msgs"),
+        suffix,
         RESET
     );
-    if recent.is_empty() {
-        println!(
-            "{}╰─{} {}Henüz mesaj geçmişi yok.{}",
-            CYAN, RESET, DIM, RESET
-        );
-    } else {
-        let r_len = recent.len();
-        for (i, m) in recent.into_iter().enumerate() {
-            let spine = if i + 1 == r_len { "╰─" } else { "│ " };
-            let role_tag = if m.role == "user" {
-                format!("{}👤 Siz{}", BOLD, RESET)
-            } else {
-                format!("{}⚡ SPAVN{}", GREEN, RESET)
-            };
-            let raw = m.content.as_deref().unwrap_or("");
-            let clean = hud::strip_internal_tags_for_display(raw);
-            let one_line: String = clean
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let row_raw = format!(
-                "{}{}{} {}: {}{}{}",
-                CYAN, spine, RESET, role_tag, DIM, one_line, RESET
-            );
-            let (trunc_row, _) = truncate_ansi_to_width(&row_raw, full_w);
-            println!("{}", trunc_row);
-        }
-    }
+    let (trunc, _) = truncate_ansi_to_width(&raw, full_w);
+    println!("\n{}", trunc);
 }
 
 fn main() {
@@ -1052,6 +1146,7 @@ fn main() {
     let mut force_interactive = false;
     let mut show_thinking = true;
     let mut quiet = false;
+    let mut json_output = false;
     let mut phase_opt: Option<AgentPhase> = None;
     let mut prompt_parts: Vec<String> = Vec::new();
 
@@ -1123,6 +1218,12 @@ fn main() {
                 i += 1;
                 continue;
             }
+            "-j" | "--json" => {
+                quiet = true;
+                json_output = true;
+                i += 1;
+                continue;
+            }
             "-v" | "-V" | "--version" => {
                 println!(
                     "spavn v{} ({}/{})",
@@ -1147,6 +1248,7 @@ fn main() {
                      \x20 -i, --interactive           Start interactive TUI after initial prompt\n\
                      \x20 -t, --think                 Toggle thinking stream display\n\
                      \x20 -q, --quiet                 Quiet/headless output mode\n\
+                     \x20 -j, --json                  Structured JSON output mode\n\
                      \x20 -V, --version               Print version and exit\n\
                      \x20 -h, --help                  Print this help message",
                     env!("CARGO_PKG_VERSION"),
@@ -1238,6 +1340,10 @@ fn main() {
         (p, vec![sys])
     };
 
+    if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
+        *first = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+    }
+
     if !prompt_parts.is_empty() && force_interactive {
         push_queued_message(prompt_parts.join(" "));
         prompt_parts.clear();
@@ -1273,14 +1379,43 @@ fn main() {
             None,
             quiet,
         ) {
-            if quiet {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "error",
+                        "model": endpoint.key,
+                        "session": session_file.to_string_lossy(),
+                        "error": err,
+                    })
+                );
+            } else if quiet {
                 eprintln!("Hata: {}", err);
             } else {
                 eprintln!("{}✗ Hata: {}{}", RED, err, RESET);
             }
             std::process::exit(1);
         }
-        if quiet {
+        if json_output {
+            let reply = messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+                .and_then(|m| m.content.as_deref())
+                .unwrap_or("")
+                .trim_end();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "ok",
+                    "model": endpoint.key,
+                    "phase": ctx.phase.as_str(),
+                    "session": session_file.to_string_lossy(),
+                    "reply": reply,
+                    "messages_count": messages.len(),
+                })
+            );
+        } else if quiet {
             if let Some(last) = messages.iter().rev().find(|m| m.role == "assistant") {
                 if let Some(text) = last.content.as_deref() {
                     if !text.trim().is_empty() {
@@ -1323,6 +1458,9 @@ fn main() {
                     .to_string_lossy()
                     .to_string();
                 messages = loaded;
+                if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
+                    *first = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+                }
                 render_session_resume_preview(&session_file, &messages);
             }
         }
@@ -1455,19 +1593,27 @@ fn main() {
         } else {
             active_role
         };
-        let relevant_artifacts = retrieve_relevant_artifacts(&cwd, &input, 2);
-        if !relevant_artifacts.is_empty() {
-            let mut art_block = String::from("<spavn_knowledge_artifacts>\n");
-            for a in &relevant_artifacts {
-                art_block.push_str(&format!(
-                    "- [{}] ({}): {}\n",
-                    a.ts,
-                    a.files.join(", "),
-                    a.summary
-                ));
+        if !endpoint.is_local() {
+            let relevant_artifacts = retrieve_relevant_artifacts(&cwd, &input, 2);
+            if !relevant_artifacts.is_empty() {
+                let mut art_block = String::from("<spavn_knowledge_artifacts>\n");
+                for a in &relevant_artifacts {
+                    let mut unique_files = Vec::new();
+                    for f in &a.files {
+                        if !unique_files.contains(f) {
+                            unique_files.push(f.clone());
+                        }
+                    }
+                    art_block.push_str(&format!(
+                        "- [{}] ({}): {}\n",
+                        a.ts,
+                        unique_files.join(", "),
+                        a.summary
+                    ));
+                }
+                art_block.push_str("</spavn_knowledge_artifacts>\n\n");
+                expanded_input = format!("{}{}", art_block, expanded_input);
             }
-            art_block.push_str("</spavn_knowledge_artifacts>\n\n");
-            expanded_input = format!("{}{}", art_block, expanded_input);
         }
         if let Some(phase_preamble) = active_phase.preamble() {
             if matches!(
@@ -1486,12 +1632,23 @@ fn main() {
         } else {
             dispatched_role.badge()
         };
+        let dragged_imgs = crate::router::extract_dragged_images_info(&input);
+        let mut display_input = input.clone();
+        for img in &dragged_imgs {
+            let escaped = img.path.replace(' ', "\\ ");
+            display_input = display_input
+                .replace(&escaped, &format!("[🖼️ {}]", img.filename))
+                .replace(&img.path, &format!("[🖼️ {}]", img.filename));
+        }
         println!(
             "\n{}╭─ 👤 Siz · {}{}{}",
             CYAN, DIM, user_header_badge, RESET
         );
-        for line in input.lines() {
+        for line in display_input.lines() {
             println!("{}│{} {}{}{}", CYAN, RESET, BOLD, line, RESET);
+        }
+        for img in &dragged_imgs {
+            hud::render_inline_image_preview(img);
         }
         if !activated_skills.is_empty() {
             println!(
@@ -1553,8 +1710,36 @@ mod premature_stop_tests {
             "Bitti. Başka bir şey ister misin?",
             "Tamamlandı, testler geçiyor.",
             "Which file should I edit?",
+            "### Değişiklikler:\n- `src/main.rs` güncellendi.\n- `src/router.rs` düzeltildi.",
+            "Örnek:\n```rust\nfn main() {}\n```",
         ] {
             assert!(!is_premature_stop(no), "{no}");
         }
+    }
+
+    #[test]
+    fn queue_and_steer_pop_last_for_live_edit_and_cancel() {
+        super::clear_queued_messages();
+        super::clear_steer_messages();
+        super::push_queued_message("ilk görev".to_string());
+        super::push_queued_message("ikinci görev".to_string());
+        assert_eq!(
+            super::peek_last_pending_message(),
+            Some((false, "ikinci görev".to_string()))
+        );
+        assert_eq!(
+            super::pop_last_pending_message(),
+            Some((false, "ikinci görev".to_string()))
+        );
+        super::push_steer_message("acil müdahale".to_string());
+        assert_eq!(
+            super::pop_last_pending_message(),
+            Some((true, "acil müdahale".to_string()))
+        );
+        assert_eq!(
+            super::pop_last_pending_message(),
+            Some((false, "ilk görev".to_string()))
+        );
+        assert_eq!(super::pop_last_pending_message(), None);
     }
 }

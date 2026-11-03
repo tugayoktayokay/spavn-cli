@@ -146,6 +146,19 @@ impl AgentRoleKey {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn short_badge(&self) -> &'static str {
+        match self {
+            AgentRoleKey::Auto => "",
+            AgentRoleKey::Coder => "💻 CODER",
+            AgentRoleKey::Reviewer => "🔍 REVIEW",
+            AgentRoleKey::Security => "🛡️ SEC",
+            AgentRoleKey::Test => "🧪 TEST",
+            AgentRoleKey::Docs => "📖 DOCS",
+            AgentRoleKey::Refactor => "🧹 REFACTOR",
+        }
+    }
+
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "auto" | "otomatik" => Some(Self::Auto),

@@ -122,7 +122,7 @@ impl ToolContext {
                 if !even_sovereign && self.access == AccessMode::Sovereign {
                     return Ok(());
                 }
-                if write && self.access == AccessMode::Safe {
+                if !even_sovereign && write && self.access == AccessMode::Safe {
                     return Ok(());
                 }
                 if prompt_user_approval(self, &format!("{} — {}", reason, verb), raw_path) {
@@ -315,6 +315,22 @@ pub fn tool_definitions() -> Value {
                     "required": ["op"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "subagent",
+                "description": "Delegate an isolated read-only investigation or analysis sub-task to a fresh sub-agent with its own context window, returning a concise summary.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string", "description": "Self-contained sub-question or investigation task" },
+                        "context": { "type": "string", "description": "Relevant file paths or background context for the sub-agent" },
+                        "expected_output": { "type": "string", "description": "Expected format or specific findings to return" }
+                    },
+                    "required": ["task"]
+                }
+            }
         }
     ])
 }
@@ -487,15 +503,36 @@ fn write_target_file(raw_path: &str, content: &str) -> Result<(), String> {
     }
 }
 
+static ATOMIC_WRITE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Temp file in the same dir + rename: a crash or full disk never leaves a truncated target.
-/// Follows symlinks and keeps the existing file's permissions (e.g. the exec bit).
+/// Follows symlinks (including broken symlinks) and keeps the existing file's permissions.
 fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = fs::canonicalize(path).unwrap_or_else(|_| {
+        if let Ok(link_dest) = fs::read_link(path) {
+            if link_dest.is_absolute() {
+                link_dest
+            } else {
+                path.parent().unwrap_or(Path::new(".")).join(link_dest)
+            }
+        } else {
+            path.to_path_buf()
+        }
+    });
+    if let Some(parent) = target.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let name = target
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let tmp = target.with_file_name(format!(".{}.spavn-tmp-{}", name, std::process::id()));
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = target.with_file_name(format!(
+        ".{}.spavn-tmp-{}-{}",
+        name,
+        std::process::id(),
+        seq
+    ));
     let result = (|| {
         fs::write(&tmp, content)?;
         if let Ok(meta) = fs::metadata(&target) {
@@ -526,6 +563,7 @@ fn remove_target_file(raw_path: &str) {
     }
 }
 
+#[cfg(unix)]
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
@@ -551,8 +589,15 @@ fn capture_capped<R: std::io::Read + Send + 'static>(
 
 /// SIGKILL the whole process group so grandchildren release the pipes.
 fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
     unsafe {
         kill(-(child.id() as i32), 9);
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &child.id().to_string()])
+            .output();
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -562,10 +607,13 @@ fn run_command_with_timeout(
     mut cmd: Command,
     timeout_sec: u64,
 ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), String> {
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
     cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0);
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let out_handle = capture_capped(child.stdout.take());
     let err_handle = capture_capped(child.stderr.take());
@@ -575,9 +623,17 @@ fn run_command_with_timeout(
     let exit_code = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                break status
-                    .code()
-                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    break status
+                        .code()
+                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+                }
+                #[cfg(not(unix))]
+                {
+                    break status.code().unwrap_or(-1);
+                }
             }
             Ok(None) => {
                 if crate::is_interrupted() {
@@ -657,29 +713,46 @@ fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str)
 
 pub fn render_diff_preview(path_display: &str, old_text: &str, new_text: &str) {
     crate::hud::pause_active_spinner();
-    println!("{}╭─ 📝 Diff: {}{}", DIM, path_display, RESET);
-    for line in old_text.lines().take(12) {
-        println!("{}│ {}- {}{}", DIM, RED, line, RESET);
-    }
-    if old_text.lines().count() > 12 {
+    let old_cnt = old_text.lines().count();
+    let new_cnt = new_text.lines().count();
+    println!(
+        "{}╭─ 📝 Diff: {}{}{} ({}+{}{}{} / {}-{}{}{}){}",
+        DIM, RESET, BOLD, path_display, GREEN, new_cnt, RESET, DIM, RED, old_cnt, RESET, DIM, RESET
+    );
+    for (idx, line) in old_text.lines().take(12).enumerate() {
         println!(
-            "{}│ {}  ... ({} {}){}",
+            "{}│ {:>2} {}\x1b[48;5;52m- {}\x1b[0m",
+            DIM,
+            idx + 1,
+            RED,
+            line
+        );
+    }
+    if old_cnt > 12 {
+        println!(
+            "{}│    {}... ({} {}){}",
             DIM,
             RED,
-            old_text.lines().count(),
+            old_cnt,
             crate::config::tr_en("satır silindi", "lines removed"),
             RESET
         );
     }
-    for line in new_text.lines().take(12) {
-        println!("{}│ {}+ {}{}", DIM, GREEN, line, RESET);
-    }
-    if new_text.lines().count() > 12 {
+    for (idx, line) in new_text.lines().take(12).enumerate() {
         println!(
-            "{}│ {}  ... ({} {}){}",
+            "{}│ {:>2} {}\x1b[48;5;22m+ {}\x1b[0m",
+            DIM,
+            idx + 1,
+            GREEN,
+            line
+        );
+    }
+    if new_cnt > 12 {
+        println!(
+            "{}│    {}... ({} {}){}",
             DIM,
             GREEN,
-            new_text.lines().count(),
+            new_cnt,
             crate::config::tr_en("satır eklendi", "lines added"),
             RESET
         );
@@ -1182,7 +1255,7 @@ pub fn build_live_project_signatures(cwd: &str) -> String {
     summary
 }
 
-pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Option<String> {
+pub fn check_unfinished_placeholders(modified_files: &[String]) -> Option<String> {
     for raw in modified_files {
         if split_remote_prefix(raw).is_some() {
             continue;
@@ -1211,6 +1284,13 @@ pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Op
                 }
             }
         }
+    }
+    None
+}
+
+pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Option<String> {
+    if let Some(placeholder_err) = check_unfinished_placeholders(modified_files) {
+        return Some(placeholder_err);
     }
 
     let root = expand_tilde(cwd);
@@ -1784,8 +1864,17 @@ fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
     }
 }
 
-fn check_bash_gate(ctx: &mut ToolContext, cmd: &str, host: &str) -> Result<(), String> {
-    let risk = assess_shell_command(cmd, &ctx.policy);
+fn check_bash_gate(
+    ctx: &mut ToolContext,
+    cmd: &str,
+    host: &str,
+    cwd: Option<&str>,
+) -> Result<(), String> {
+    let mut policy = ctx.policy.clone();
+    if let Some(dir) = cwd.map(str::trim).filter(|d| !d.is_empty()) {
+        policy.cwd = policy.resolve(dir);
+    }
+    let risk = assess_shell_command(cmd, &policy);
 
     if let ShellRisk::Catastrophic(reason) = &risk {
         return Err(format!(
@@ -1837,7 +1926,7 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
         .and_then(|v| v.as_u64())
         .unwrap_or(45);
 
-    if let Err(blocked) = check_bash_gate(ctx, command, &host) {
+    if let Err(blocked) = check_bash_gate(ctx, command, &host, cwd) {
         return blocked;
     }
 
@@ -1852,8 +1941,37 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
         c.args(["-o", "ConnectTimeout=8", &ssh_target, &remote_cmd]);
         c
     } else {
-        let mut c = Command::new(crate::config::shell_bin());
-        c.args(["-c", command]);
+        let shell_bin = crate::config::shell_bin();
+        let mut c = if cfg!(target_os = "macos")
+            && ctx.access == AccessMode::Safe
+            && Path::new("/usr/bin/sandbox-exec").exists()
+        {
+            let ws = ctx.policy.cwd.to_string_lossy().replace('"', "\\\"");
+            let profile = format!(
+                "(version 1)(allow default)(deny file-write* (subpath \"/\"))(allow file-write* (subpath \"{}\") (subpath \"/tmp\") (subpath \"/private/tmp\") (subpath \"/var/folders\") (subpath \"/private/var/folders\") (literal \"/dev/null\"))",
+                ws
+            );
+            let mut sb = Command::new("/usr/bin/sandbox-exec");
+            sb.args(["-p", &profile, &shell_bin, "-c", command]);
+            sb
+        } else {
+            let mut sh = Command::new(&shell_bin);
+            let low_shell = shell_bin.to_ascii_lowercase();
+            if low_shell.contains("pwsh") || low_shell.contains("powershell") {
+                sh.args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    command,
+                ]);
+            } else if low_shell.ends_with("cmd.exe") || low_shell == "cmd" {
+                sh.args(["/C", command]);
+            } else {
+                sh.args(["-c", command]);
+            }
+            sh
+        };
         let home = home_dir();
         let extra_dirs = [
             home.join(".cargo/bin"),
@@ -2389,6 +2507,91 @@ fn exec_web(args: &Value) -> String {
     "Web search returned no results.".to_string()
 }
 
+fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
+    let task = get_str_alias(args, &["task", "prompt", "query", "objective"]);
+    if task.trim().is_empty() {
+        return "Subagent error: missing 'task' parameter.".to_string();
+    }
+    let extra_ctx = get_str_alias(args, &["context", "files", "background"]);
+    let expected = get_str_alias(args, &["expected_output", "format", "output"]);
+
+    let ep = crate::router::resolve_endpoint(&ctx.current_model);
+    let mut sub_ctx = ToolContext::new(
+        AccessMode::Safe,
+        ctx.default_host.clone(),
+        ctx.policy.cwd.clone(),
+        crate::spavn_engine::AgentPhase::Plan,
+    );
+    sub_ctx.policy = ctx.policy.clone();
+
+    let mut sub_tools = tool_definitions_for_phase(crate::spavn_engine::AgentPhase::Plan);
+    if let Value::Array(ref mut items) = sub_tools {
+        items.retain(|it| {
+            it.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                != Some("subagent")
+        });
+    }
+
+    let mut user_prompt = format!("## Sub-Agent Task\n{}", task.trim());
+    if !extra_ctx.trim().is_empty() {
+        user_prompt.push_str(&format!("\n\n## Context\n{}", extra_ctx.trim()));
+    }
+    if !expected.trim().is_empty() {
+        user_prompt.push_str(&format!("\n\n## Expected Output\n{}", expected.trim()));
+    }
+
+    let mut msgs = vec![
+        crate::router::ChatMessage::system(
+            "You are a focused, read-only SPAVN Sub-Agent. Use `read` and `search` to investigate the codebase and return a concise, high-signal summary with exact file:line references. Do not speculate.",
+        ),
+        crate::router::ChatMessage::user(user_prompt),
+    ];
+
+    for step in 0..4 {
+        if crate::is_interrupted() {
+            return "[Subagent cancelled via Esc/Ctrl+C]".to_string();
+        }
+        crate::hud::set_spinner_label(&format!("🐝 Alt-ajan araştırıyor (adım {}/4)", step + 1));
+        let Ok(res) = crate::router::stream_chat_completion(&ep, &msgs, &sub_tools, |_| {}, |_| {})
+        else {
+            break;
+        };
+        let msg = res.message;
+        msgs.push(msg.clone());
+        if let Some(tcs) = msg.tool_calls {
+            for tc in tcs.into_iter().take(3) {
+                let tname = tc.function.name.trim().to_string();
+                let out = if matches!(tname.as_str(), "read" | "search" | "memory" | "web") {
+                    execute_tool(&mut sub_ctx, &tname, &tc.function.arguments)
+                } else {
+                    "Subagent error: only read-only tools (read, search, memory, web) are allowed."
+                        .to_string()
+                };
+                msgs.push(crate::router::ChatMessage::tool_result(tc.id, tname, out));
+            }
+            continue;
+        }
+        let ans = msg
+            .content
+            .or(msg.reasoning_content)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !ans.is_empty() {
+            return ans;
+        }
+        break;
+    }
+
+    msgs.into_iter()
+        .rev()
+        .find(|m| m.role == "assistant")
+        .and_then(|m| m.content.or(m.reasoning_content))
+        .unwrap_or_else(|| "(Sub-agent completed without textual summary)".to_string())
+}
+
 pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> String {
     ctx.tool_step_counter += 1;
     let args = parse_args_resilient(args_json);
@@ -2408,8 +2611,9 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
         "memory" | "recall_memory" | "remember" => exec_memory(ctx, &args),
         "skill" | "load_skill" | "use_skill" => exec_skill(&args),
         "web" | "web_search" | "websearch" | "webfetch" | "web_fetch" => exec_web(&args),
+        "subagent" | "spawn_submodels" | "task" | "delegate" => exec_subagent(ctx, &args),
         _ => format!(
-            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, memory, skill, web.",
+            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, memory, skill, web, subagent.",
             name
         ),
     }
@@ -2495,9 +2699,17 @@ mod phase_tests {
             .collect();
         assert!(names.contains(&"read"));
         assert!(names.contains(&"search"));
+        assert!(names.contains(&"subagent"));
         assert!(!names.contains(&"edit"));
         assert!(!names.contains(&"write"));
         assert!(!names.contains(&"bash"));
+    }
+
+    #[test]
+    fn subagent_rejects_empty_task_gracefully() {
+        let mut c = ctx(AgentPhase::Plan);
+        let out = execute_tool(&mut c, "subagent", "{}");
+        assert!(out.contains("missing 'task' parameter"), "{out}");
     }
 
     #[test]
@@ -2517,7 +2729,7 @@ mod phase_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod timeout_tests {
     use super::*;
 
@@ -2538,7 +2750,7 @@ mod timeout_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod atomic_write_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -2572,6 +2784,33 @@ mod atomic_write_tests {
         let fresh = dir.join("new.txt");
         write_atomic(&fresh, "x").unwrap();
         assert_eq!(fs::read_to_string(&fresh).unwrap(), "x");
+
+        let broken_target = dir.join("broken_target.txt");
+        let broken_link = dir.join("broken_link.txt");
+        std::os::unix::fs::symlink("broken_target.txt", &broken_link).unwrap();
+        write_atomic(&broken_link, "healed").unwrap();
+        assert!(fs::symlink_metadata(&broken_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&broken_target).unwrap(), "healed");
+
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_bash_gate_respects_cwd_argument_for_protected_paths() {
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            PathBuf::from("/tmp/ws"),
+            crate::spavn_engine::AgentPhase::Code,
+        );
+        c.policy = PathPolicy::for_test("/tmp/ws", "/tmp/ws", vec!["/protected/apps"]);
+        let res = check_bash_gate(&mut c, "rm -rf proj", "local", Some("/protected/apps"));
+        assert!(
+            res.is_err(),
+            "rm -rf proj with cwd=/protected/apps must be blocked as Catastrophic"
+        );
     }
 }

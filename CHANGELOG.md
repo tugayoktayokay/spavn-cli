@@ -1,5 +1,19 @@
 # Değişiklik Günlüğü
 
+## 2026-11-04 — Apple-tarzı TUI sadeleştirmesi, atomik görsel rozetleri, `/login` merkezi, `subagent`, Windows & yerel Q4 optimizasyonları
+
+### Arayüz & UX (`hud.rs`, `main.rs`, `slash_commands.rs`)
+- **Minimalist tek-satır Dock**: Üst ve alt durum çubukları Apple sadeliğinde tek satıra indirildi; varsayılan `local` sunucu ve mükerrer kota/yüzde yazıları temizlendi.
+- **Atomik Görsel Rozeti (`[🖼️ Screenshot... (KB)]`) + iTerm2 OSC 1337 Önizleme**: Terminale sürüklenen ekran görüntüleri uzun `/var/folders/...` yolu yerine anında yeşil `[🖼️ dosya.png (KB)]` hapına dönüşür; tek `Backspace` / `Delete` ile tek seferde silinir, `←`/`→` ok tuşlarıyla tek blok olarak atlanır ve gönderildiğinde iTerm2/WezTerm içinde canlı görüntülenir.
+- **Canlı Kuyruk Düzenleme & İptal (`↑` / `Ctrl+X`)**: İşlem sürerken (`LiveSpinner`) kuyruğa veya anında müdahaleye (`Steer`) atılan mesajlar giriş satırında önizlenir; `↑` (Yukarı Ok) ile yazım kutusuna geri çekilip düzenlenir, `Ctrl+X` / `Delete` / `/qclear` ile işlemi durdurmadan iptal edilir.
+- **Sıfır Titreşimli (DEC Mode 2026) Tam Çerçeveli Menüler**: Tüm menüler (`select_interactive_menu`, `interactive_select_model`) tam kapalı kutu (`╭...╮`, `│...│`, `╰...╯`), dinamik ANSI/emoji sütun hizalaması ve atomik ekran tamponuyla çizilir. Boş `Enter` basışlarında dock aşağı kaymaz.
+- **`/login` · `/provider` · `/connect`**: Otomatik CLI token algılama (`gh auth token`, `gcloud auth`), tek tuşla (`o`) tarayıcıdan API anahtar sayfası açma ve yerel model sunucusu bağlama merkezi.
+
+### Yerel LLM & Ajan Çekirdeği (`router.rs`, `tools.rs`, `main.rs`)
+- **Yerel Model Örnekleme & XML Kurtarma**: Yerel modellerde sabit `temperature: 0.2` / `max_tokens: 4096` ezmesi kaldırıldı; Qwen3.5/3.6/Ornith `<function=...><parameter=...>` XML tool-call kurtarıcısı, `edit` aracında otomatik girinti (indentation) hizalama (`reindent_replacement_lines`) ve `preserve_thinking` (son 6 mesajda `reasoning_content` koruma) eklendi.
+- **`subagent` Aracı & macOS `sandbox-exec` & `--json` / `--version` / `/bench`**: İzole salt-okunur alt-ajan (`subagent`), `SAFE` modda macOS çekirdek seviyesi `sandbox-exec` (Seatbelt) yazma kilidi, `-j`/`--json` çıktı modu, `-V`/`--version` ve saf decode hızını ölçen `/bench` komutu eklendi.
+- **Cross-Platform (Windows + Unix)**: Win32 Console (`GetConsoleMode`/`SetConsoleMode`/`SetConsoleScreenBufferInfo`), `SetConsoleCtrlHandler`, `taskkill` ve Microsoft/GitHub Models (`models.inference.ai.azure.com`) + Azure OpenAI desteği eklendi.
+
 ## 2026-11-03 — Yerel modeller için kompakt prompt, guard sertleştirme, süreç/yazma dayanıklılığı
 
 ### Sistem prompt'u (yerel modeller)
