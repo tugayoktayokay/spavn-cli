@@ -294,4 +294,4 @@ src/
 
 ## License
 
-Not yet published.
+[MIT](LICENSE) — free to use, modify, and contribute. See the [contributing notes](CONTRIBUTING.md).
