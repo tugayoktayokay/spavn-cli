@@ -670,6 +670,7 @@ fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
     let last_user_idx = sanitized.iter().rposition(|m| m.role == "user");
     let mut out_vals = Vec::with_capacity(sanitized.len() + 2);
     let total_len = sanitized.len();
+    let mut pending_tool_vision_parts: Vec<Value> = Vec::new();
 
     for (idx, m) in sanitized.iter().enumerate() {
         let mut v = serde_json::to_value(m).unwrap_or_else(|_| json!({}));
@@ -695,30 +696,38 @@ fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
         }
         out_vals.push(v);
 
-        if m.role == "tool" && idx + 4 >= total_len {
+        if m.role == "tool" && idx + 6 >= total_len {
             if let Some(ref txt) = m.content {
                 if txt.starts_with("[SPAVN Vision Image Loaded:") {
                     let imgs = extract_dragged_images(txt);
                     if !imgs.is_empty() {
-                        let mut parts = vec![json!({
+                        pending_tool_vision_parts.push(json!({
                             "type": "text",
                             "text": format!("[Visual content of tool result `{}`]:", txt)
-                        })];
+                        }));
                         for (mime, b64) in imgs {
-                            parts.push(json!({
+                            pending_tool_vision_parts.push(json!({
                                 "type": "image_url",
                                 "image_url": {
                                     "url": format!("data:{};base64,{}", mime, b64)
                                 }
                             }));
                         }
-                        out_vals.push(json!({
-                            "role": "user",
-                            "content": parts
-                        }));
                     }
                 }
             }
+        }
+
+        let next_is_tool = sanitized
+            .get(idx + 1)
+            .map(|n| n.role == "tool")
+            .unwrap_or(false);
+        if !next_is_tool && !pending_tool_vision_parts.is_empty() {
+            let parts = std::mem::take(&mut pending_tool_vision_parts);
+            out_vals.push(json!({
+                "role": "user",
+                "content": parts
+            }));
         }
     }
     out_vals
@@ -1988,6 +1997,64 @@ fn bar() {}
         assert_eq!(parsed["path"], "src/main.rs");
         assert_eq!(parsed["old_text"], "fn foo() {}");
         assert_eq!(parsed["new_text"], "fn bar() {}");
+    }
+
+    #[test]
+    fn multiple_tool_calls_with_vision_keep_all_tool_messages_contiguous() {
+        register_read_image(
+            "/tmp/test_multi_1.png",
+            DraggedImage {
+                raw_span: "/tmp/test_multi_1.png".to_string(),
+                path: "/tmp/test_multi_1.png".to_string(),
+                filename: "test_multi_1.png".to_string(),
+                mime: "image/png",
+                size_bytes: 16,
+                base64: "AAAA".to_string(),
+            },
+        );
+        let assistant_with_2_tools = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![
+                ToolCall {
+                    id: "c1".to_string(),
+                    call_type: "function".to_string(),
+                    function: ToolFunction {
+                        name: "read".to_string(),
+                        arguments: "{\"path\":\"/tmp/test_multi_1.png\"}".to_string(),
+                    },
+                    thought_signature: None,
+                },
+                ToolCall {
+                    id: "c2".to_string(),
+                    call_type: "function".to_string(),
+                    function: ToolFunction {
+                        name: "read".to_string(),
+                        arguments: "{\"path\":\"Cargo.toml\"}".to_string(),
+                    },
+                    thought_signature: None,
+                },
+            ]),
+            tool_call_id: None,
+            name: None,
+            thought_signature: None,
+            reasoning_content: None,
+        };
+        let t1 = ChatMessage::tool_result(
+            "c1",
+            "read",
+            "[SPAVN Vision Image Loaded: /tmp/test_multi_1.png (image/png, 0.1 KB)]",
+        );
+        let t2 = ChatMessage::tool_result("c2", "read", "1: [package]");
+        let msgs = vec![msg("user", "compare"), assistant_with_2_tools, t1, t2];
+        let serialized = serialize_messages_with_vision(&msgs);
+        // Order MUST be: user -> assistant -> tool(c1) -> tool(c2) -> user(vision)
+        assert_eq!(serialized.len(), 5);
+        assert_eq!(serialized[0]["role"], "user");
+        assert_eq!(serialized[1]["role"], "assistant");
+        assert_eq!(serialized[2]["role"], "tool");
+        assert_eq!(serialized[3]["role"], "tool");
+        assert_eq!(serialized[4]["role"], "user");
     }
 }
 
