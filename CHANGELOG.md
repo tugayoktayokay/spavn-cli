@@ -1,5 +1,58 @@
 # Değişiklik Günlüğü
 
+## 2026-11-03 — Yerel modeller için kompakt prompt, guard sertleştirme, süreç/yazma dayanıklılığı
+
+### Sistem prompt'u (yerel modeller)
+- `build_system_prompt(cwd, compact)`: `endpoint.is_local()` iken kompakt kurallar (6 kural korunur, cümleler kısalır), sembol haritası 900 karakter, profil 500 karakter. Bu repoda 10,8 KB → 5,4 KB (bulut) / ~2,8 KB (yerel, ~710 token).
+- Sembol haritası bütçeli (2000 karakter, dosya başına 8 sembol); `PROFILE.md` 1200 karakter; pin ≤ 8, hedef ≤ 5, her biri ≤ 240 karakter.
+- `/model`, `/local`, `/byok` ile model değişince sistem prompt'u yeni modele göre yeniden kurulur ve oturuma yazılır.
+
+### Güvenlik (`guard.rs`, `tools.rs`)
+- Onay istemi: stdin kapalı/pipe (EOF) artık onay sayılmaz (önceden `rm -rf` sormadan çalışıyordu); Enter tek başına reddeder.
+- İç içe kabuk: `bash -c`, `sh -c`, `zsh -lc`, `eval` içindeki komut da denetlenir.
+- `cd <korunan> && rm -rf x` göreli yolu `cd` hedefine göre değerlendirir; `${HOME}` tokenizer'da bütün kalır ve ev dizini olarak çözülür.
+- `mv` ile korunan/kritik yolu kaynak olarak taşıma silme sayılır; gizli dosya (`~/.ssh` vb.) argümanı onay ister.
+- `curl … | sh`, `base64 -d | bash`, `$VAR args` (dinamik komut adı) onay ister.
+- `EXA_API_KEY` URL yerine `x-api-key` başlığında.
+
+### Dayanıklılık
+- Komut zaman aşımı/kesinti: process group SIGKILL (torun süreçler pipe'ı tutup takılmaz), çıktı 4 MB ile sınırlı, sinyalle ölen süreç `128+sinyal` döner.
+- Dosya yazma atomik (geçici dosya + rename; izin ve symlink korunur); SSH yazımında stdin hatası yutulmaz.
+- Retry: durum kodu ayrıştırma (408/425/429/500/502/503/504/529), `Retry-After` (≤ 30 sn) saygısı, 3 deneme; yalnızca akış başlamadan önceki bağlantı hataları yeniden denenir.
+- Terminal: `TermiosGuard` (Drop) ham modu panikte/atlanan çıkışta da geri yükler.
+- Tur kurtarma: `is_premature_stop` ayrı fonksiyon; "let me know" ile biten nihai cevaplar artık gereksiz ek tur tetiklemez.
+
+### Testler (53 → 69)
+- Guard (iç içe kabuk, cd, mv, `${HOME}`, pipe-to-shell), atomik yazma, zaman aşımı/sinyal, retry sınıflandırma, prompt bütçeleri, model değişiminde prompt yenileme, markdown dayanıklılık, premature-stop.
+- Kalite kapısı: `cargo clippy --all-targets` 0 uyarı, `cargo test` 69/69; mock sunucuyla uçtan uca (tool döngüsü, 429+Retry-After, boş-stop kurtarma, EOF onay reddi, PTY'de ham mod geri yükleme).
+
+## 2026-11-03 — Modüler yapı: `markdown.rs` + `slash_commands.rs` ve test kapsamı
+
+### Mimari
+- `src/markdown.rs` (yeni): Tablo motoru (`parse_table_row_cells`, `is_table_separator_row`, `render_markdown_table`) ve akış renderer'ı (`MarkdownStreamRenderer`) `hud.rs`'ten ayrıştırıldı. Escape'li pipe (`\|`) ve inline-code içindeki pipe artık hücre bölmez; boş hücreli satırlar (örn. tek başına `|`) çöp kutu çizdirmemeli düzeltmesi.
+- `src/slash_commands.rs` (yeni): Tüm `/komut` dispatch'i (`dispatch_slash_command` → `SlashOutcome::{Handled, ExitLoop, NotSlash}`) `main.rs`'ten ayrıştırıldı. `/reload` artık `-s <session>` ile aktif oturumu devralarak yeniden başlar (önceki `-c` = temiz oturum davranışı terk edildi).
+
+### Testler (39 → 53)
+- `spavn_engine.rs`: rol/faz `from_str` alias'ları (TR dahil), `toggled`, `dispatch_role_from_prompt` skor tabanlı yönlendirme, `detect_secrets_in_text` (AWS/GitHub/private-key + yanlış-pozitif koruması), `scrub_secrets` (kısa token dokunulmazlığı, private-key blok kırpma).
+- `markdown.rs`: hücre ayrıştırma (escape/code pipe), separator tespiti, boş girdi, separator'sız tablo (ilk satır başlık), eşit olmayan (ragged) satırlar.
+- `slash_commands.rs`: `NotSlash` geçişi, `/plan` ↔ `/code` faz senkronu (`ctx.phase` dahil), `/access <mod>` güncellemesi.
+- Kalite kapısı: `cargo clippy --all-targets` 0 uyarı, `cargo test` 53/53.
+
+## 2026-11-03 — Native Anthropic Messages API
+
+### `router.rs`: `/v1/messages` protokolü
+- `ModelEndpoint::is_anthropic()`: `api.anthropic.com` tabanlı uç noktaları otomatik tanır; `SPAVN_FORCE_ANTHROPIC=1` ile `anthropic.com` dışındaki yerel Anthropic-proxy'lar da native yola alınır. OpenAI-uyumlu Anthropic proxy'leri otomatik olarak eski (OpenAI) yolda kalır.
+- `stream_chat_completion` başında dispatch: Anthropic uçları `stream_anthropic`'e yönlendirilir; OpenAI yolu byte-başına değişmez.
+- `stream_anthropic`: `x-api-key` + `anthropic-version: 2023-06-01` header'ları, `max_tokens: 16384`, SSE `content_block_delta` (`text_delta`/`input_json_delta`/`thinking_delta`), `content_block_start` (tool_use id+name), `message_delta` (stop_reason) ve `message_start`/`message_delta` (usage) ayrıştırma.
+- Mesaj dönüşümü (`split_and_convert_messages`): `system` mesajları tek `system` alanına birleştirilir; `assistant` `tool_calls`'ı `tool_use` bloklarına (girdi JSON olarak ayrıştırılmış), `tool` sonuçları `role:user` + `tool_result` bloklarına çevrilir; ardışık aynı-rol mesajlar birleştirilir (Anthropic rol dönüşümü kuralı).
+- Tool şeması: OpenAI `{function:{name,description,parameters}}` → Anthropic `{name,description,input_schema}`.
+- `stop_reason` eşlemesi: `end_turn`/`stop_sequence`→`stop`, `tool_use`→`tool_calls`, `max_tokens`→`length`.
+- 4 yeni birim testi (system ayrıştırma, tool_result dönüşümü, tool_use girdisi, protokol tespiti). Toplam 38 test.
+- Uçtan uca doğrulama (mock SSE): metin akışı, `read` tool_use döngüsü (input_json_delta biriktirme → araç çalıştırma → tool_result geri gönderim → final metin), usage ve stop_reason.
+
+### Doküman
+- README: Model routing bölümüne native Anthropic notu; env tablosuna `ANTHROPIC_API_KEY` ve `SPAVN_FORCE_ANTHROPIC`.
+
 ## 2026-11-03 — PLAN/CODE fazları ve MIT lisansı
 
 ### Faz: PLAN (salt-okunur) / CODE (uygulama)

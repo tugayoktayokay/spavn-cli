@@ -9,7 +9,7 @@ pub fn current_workdir() -> String {
         .unwrap_or_else(|_| ".".to_string())
 }
 
-fn build_workspace_repo_map(cwd: &str) -> String {
+fn build_workspace_repo_map(cwd: &str, compact: bool) -> String {
     let mut map = String::new();
     let root = Path::new(cwd);
 
@@ -92,7 +92,16 @@ fn build_workspace_repo_map(cwd: &str) -> String {
         collect_symbol_map(&src_dir, root, &mut sym_entries, 0);
         if !sym_entries.is_empty() {
             map.push_str("\n## Symbol Map (src/ — Jump directly to line numbers with `read`)\n");
+            let mut budget = if compact {
+                SYMBOL_MAP_BUDGET_COMPACT
+            } else {
+                SYMBOL_MAP_BUDGET
+            };
             for line in sym_entries.into_iter().take(20) {
+                if line.len() + 3 > budget {
+                    break;
+                }
+                budget -= line.len() + 3;
                 map.push_str(&format!("- {}\n", line));
             }
         }
@@ -117,16 +126,24 @@ fn build_workspace_repo_map(cwd: &str) -> String {
     let pins = crate::spavn_engine::load_pins(cwd);
     if !pins.is_empty() {
         map.push_str("\n## Spavn Pinned Project Context (`/pin`)\n");
-        for p in pins {
-            map.push_str(&format!("- [Pin #{}] {}\n", p.id, p.content));
+        for p in pins.into_iter().take(8) {
+            map.push_str(&format!(
+                "- [Pin #{}] {}\n",
+                p.id,
+                clip(&p.content, ITEM_BUDGET)
+            ));
         }
     }
     let goals = crate::spavn_engine::load_goals(cwd);
     let active_goals: Vec<_> = goals.into_iter().filter(|g| g.state == "active").collect();
     if !active_goals.is_empty() {
         map.push_str("\n## Spavn Active Project Goals (`/goal`)\n");
-        for g in active_goals {
-            map.push_str(&format!("- [Goal #{}] {}\n", g.id, g.objective));
+        for g in active_goals.into_iter().take(5) {
+            map.push_str(&format!(
+                "- [Goal #{}] {}\n",
+                g.id,
+                clip(&g.objective, ITEM_BUDGET)
+            ));
         }
     }
 
@@ -181,9 +198,9 @@ fn collect_symbol_map(dir: &Path, root: &Path, out: &mut Vec<String>, depth: usi
                 || trimmed.starts_with("export interface ");
             if is_sym {
                 let sig = trimmed.trim_end_matches('{').trim_end_matches(':').trim();
-                let short_sig: String = sig.chars().take(64).collect();
+                let short_sig: String = sig.chars().take(48).collect();
                 symbols.push(format!("L{}: `{}`", idx + 1, short_sig));
-                if symbols.len() >= 18 {
+                if symbols.len() >= 8 {
                     break;
                 }
             }
@@ -198,25 +215,7 @@ fn collect_symbol_map(dir: &Path, root: &Path, out: &mut Vec<String>, depth: usi
     }
 }
 
-pub fn build_system_prompt(cwd: &str) -> String {
-    let repo_map = build_workspace_repo_map(cwd);
-    let user_profile_block = load_user_profile_markdown()
-        .map(|p| format!("\n# User Profile (~/.spavn/PROFILE.md)\n{}\n", p))
-        .unwrap_or_default();
-    let lang_rule = if crate::config::is_en() {
-        "- Language: Respond in concise, evidence-first English."
-    } else {
-        "- Dil: Türkçe, doğrudan, kanıt odaklı ve net yanıt ver; gereksiz giriş/özet cümleleri kurma."
-    };
-
-    format!(
-        r#"# Identity & Role
-You are **SPAVN** (`spavn.dev`), an elite autonomous software engineering agent.
-{lang_rule}
-- Presentation: Use clean Markdown (`### Heading`, `- **Key**: detail`), fenced code blocks, and tables for comparisons.
-- Working Directory: `{cwd}`
-{user_profile_block}{repo_map}
-# Engineering Constitution (High-Signal Rules)
+const FULL_CONSTITUTION: &str = r#"# Engineering Constitution (High-Signal Rules)
 1. **Targeted Discovery (No Blind Grepping):** Use the Turn-0 `Workspace Files` and `Symbol Map` (with `L<line>` anchors) above to jump straight to `read(path, start_line, end_line)` or `search(pattern, path)`. Never run `ls`/`find` for files already listed above, and never re-read a file right after editing it (`edit`/`write` already confirms the state).
 2. **Reuse Existing Architecture:** Before writing code, inspect neighboring functions/types in the target file. Match the repository's existing naming, error handling, imports, and state patterns. Never invent a parallel convention or leave dead code behind.
 3. **High-Precision Surgical Edits:**
@@ -227,6 +226,97 @@ You are **SPAVN** (`spavn.dev`), an elite autonomous software engineering agent.
 5. **Non-Interactive Shell & Verification Gate:**
    - In `bash`, always pass non-interactive flags (`-y`, `--no-pager`, `CI=1`) and avoid blocking pagers/editors (`less`, `vim`, `git log` without `-n`).
    - After any code modification, MUST run a real verification check via `bash` (`cargo check`/`cargo test`, `pytest`, `npm test`, `node --check`, etc.) and confirm it passes before yielding to the user.
-6. **Remote Host Symmetry:** All file tools (`read`, `edit`, `write`, `search`) accept `<host>:/path` prefixes configured in `~/.spavn/config.json` alongside `bash(host="<host>")`."#
+6. **Remote Host Symmetry:** All file tools (`read`, `edit`, `write`, `search`) accept `<host>:/path` prefixes configured in `~/.spavn/config.json` alongside `bash(host="<host>")`."#;
+
+const COMPACT_CONSTITUTION: &str = r#"# Rules
+1. Use the Workspace Files and Symbol Map above; go straight to `read(path, start_line, end_line)` or `search`. No `ls`/`find` for listed files. Do not re-read a file after `edit`/`write`.
+2. Match the neighboring code's naming, errors and imports. No dead code, no parallel conventions.
+3. Prefer `edit` over `write`. `old_text` = exact snippet plus 2-4 unchanged lines so it is unique; never include `123:` line-number prefixes. If `edit` warns, fix it next step.
+4. Finish fully: no TODO, stubs or mocks; update every caller and import.
+5. `bash` is non-interactive: pass `-y`, `--no-pager`, `CI=1`; no pagers or editors. After any code change run a real check (`cargo check`/`cargo test`, `pytest`, `npm test`) and confirm it passes before replying.
+6. File tools and `bash(host=...)` accept `<host>:/path` for hosts in `~/.spavn/config.json`."#;
+
+/// Max chars of the Turn-0 symbol map; keeps the prompt small for local models.
+const SYMBOL_MAP_BUDGET: usize = 2000;
+const SYMBOL_MAP_BUDGET_COMPACT: usize = 900;
+const PROFILE_BUDGET: usize = 1200;
+const ITEM_BUDGET: usize = 240;
+
+fn clip(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+const PROFILE_BUDGET_COMPACT: usize = 500;
+
+/// `compact` = local/small-context models: same rules, fewer words, smaller map.
+pub fn build_system_prompt(cwd: &str, compact: bool) -> String {
+    let repo_map = build_workspace_repo_map(cwd, compact);
+    let profile_budget = if compact {
+        PROFILE_BUDGET_COMPACT
+    } else {
+        PROFILE_BUDGET
+    };
+    let user_profile_block = load_user_profile_markdown()
+        .map(|p| {
+            let p: String = p.chars().take(profile_budget).collect();
+            format!("\n# User Profile (~/.spavn/PROFILE.md)\n{}\n", p)
+        })
+        .unwrap_or_default();
+    let lang_rule = if crate::config::is_en() {
+        "- Language: Respond in concise, evidence-first English."
+    } else {
+        "- Dil: Türkçe, doğrudan, kanıt odaklı ve net yanıt ver; gereksiz giriş/özet cümleleri kurma."
+    };
+
+    let constitution = if compact {
+        COMPACT_CONSTITUTION
+    } else {
+        FULL_CONSTITUTION
+    };
+    format!(
+        r#"# Identity & Role
+You are **SPAVN** (`spavn.dev`), an elite autonomous software engineering agent.
+{lang_rule}
+- Presentation: Use clean Markdown (`### Heading`, `- **Key**: detail`), fenced code blocks, and tables for comparisons.
+- Working Directory: `{cwd}`
+{user_profile_block}{repo_map}
+{constitution}"#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn symbol_map_stays_within_budget() {
+        let p = super::build_system_prompt(".", false);
+        let sym = p.split("## Symbol Map").nth(1).unwrap_or("");
+        let sym = sym.split("\n#").next().unwrap_or("");
+        assert!(sym.len() <= super::SYMBOL_MAP_BUDGET + 120, "{}", sym.len());
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    #[test]
+    fn compact_is_smaller_and_keeps_core_rules() {
+        let full = super::build_system_prompt(".", false);
+        let c = super::build_system_prompt(".", true);
+        assert!(
+            c.len() < full.len() * 7 / 10,
+            "{} vs {}",
+            c.len(),
+            full.len()
+        );
+        for key in ["edit", "search", "cargo test", "TODO", "<host>:/path"] {
+            assert!(c.contains(key), "missing {key}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    #[test]
+    fn clip_is_char_safe() {
+        assert_eq!(super::clip("çğüşö", 3), "çğü");
+        assert_eq!(super::clip("ab", 10), "ab");
+    }
 }

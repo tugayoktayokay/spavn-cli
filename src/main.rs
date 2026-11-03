@@ -2,41 +2,36 @@ mod config;
 mod guard;
 mod http;
 mod hud;
+mod markdown;
 mod memory;
 mod router;
 mod session;
 mod skills;
+mod slash_commands;
 mod spavn_engine;
 mod tools;
 
-use config::{is_en, load_user_config, tr_en};
+use config::{load_user_config, tr_en};
 use hud::{
-    draw_bottom_dock, fetch_quick_quota_line, interactive_byok_manager, interactive_queue_manager,
-    interactive_select_access, interactive_select_host, interactive_select_language,
-    interactive_select_model, interactive_select_role, interactive_select_session,
-    interactive_select_skill, interactive_select_slash_command, read_bottom_dock_input,
-    render_assistant_footer, render_assistant_header, render_fleet_radar, render_full_quota_card,
-    render_welcome_header, reset_scroll_region, setup_scroll_region, term_size,
-    truncate_ansi_to_width, LiveSpinner, MarkdownStreamRenderer, PromptEvent, QueueAction,
+    draw_bottom_dock, fetch_quick_quota_line, interactive_select_session,
+    interactive_select_slash_command, read_bottom_dock_input, render_assistant_footer,
+    render_assistant_header, render_welcome_header, reset_scroll_region, setup_scroll_region,
+    term_size, truncate_ansi_to_width, LiveSpinner, MarkdownStreamRenderer, PromptEvent,
 };
 use memory::{build_system_prompt, current_workdir};
 use router::{resolve_endpoint, stream_chat_completion, ChatMessage, ModelEndpoint};
 use session::{
     append_message, fork_session, latest_session_path, load_session, new_session_path,
-    rewrite_session,
+    rewrite_session, sessions_dir,
 };
-use skills::{
-    discover_skills, expand_inline_skills, load_skill_content, remove_custom_skill,
-    render_skills_panel, save_custom_skill,
-};
+use skills::expand_inline_skills;
+use slash_commands::{dispatch_slash_command, SlashOutcome};
 use spavn_engine::{
-    add_goal, add_pin, complete_goal, dispatch_role_from_prompt, record_knowledge_artifact,
-    remove_pin, render_audit_panel, render_goals_panel, render_janitor_panel, render_pins_panel,
-    render_repo_wiki, retrieve_relevant_artifacts, AgentPhase, AgentRoleKey,
+    dispatch_role_from_prompt, record_knowledge_artifact, retrieve_relevant_artifacts, AgentPhase,
+    AgentRoleKey,
 };
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -155,6 +150,18 @@ const MAGENTA: &str = "\x1b[35m";
 const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
+/// Local model context guard: max read-only file reads executed per agent turn.
+/// Beyond this budget the turn stops dispatching reads and asks the model to analyze
+/// what it already gathered, avoiding local KV-cache prefill stalls on huge parallel reads.
+const LOCAL_READ_BUDGET: usize = 3;
+
+fn is_read_tool_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_lowercase().as_str(),
+        "read" | "read_file" | "cat" | "view"
+    )
+}
+
 fn summarize_tool_args(name: &str, args_json: &str, default_host: &str) -> String {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(args_json) else {
         return String::new();
@@ -236,23 +243,56 @@ fn evict_old_skill_blocks(text: &str) -> String {
     out
 }
 
-fn compact_messages_for_model(messages: &[ChatMessage], is_local: bool) -> Vec<ChatMessage> {
-    let keep_recent = if is_local { 6 } else { 14 };
+fn compact_messages_for_model(
+    messages: &[ChatMessage],
+    is_local: bool,
+    max_ctx_tokens: usize,
+) -> Vec<ChatMessage> {
+    let raw_tok = hud::estimate_messages_tokens(messages);
+    let prune_old_tools = if is_local {
+        raw_tok >= 16_000
+    } else {
+        raw_tok >= (max_ctx_tokens * 50) / 100
+    };
+    let keep_recent = if is_local { 10 } else { 20 };
     let len = messages.len();
-    let cutoff = len.saturating_sub(keep_recent);
-
+    let cutoff = if prune_old_tools {
+        len.saturating_sub(keep_recent)
+    } else {
+        0
+    };
+    let live_sigs = if prune_old_tools {
+        tools::build_live_project_signatures(".")
+    } else {
+        String::new()
+    };
     let last_user_idx = messages
         .iter()
         .rposition(|m| m.role == "user")
         .unwrap_or(len);
+    let keep_reasoning_from = if is_local {
+        last_user_idx.min(len.saturating_sub(6))
+    } else {
+        last_user_idx
+    };
 
     messages
         .iter()
         .enumerate()
         .map(|(idx, m)| {
             let mut cloned = m.clone();
+            if idx == 0 && m.role == "system" && !live_sigs.is_empty() {
+                if let Some(ref sys_text) = cloned.content {
+                    if !sys_text.contains("[SPAVN LIVE PROJECT SIGNATURES]") {
+                        cloned.content = Some(format!(
+                            "{}\n\n[SPAVN LIVE PROJECT SIGNATURES — Use exact symbol/type names below across files]:\n{}",
+                            sys_text, live_sigs
+                        ));
+                    }
+                }
+            }
 
-            if idx < last_user_idx {
+            if idx < keep_reasoning_from {
                 cloned.reasoning_content = None;
             }
 
@@ -293,7 +333,7 @@ fn estimate_tokens(messages: &[ChatMessage]) -> usize {
         .sum()
 }
 
-fn perform_manual_compact(
+pub(crate) fn perform_manual_compact(
     _endpoint: &ModelEndpoint,
     messages: &mut Vec<ChatMessage>,
     focus: Option<&str>,
@@ -332,7 +372,10 @@ fn perform_manual_compact(
 
     if messages.len() > 6 {
         let sys = messages[0].clone();
-        let tail_start = messages.len().saturating_sub(4);
+        let mut tail_start = messages.len().saturating_sub(4);
+        while tail_start > 1 && messages[tail_start].role == "tool" {
+            tail_start -= 1;
+        }
         let mut digest_lines = Vec::new();
         for m in &messages[1..tail_start] {
             if m.role == "user" || m.role == "assistant" {
@@ -366,6 +409,27 @@ fn perform_manual_compact(
     );
 }
 
+/// True when the reply announces an action ("let me read...", "şimdi ... okuyacağım", trailing `:`)
+/// but stops without calling a tool. Questions and "let me know" sign-offs are final answers.
+fn is_premature_stop(text: &str) -> bool {
+    let lower_tail: String = text
+        .lines()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let announces_en = (lower_tail.contains("let me ") && !lower_tail.contains("let me know"))
+        || lower_tail.contains("i will now ")
+        || lower_tail.contains("i'll now ");
+    let announces_tr = lower_tail.contains("şimdi ")
+        && (lower_tail.contains("yapacağım")
+            || lower_tail.contains("düzenleyeceğim")
+            || lower_tail.contains("okuyacağım")
+            || lower_tail.contains("inceleyeceğim"));
+    !text.contains('?') && (lower_tail.ends_with(':') || announces_tr || announces_en)
+}
+
 fn run_agent_turn(
     endpoint: &ModelEndpoint,
     ctx: &mut ToolContext,
@@ -388,11 +452,12 @@ fn run_agent_turn(
     let mut repeat_count = 0usize;
     let mut unverified_edits = false;
     let mut verification_nudged = false;
+    let mut modified_files_in_turn: Vec<String> = Vec::new();
+    let mut auto_verify_rounds = 0usize;
     let mut empty_stop_retries = 0usize;
     let mut length_stop_retries = 0usize;
     let mut premature_stop_retries = 0usize;
     let cfg = load_user_config();
-
     // OMP-style Unpaired Tool-Call Recovery: if the last message in history is an assistant
     // message with tool_calls (e.g. from an interrupted session), execute/resolve them before calling LLM.
     if let Some(last_msg) = messages.last().cloned() {
@@ -451,22 +516,39 @@ fn run_agent_turn(
             endpoint.clone()
         };
 
-        let view_messages = compact_messages_for_model(messages, step_endpoint.is_local());
-        hud::set_context_window_usage(
-            hud::estimate_messages_tokens(&view_messages),
-            step_endpoint.context_window_tokens(),
-        );
+        let max_ctx_tokens = step_endpoint.context_window_tokens();
+        let raw_before_tok = hud::estimate_messages_tokens(messages);
+        if raw_before_tok >= (max_ctx_tokens * 80) / 100 && messages.len() > 6 {
+            perform_manual_compact(&step_endpoint, messages, None);
+            rewrite_session(session_file, messages);
+            let after_full_tok = hud::estimate_messages_tokens(messages);
+            if !quiet {
+                println!(
+                    "{}╰─ ⚡ {}: {} → {}{}",
+                    GREEN,
+                    tr_en(
+                        "[SPAVN Auto-Compact sonrası işlem otomatik devam ediyor]",
+                        "[SPAVN Auto-Continuing after context compaction]"
+                    ),
+                    hud::format_token_short(raw_before_tok),
+                    hud::format_token_short(after_full_tok),
+                    RESET
+                );
+            }
+        }
+
+        let view_messages =
+            compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
+        let view_tok = hud::estimate_messages_tokens(&view_messages);
+        hud::set_context_window_usage(view_tok, max_ctx_tokens);
         let mut spinner = if quiet {
             LiveSpinner::silent()
         } else {
-            LiveSpinner::start(&format!(
-                "{} {}",
-                step_endpoint.label,
-                tr_en("düşünülüyor", "thinking")
-            ))
+            LiveSpinner::start(tr_en("Düşünülüyor", "Thinking"))
         };
         let content_started = std::cell::Cell::new(false);
         let content_chars = std::cell::Cell::new(0usize);
+        let partial_content = RefCell::new(String::new());
         let md_renderer = RefCell::new(MarkdownStreamRenderer::new());
 
         let result = match stream_chat_completion(
@@ -479,6 +561,7 @@ fn run_agent_turn(
                 }
             },
             |content_delta| {
+                partial_content.borrow_mut().push_str(content_delta);
                 if quiet {
                     return;
                 }
@@ -498,8 +581,28 @@ fn run_agent_turn(
         ) {
             Ok(r) => r,
             Err(err) => {
+                if content_started.get() {
+                    md_renderer.borrow_mut().finish();
+                }
                 hud::close_thinking_box_if_open();
                 spinner.stop();
+                if content_started.get() && !quiet {
+                    println!("{}╰─{}", CYAN, RESET);
+                }
+                let partial_trimmed = partial_content.borrow().trim().to_string();
+                if !partial_trimmed.is_empty() {
+                    let saved_partial = ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some(format!("{}\n\n*[Esc ile durduruldu]*", partial_trimmed)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                        thought_signature: None,
+                        reasoning_content: None,
+                    };
+                    append_message(session_file, &saved_partial);
+                    messages.push(saved_partial);
+                }
                 if is_interrupted() {
                     println!(
                         "\n{}⚡ {}{}",
@@ -531,11 +634,7 @@ fn run_agent_turn(
                     let mut fb_spinner = if quiet {
                         LiveSpinner::silent()
                     } else {
-                        LiveSpinner::start(&format!(
-                            "{} {}",
-                            fallback_ep.label,
-                            tr_en("düşünülüyor", "thinking")
-                        ))
+                        LiveSpinner::start(tr_en("Düşünülüyor", "Thinking"))
                     };
                     let fb_res = stream_chat_completion(
                         &fallback_ep,
@@ -547,9 +646,17 @@ fn run_agent_turn(
                             }
                         },
                         |c| {
+                            partial_content.borrow_mut().push_str(c);
                             if quiet {
                                 return;
                             }
+                            content_chars.set(content_chars.get() + c.chars().count());
+                            hud::set_spinner_label(&format!(
+                                "✍️ {} ({} {})",
+                                tr_en("Yanıt yazılıyor", "Writing response"),
+                                content_chars.get(),
+                                tr_en("krk", "ch")
+                            ));
                             if !content_started.get() {
                                 content_started.set(true);
                                 render_assistant_header(&fallback_ep.key);
@@ -587,15 +694,36 @@ fn run_agent_turn(
         hud::set_context_window_usage(actual_used, step_endpoint.context_window_tokens());
 
         let secs = (result.elapsed_ms as f64) / 1000.0;
-        let tok_s = if secs > 0.0 && result.usage.completion_tokens > 0 {
-            (result.usage.completion_tokens as f64) / secs
+        let decode_secs = (result.elapsed_ms.saturating_sub(result.ttft_ms).max(1) as f64) / 1000.0;
+        let tok_s = if decode_secs > 0.0 && result.usage.completion_tokens > 0 {
+            (result.usage.completion_tokens as f64) / decode_secs
         } else {
             0.0
         };
 
         if let Some(tool_calls) = assistant_msg.tool_calls {
+            let mut local_read_count = 0usize;
             for tc in tool_calls {
                 let tool_name = tc.function.name.trim().to_string();
+                if endpoint.is_local()
+                    && is_read_tool_name(&tool_name)
+                    && local_read_count >= LOCAL_READ_BUDGET
+                {
+                    let tool_msg = ChatMessage::tool_result(
+                        tc.id,
+                        tool_name,
+                        format!(
+                            "[SPAVN Local Context Budget]: {} files read in this step; analyze these first before reading more.",
+                            LOCAL_READ_BUDGET
+                        ),
+                    );
+                    append_message(session_file, &tool_msg);
+                    messages.push(tool_msg);
+                    continue;
+                }
+                if endpoint.is_local() && is_read_tool_name(&tool_name) {
+                    local_read_count += 1;
+                }
                 let sig = format!("{}:{}", tool_name, tc.function.arguments.trim());
                 if sig == last_tool_sig {
                     repeat_count += 1;
@@ -611,6 +739,20 @@ fn run_agent_turn(
                     )
                 {
                     unverified_edits = true;
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    {
+                        if let Some(p) = v
+                            .get("path")
+                            .or_else(|| v.get("file_path"))
+                            .or_else(|| v.get("file"))
+                            .and_then(|s| s.as_str())
+                        {
+                            let p_str = p.trim().to_string();
+                            if !p_str.is_empty() && !modified_files_in_turn.contains(&p_str) {
+                                modified_files_in_turn.push(p_str);
+                            }
+                        }
+                    }
                 } else if matches!(
                     tool_name.as_str(),
                     "bash" | "run_command" | "shell" | "exec"
@@ -633,12 +775,11 @@ fn run_agent_turn(
                     tool_spinner.stop();
                     out
                 };
-                if repeat_count >= 2 {
+                if repeat_count >= 2 || tool_output.starts_with("[EOF STOP:") {
                     tool_output.push_str(&format!(
-                        "\n\n[SPAVN LOOP GUARD (count={})]: You called `{}` with identical arguments {} times consecutively. Do NOT repeat the same call; change your approach or proceed directly to the next step.",
+                        "\n\n[SPAVN LOOP GUARD (count={})]: Stop repeating `{}` or reading past EOF. Proceed directly to your analysis or edit using the context already gathered.",
                         repeat_count + 1,
-                        tool_name,
-                        repeat_count + 1
+                        tool_name
                     ));
                 }
 
@@ -703,8 +844,45 @@ fn run_agent_turn(
 
         // 2. Empty Assistant Stop Recovery (OMP `empty-stop-retry`)
         let text_trimmed = assistant_msg.content.as_deref().unwrap_or("").trim();
+        let reasoning_trimmed = assistant_msg
+            .reasoning_content
+            .as_deref()
+            .unwrap_or("")
+            .trim();
+        if text_trimmed.is_empty() && !reasoning_trimmed.is_empty() {
+            let recovered_from_reasoning = hud::strip_internal_tags_for_display(reasoning_trimmed);
+            if !recovered_from_reasoning.is_empty() {
+                if !quiet && !content_started.get() {
+                    content_started.set(true);
+                    render_assistant_header(&step_endpoint.key);
+                    let mut r = MarkdownStreamRenderer::new();
+                    r.push(&recovered_from_reasoning);
+                    r.finish();
+                }
+                if let Some(last_m) = messages.last_mut() {
+                    last_m.content = Some(recovered_from_reasoning.clone());
+                }
+                rewrite_session(session_file, messages);
+                if !quiet {
+                    render_assistant_footer(
+                        &step_endpoint.key,
+                        ctx.access.short_badge(),
+                        result.ttft_ms,
+                        secs,
+                        tok_s,
+                    );
+                }
+                break;
+            }
+        }
         if text_trimmed.is_empty() && empty_stop_retries < 2 {
             empty_stop_retries += 1;
+            if !quiet {
+                println!(
+                    "\n{}⚡ [SPAVN Turn Recovery: Boş yanıt tespit edildi ({}/2) -> İşlem otomatik devam ediyor...]{}",
+                    YELLOW, empty_stop_retries, RESET
+                );
+            }
             let empty_nudge = ChatMessage::user(
                 "[SPAVN EMPTY-STOP RECOVERY]: You returned an empty response with no tool call and no text. Call the next required tool or provide the final answer now.",
             );
@@ -714,23 +892,7 @@ fn run_agent_turn(
         }
 
         // 3. Premature Action-Announcement Stop Recovery (OMP `unexpected-stop-retry`)
-        let lower_tail: String = text_trimmed
-            .lines()
-            .rev()
-            .take(3)
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
-        let looks_like_premature_stop = !text_trimmed.contains('?')
-            && (lower_tail.ends_with(':')
-                || lower_tail.contains("şimdi ")
-                    && (lower_tail.contains("yapacağım")
-                        || lower_tail.contains("düzenleyeceğim")
-                        || lower_tail.contains("okuyacağım")
-                        || lower_tail.contains("inceleyeceğim"))
-                || lower_tail.contains("let me ")
-                || lower_tail.contains("i will now ")
-                || lower_tail.contains("i'll now "));
+        let looks_like_premature_stop = is_premature_stop(text_trimmed);
         if looks_like_premature_stop && premature_stop_retries < 2 {
             premature_stop_retries += 1;
             if !quiet {
@@ -747,7 +909,29 @@ fn run_agent_turn(
             continue;
         }
 
-        // 4. Autonomous Verification Gate after file edits
+        // 4. Autonomous Zero-Stop Verification Gate after file edits (up to 4 auto-fix rounds)
+        if !modified_files_in_turn.is_empty() && auto_verify_rounds < 4 {
+            if let Some(gate_err) =
+                tools::run_project_verification_gate(".", &modified_files_in_turn)
+            {
+                auto_verify_rounds += 1;
+                unverified_edits = false;
+                if !quiet {
+                    println!(
+                        "\n{}⚡ [SPAVN Zero-Stop Doğrulama Kapısı ({}/4): Derleme/eksik kod tespit edildi -> Otomatik düzeltme tetikleniyor...]{}",
+                        YELLOW, auto_verify_rounds, RESET
+                    );
+                }
+                let gate_msg = ChatMessage::user(gate_err);
+                append_message(session_file, &gate_msg);
+                messages.push(gate_msg);
+                continue;
+            } else if std::path::Path::new("Cargo.toml").is_file()
+                || std::path::Path::new("tsconfig.json").is_file()
+            {
+                unverified_edits = false;
+            }
+        }
         if unverified_edits && !verification_nudged {
             verification_nudged = true;
             unverified_edits = false;
@@ -775,39 +959,13 @@ fn run_agent_turn(
             );
         }
 
-        // 5. OMP Pre-Yield Queue Drain (`getFollowUpMessages` before `break`):
-        // If the user queued a follow-up message while the turn was running, continue immediately!
-        if let Some(next_follow_up) = pop_next_queued_message() {
-            if next_follow_up.trim().starts_with('/') {
-                if let Ok(mut q) = PROMPT_QUEUE.lock() {
-                    q.push_front(next_follow_up);
-                }
-                break;
-            }
-            println!(
-                "\n{}📥 {}: {}{}{}",
-                CYAN,
-                tr_en(
-                    "[Sıradaki Kuyruk Mesajı Otomatik Başlatılıyor]",
-                    "[Starting Next Queued Message Automatically]"
-                ),
-                BOLD,
-                next_follow_up,
-                RESET
-            );
-            let q_msg = ChatMessage::user(next_follow_up);
-            append_message(session_file, &q_msg);
-            messages.push(q_msg);
-            continue;
-        }
-
         break;
     }
 
     Ok(())
 }
 
-fn render_session_resume_preview(session_path: &Path, messages: &[ChatMessage]) {
+pub(crate) fn render_session_resume_preview(session_path: &Path, messages: &[ChatMessage]) {
     let fname = session_path
         .file_name()
         .unwrap_or_default()
@@ -889,7 +1047,9 @@ fn main() {
     let mut access_mode = AccessMode::Auto;
     let mut default_host = "local".to_string();
     let mut resume_last = false;
+    let mut resume_session_arg: Option<String> = None;
     let mut interactive_resume = false;
+    let mut force_interactive = false;
     let mut show_thinking = true;
     let mut quiet = false;
     let mut phase_opt: Option<AgentPhase> = None;
@@ -930,6 +1090,19 @@ fn main() {
                     continue;
                 }
             }
+            "-s" | "--session" => {
+                if i + 1 < args.len() {
+                    resume_session_arg = Some(args[i + 1].clone());
+                    resume_last = true;
+                    i += 2;
+                    continue;
+                }
+            }
+            "-i" | "--interactive" => {
+                force_interactive = true;
+                i += 1;
+                continue;
+            }
             "-c" | "--continue" => {
                 resume_last = true;
                 i += 1;
@@ -950,8 +1123,37 @@ fn main() {
                 i += 1;
                 continue;
             }
+            "-v" | "-V" | "--version" => {
+                println!(
+                    "spavn v{} ({}/{})",
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                );
+                return;
+            }
             "-h" | "--help" => {
-                println!("Usage: spavn [-m <model>] [-a safe|auto|sovereign] [-P plan|code] [-q|--quiet] [--host <host>] [-c|--continue] [-r|--resume] [prompt...]");
+                println!(
+                    "SPAVN v{} ({}/{}) — Native Rust Coding Agent\n\
+                     Usage: spavn [options] [prompt...]\n\n\
+                     Options:\n\
+                     \x20 -m, --model <key>           Select model (default: {})\n\
+                     \x20 -a, --access <mode>         Access mode: safe | auto | sovereign\n\
+                     \x20 -P, --phase <phase>         Agent phase: plan | code\n\
+                     \x20 -H, --host <host>           Default target host (default: local)\n\
+                     \x20 -s, --session <id|fork:id>  Resume or fork a specific session\n\
+                     \x20 -c, --continue              Continue latest session\n\
+                     \x20 -r, --resume                Interactive session picker\n\
+                     \x20 -i, --interactive           Start interactive TUI after initial prompt\n\
+                     \x20 -t, --think                 Toggle thinking stream display\n\
+                     \x20 -q, --quiet                 Quiet/headless output mode\n\
+                     \x20 -V, --version               Print version and exit\n\
+                     \x20 -h, --help                  Print this help message",
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                    cfg.default_model
+                );
                 return;
             }
             _ => {
@@ -966,29 +1168,80 @@ fn main() {
     let mut active_phase = phase_opt.unwrap_or(AgentPhase::Code);
     let mut ctx = ToolContext::new(access_mode, default_host, PathBuf::from(&cwd), active_phase);
 
-    let (mut session_file, mut messages) = if resume_last {
+    let resolve_session_target = |raw_spec: &str| -> Option<(PathBuf, Vec<ChatMessage>)> {
+        let (do_fork, spec) = match raw_spec.strip_prefix("fork:") {
+            Some(rest) => (true, rest.trim()),
+            None => (false, raw_spec.trim()),
+        };
+        let target_path = if spec.is_empty() || spec.eq_ignore_ascii_case("latest") {
+            latest_session_path()?
+        } else {
+            let direct = PathBuf::from(spec);
+            if direct.exists() {
+                direct
+            } else {
+                let in_dir = sessions_dir().join(spec);
+                if in_dir.exists() {
+                    in_dir
+                } else {
+                    let with_ext = sessions_dir().join(format!("{}.jsonl", spec));
+                    if with_ext.exists() {
+                        with_ext
+                    } else {
+                        return None;
+                    }
+                }
+            }
+        };
+        let loaded = load_session(&target_path);
+        if loaded.is_empty() {
+            return None;
+        }
+        if do_fork {
+            let forked = fork_session(&loaded);
+            Some((forked, loaded))
+        } else {
+            Some((target_path, loaded))
+        }
+    };
+
+    let (mut session_file, mut messages) = if let Some(ref spec) = resume_session_arg {
+        if let Some(pair) = resolve_session_target(spec) {
+            pair
+        } else {
+            let p = new_session_path();
+            let sys = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+            append_message(&p, &sys);
+            (p, vec![sys])
+        }
+    } else if resume_last {
         if let Some(path) = latest_session_path() {
             let loaded = load_session(&path);
             if !loaded.is_empty() {
                 (path, loaded)
             } else {
                 let p = new_session_path();
-                let sys = ChatMessage::system(build_system_prompt(&cwd));
+                let sys = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
                 append_message(&p, &sys);
                 (p, vec![sys])
             }
         } else {
             let p = new_session_path();
-            let sys = ChatMessage::system(build_system_prompt(&cwd));
+            let sys = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
             append_message(&p, &sys);
             (p, vec![sys])
         }
     } else {
         let p = new_session_path();
-        let sys = ChatMessage::system(build_system_prompt(&cwd));
+        let sys = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
         append_message(&p, &sys);
         (p, vec![sys])
     };
+
+    if !prompt_parts.is_empty() && force_interactive {
+        push_queued_message(prompt_parts.join(" "));
+        prompt_parts.clear();
+    }
 
     if !prompt_parts.is_empty() {
         if quiet {
@@ -1078,11 +1331,9 @@ fn main() {
     }
 
     loop {
-        let cur_view = compact_messages_for_model(&messages, endpoint.is_local());
-        hud::set_context_window_usage(
-            hud::estimate_messages_tokens(&cur_view),
-            endpoint.context_window_tokens(),
-        );
+        let max_win = endpoint.context_window_tokens();
+        let cur_view = compact_messages_for_model(&messages, endpoint.is_local(), max_win);
+        hud::set_context_window_usage(hud::estimate_messages_tokens(&cur_view), max_win);
         // Automatically pop next queued message if available and no edit prefill is pending!
         let mut input = if prefill_input.is_none() {
             if let Some(queued_msg) = pop_next_queued_message() {
@@ -1179,551 +1430,23 @@ fn main() {
         }
         cmd_history.push(input.clone());
 
-        if matches!(
-            input.as_str(),
-            "/exit" | "/quit" | "/x" | ":q" | ":wq" | "q!" | "exit" | "quit"
+        match dispatch_slash_command(
+            &input,
+            &cwd,
+            &mut endpoint,
+            &mut ctx,
+            &mut active_phase,
+            &mut active_role,
+            &mut show_thinking,
+            &mut quota_badge,
+            &mut prefill_input,
+            &mut session_file,
+            &mut session_name,
+            &mut messages,
         ) {
-            reset_scroll_region();
-            break;
-        }
-
-        if input == "/reload" || input == "/r" || input == "/reload bin" || input == "/rb" {
-            if !messages.is_empty() {
-                messages[0] = ChatMessage::system(build_system_prompt(&cwd));
-                rewrite_session(&session_file, &messages);
-            }
-            reset_scroll_region();
-            let skill_count = discover_skills().len();
-            println!(
-                "\n{}🔄 [SPAVN Canlı Reload]: Binary, sistem çekirdeği ve {} yetenek (skill) oturum korunarak yenileniyor...{}",
-                GREEN, skill_count, RESET
-            );
-            let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spavn"));
-            let access_str = match ctx.access {
-                AccessMode::Safe => "safe",
-                AccessMode::Auto => "auto",
-                AccessMode::Sovereign => "sovereign",
-            };
-            let _ = std::process::Command::new(&exe_path)
-                .args([
-                    "-c",
-                    "-m",
-                    &endpoint.key,
-                    "-a",
-                    access_str,
-                    "--host",
-                    &ctx.default_host,
-                ])
-                .exec();
-            break;
-        }
-
-        if input == "/byok" || input == "/b" || input == "/keys" {
-            if let Some(chosen_model) = interactive_byok_manager() {
-                endpoint = resolve_endpoint(&chosen_model);
-                println!(
-                    "\n{}🧠 Aktif Model Seçildi: {}{}{}",
-                    GREEN, BOLD, endpoint.label, RESET
-                );
-            }
-            continue;
-        }
-
-        if matches!(input.as_str(), "/lang" | "/language" | "/dil") {
-            if let Some(chosen_lang) = interactive_select_language() {
-                if !messages.is_empty() {
-                    messages[0] = ChatMessage::system(build_system_prompt(&cwd));
-                }
-                let label = if chosen_lang == "en" {
-                    "🇬🇧 English (EN)"
-                } else {
-                    "🇹🇷 Türkçe (TR)"
-                };
-                println!(
-                    "\n{}🌐 {}: {}{}{}",
-                    GREEN,
-                    tr_en(
-                        "Arayüz ve Ajan Dili Güncellendi",
-                        "Interface & Agent Language Updated"
-                    ),
-                    BOLD,
-                    label,
-                    RESET
-                );
-            }
-            continue;
-        }
-        if input == "/en" || input == "/tr" {
-            let mut cfg = load_user_config();
-            cfg.language = input.trim_start_matches('/').to_string();
-            let _ = config::save_user_config(&cfg);
-            if !messages.is_empty() {
-                messages[0] = ChatMessage::system(build_system_prompt(&cwd));
-            }
-            println!(
-                "\n{}🌐 {}: {}{}{}",
-                GREEN,
-                tr_en("Dil Güncellendi", "Language Updated"),
-                BOLD,
-                if is_en() {
-                    "🇬🇧 English (EN)"
-                } else {
-                    "🇹🇷 Türkçe (TR)"
-                },
-                RESET
-            );
-            continue;
-        }
-        if input == "/queue" || input == "/qlist" || input == "/qedit" {
-            if let QueueAction::EditMessage(msg_to_edit) = interactive_queue_manager() {
-                prefill_input = Some(msg_to_edit);
-            }
-            continue;
-        }
-        if let Some(rest) = input.strip_prefix("/queue ") {
-            push_queued_message(rest.trim().to_string());
-            println!(
-                "\n{}📥 Mesaj kuyruğa eklendi (#{}): {}{}{}",
-                GREEN,
-                queued_message_count(),
-                BOLD,
-                rest.trim(),
-                RESET
-            );
-            continue;
-        }
-
-        if input == "/skills" || input == "/skill" || input == "/s" {
-            if let Some(chosen_skill) = interactive_select_skill() {
-                if let Some((entry, content)) = load_skill_content(&chosen_skill) {
-                    let skill_msg = ChatMessage::user(format!(
-                        "<active_skill name=\"{}\" path=\"{}\">\n{}\n</active_skill>\n(Yukarıdaki @{} yeteneği oturuma yüklendi.)",
-                        entry.name,
-                        entry.path.display(),
-                        content.trim(),
-                        entry.name
-                    ));
-                    append_message(&session_file, &skill_msg);
-                    messages.push(skill_msg);
-                    println!(
-                        "\n{}🧩 Yetenek aktif oturuma yüklendi: @{}{} ({})",
-                        GREEN, BOLD, entry.name, entry.summary
-                    );
-                }
-            } else {
-                render_skills_panel();
-            }
-            continue;
-        }
-        if let Some(rest) = input.strip_prefix("/skill add ") {
-            let mut parts = rest.splitn(2, ' ');
-            let name = parts.next().unwrap_or("").trim();
-            let rules = parts.next().unwrap_or("").trim();
-            if name.is_empty() || rules.is_empty() {
-                println!(
-                    "{}Kullanım: /skill add <ad> <talimat/kural metni>{}",
-                    YELLOW, RESET
-                );
-            } else {
-                match save_custom_skill(name, rules) {
-                    Ok(p) => println!(
-                        "\n{}🧩 Yetenek kaydedildi: @{} ({}){}",
-                        GREEN,
-                        name.trim_start_matches('@'),
-                        p.display(),
-                        RESET
-                    ),
-                    Err(e) => println!("\n{}✗ Hata: {}{}", RED, e, RESET),
-                }
-            }
-            continue;
-        }
-        if let Some(rest) = input.strip_prefix("/skill show ") {
-            if let Some((entry, content)) = load_skill_content(rest) {
-                println!(
-                    "\n{}╭─ 🧩 @{} ({}) ──────────────────────────────────────────{}",
-                    CYAN,
-                    entry.name,
-                    entry.path.display(),
-                    RESET
-                );
-                for l in content.lines().take(40) {
-                    println!("{}│{} {}", CYAN, RESET, l);
-                }
-                println!(
-                    "{}╰────────────────────────────────────────────────────────────{}",
-                    CYAN, RESET
-                );
-            } else {
-                println!("\n{}Yetenek bulunamadı: {}{}", YELLOW, rest, RESET);
-            }
-            continue;
-        }
-        if let Some(rest) = input.strip_prefix("/skill rm ") {
-            match remove_custom_skill(rest) {
-                Ok(()) => println!("\n{}🗑️  Yetenek silindi: @{}{}", GREEN, rest.trim(), RESET),
-                Err(e) => println!("\n{}✗ {}{}", YELLOW, e, RESET),
-            }
-            continue;
-        }
-
-        if input == "/access" || input == "/a" {
-            if let Some(chosen_access) = interactive_select_access(ctx.access) {
-                ctx.access = chosen_access;
-                println!(
-                    "\n{}🛡️  Erişim Yetki Modu seçildi: {}{}{}",
-                    GREEN,
-                    BOLD,
-                    ctx.access.badge(),
-                    RESET
-                );
-            }
-            continue;
-        }
-        if let Some(rest) = input.strip_prefix("/access ") {
-            if let Some(m) = AccessMode::from_str(rest) {
-                ctx.access = m;
-                println!(
-                    "\n{}🛡️  Erişim Yetki Modu ayarlandı: {}{}{}",
-                    GREEN,
-                    BOLD,
-                    ctx.access.badge(),
-                    RESET
-                );
-            } else {
-                println!(
-                    "{}Kullanım: /access <safe | auto | sovereign>{}",
-                    YELLOW, RESET
-                );
-            }
-            continue;
-        }
-        if input == "/plan" || input == "/code" || input == "/act" {
-            let next = if input == "/plan" {
-                AgentPhase::Plan
-            } else {
-                AgentPhase::Code
-            };
-            if next != active_phase {
-                active_phase = next;
-                ctx.phase = next;
-                if next == AgentPhase::Plan {
-                    println!(
-                        "\n{}📐 PLAN — salt-okunur: write/edit/bash kilitli. Planı yaz, kullanıcı /code ile açar.{}",
-                        MAGENTA, RESET
-                    );
-                } else {
-                    println!(
-                        "\n{}💻 CODE — değişiklikler açık; yukarıdaki plan referans.{}",
-                        GREEN, RESET
-                    );
-                }
-            }
-            continue;
-        }
-
-        if input == "/model" || input == "/m" || input == "/models" || input == "/local" {
-            let local_first = input == "/local";
-            if let Some(chosen_model) = interactive_select_model(&endpoint.key, local_first) {
-                endpoint = resolve_endpoint(&chosen_model);
-                println!(
-                    "\n{}🧠 Aktif Model Seçildi: {}{}{}",
-                    GREEN, BOLD, endpoint.label, RESET
-                );
-            }
-            continue;
-        }
-        if let Some(rest) = input.strip_prefix("/model ") {
-            endpoint = resolve_endpoint(rest);
-            println!(
-                "\n{}🧠 Aktif Model: {}{}{}",
-                GREEN, BOLD, endpoint.label, RESET
-            );
-            continue;
-        }
-
-        if input == "/host" || input == "/h" {
-            if let Some(chosen_host) = interactive_select_host(&ctx.default_host) {
-                ctx.default_host = chosen_host;
-                println!(
-                    "\n{}🖥️  Varsayılan Hedef Cihaz Seçildi: {}{}{}",
-                    MAGENTA, BOLD, ctx.default_host, RESET
-                );
-            }
-            continue;
-        }
-        if let Some(rest) = input.strip_prefix("/host ") {
-            ctx.default_host = rest.trim().to_string();
-            println!(
-                "\n{}🖥️  Varsayılan Hedef Cihaz: {}{}{}",
-                MAGENTA, BOLD, ctx.default_host, RESET
-            );
-            continue;
-        }
-
-        if input == "/quota" || input == "/q" {
-            render_full_quota_card();
-            quota_badge = fetch_quick_quota_line();
-            continue;
-        }
-
-        if input == "/fleet" || input == "/f" {
-            render_fleet_radar();
-            continue;
-        }
-
-        if input == "/undo" || input == "/u" {
-            match ctx.pop_undo() {
-                Some(msg) => println!("\n{}{}{}", GREEN, msg, RESET),
-                None => println!("\n{}Geri alınacak dosya değişikliği yok.{}", YELLOW, RESET),
-            }
-            continue;
-        }
-
-        if input == "/think" {
-            show_thinking = !show_thinking;
-            println!(
-                "\n{}💭 Düşünce Akışı: {}{}",
-                DIM,
-                if show_thinking { "AÇIK" } else { "KAPALI" },
-                RESET
-            );
-            continue;
-        }
-
-        if input == "/compact" || input == "/c" {
-            perform_manual_compact(&endpoint, &mut messages, None);
-            rewrite_session(&session_file, &messages);
-            continue;
-        }
-        if let Some(focus) = input
-            .strip_prefix("/compact ")
-            .or_else(|| input.strip_prefix("/c "))
-        {
-            perform_manual_compact(&endpoint, &mut messages, Some(focus.trim()));
-            rewrite_session(&session_file, &messages);
-            continue;
-        }
-        if input == "/resume" || input == "/sessions" {
-            if let Some(chosen_path) = interactive_select_session(&session_file) {
-                let loaded = load_session(&chosen_path);
-                if !loaded.is_empty() {
-                    session_file = chosen_path;
-                    session_name = session_file
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    messages = loaded;
-                    render_session_resume_preview(&session_file, &messages);
-                }
-            }
-            continue;
-        }
-
-        if input == "/new" || input == "/n" {
-            session_file = new_session_path();
-            session_name = session_file
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let sys = ChatMessage::system(build_system_prompt(&cwd));
-            append_message(&session_file, &sys);
-            messages = vec![sys];
-            setup_scroll_region();
-            render_welcome_header(
-                &endpoint,
-                ctx.access,
-                &ctx.default_host,
-                &cwd,
-                &session_name,
-            );
-            println!(
-                "\n{}✨ Yeni temiz oturum başlatıldı: {}{}{}",
-                GREEN, BOLD, session_name, RESET
-            );
-            continue;
-        }
-
-        if input == "/fork" {
-            session_file = fork_session(&messages);
-            session_name = session_file
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            println!(
-                "\n{}🌿 Mevcut oturum yeni dosyaya klonlanıp dallandırıldı: {}{}{} ({} mesaj korundu)",
-                GREEN,
-                BOLD,
-                session_name,
-                RESET,
-                messages.len()
-            );
-            continue;
-        }
-
-        if input == "/role" {
-            if let Some(chosen_role) = interactive_select_role(active_role) {
-                active_role = chosen_role;
-                println!(
-                    "\n{}🎭 Aktif Spavn Uzmanlık Rolü: {}{}{}",
-                    GREEN,
-                    BOLD,
-                    active_role.badge(),
-                    RESET
-                );
-            }
-            continue;
-        }
-        if let Some(rest) = input.strip_prefix("/role ") {
-            if let Some(r) = AgentRoleKey::from_str(rest) {
-                active_role = r;
-                println!(
-                    "\n{}🎭 Aktif Spavn Uzmanlık Rolü: {}{}{}",
-                    GREEN,
-                    BOLD,
-                    active_role.badge(),
-                    RESET
-                );
-            } else {
-                println!(
-                    "{}Kullanım: /role <auto|coder|reviewer|security|test|docs|refactor>{}",
-                    YELLOW, RESET
-                );
-            }
-            continue;
-        }
-
-        if input == "/janitor" || input == "/j" {
-            render_janitor_panel(&cwd);
-            continue;
-        }
-
-        if input == "/audit" {
-            render_audit_panel(None);
-            continue;
-        }
-        if let Some(file_flt) = input
-            .strip_prefix("/blame ")
-            .or_else(|| input.strip_prefix("/audit "))
-        {
-            render_audit_panel(Some(file_flt.trim()));
-            continue;
-        }
-        if input == "/blame" {
-            render_audit_panel(None);
-            continue;
-        }
-
-        if input == "/wiki" || input == "/w" {
-            render_repo_wiki(&cwd);
-            continue;
-        }
-
-        if input == "/pin" || input == "/pins" || input == "/p" {
-            render_pins_panel(&cwd);
-            continue;
-        }
-        if let Some(note) = input.strip_prefix("/pin ") {
-            let pin = add_pin(&cwd, note);
-            if !messages.is_empty() {
-                messages[0] = ChatMessage::system(build_system_prompt(&cwd));
-            }
-            println!(
-                "\n{}📌 Proje bağlamına sabitlendi (#{}): {}{}{}",
-                GREEN, pin.id, BOLD, pin.content, RESET
-            );
-            continue;
-        }
-        if let Some(id_str) = input.strip_prefix("/unpin ") {
-            if let Ok(id) = id_str.trim().parse::<usize>() {
-                if remove_pin(&cwd, id) {
-                    if !messages.is_empty() {
-                        messages[0] = ChatMessage::system(build_system_prompt(&cwd));
-                    }
-                    println!("\n{}🗑️  Sabitlenmiş not silindi: #{}{}", GREEN, id, RESET);
-                } else {
-                    println!("\n{}Pin bulunamadı: #{}{}", YELLOW, id, RESET);
-                }
-            }
-            continue;
-        }
-
-        if input == "/goal" || input == "/goals" || input == "/g" {
-            render_goals_panel(&cwd);
-            continue;
-        }
-        if let Some(id_str) = input.strip_prefix("/goal done ") {
-            if let Ok(id) = id_str.trim().parse::<usize>() {
-                if complete_goal(id) {
-                    if !messages.is_empty() {
-                        messages[0] = ChatMessage::system(build_system_prompt(&cwd));
-                    }
-                    println!(
-                        "\n{}✅ Hedef tamamlandı olarak işaretlendi: #{}{}",
-                        GREEN, id, RESET
-                    );
-                } else {
-                    println!("\n{}Hedef bulunamadı: #{}{}", YELLOW, id, RESET);
-                }
-            }
-            continue;
-        }
-        if let Some(obj) = input.strip_prefix("/goal ") {
-            let g = add_goal(&cwd, obj);
-            if !messages.is_empty() {
-                messages[0] = ChatMessage::system(build_system_prompt(&cwd));
-            }
-            println!(
-                "\n{}🎯 Yeni proje hedefi eklendi (#{}): {}{}{}",
-                GREEN, g.id, BOLD, g.objective, RESET
-            );
-            continue;
-        }
-
-        if input == "/clear" {
-            let sys = ChatMessage::system(build_system_prompt(&cwd));
-            messages = vec![sys];
-            rewrite_session(&session_file, &messages);
-            setup_scroll_region();
-            render_welcome_header(
-                &endpoint,
-                ctx.access,
-                &ctx.default_host,
-                &cwd,
-                &session_name,
-            );
-            continue;
-        }
-
-        if input == "/help" {
-            println!("\n{}╭─ ⚡ SPAVN v0.1 KOMUTLAR, BYOK & MOTOR ÖZELLİKLERİ ──────────────────────────{}", CYAN, RESET);
-            println!(
-                "{}│{}  {}/ (veya /menu){}                Etkileşimli yön tuşlu ana komut menüsü",
-                CYAN, RESET, BOLD, RESET
-            );
-            println!("{}│{}  {}/model (/m) · /local{}          İki sütunlu Sağlayıcı (←/→) & Model (↑/↓) seçici", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/byok (/b){}                    BYOK API Anahtarı & Özel Sağlayıcı (Base URL) yöneticisi", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/queue (/qlist){}               Mesaj Kuyruğu düzenleme & Canlı Müdahale (Steer/Queue) modu", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/resume (-r) · /new · /fork{}   Geçmiş oturum seçici, yeni oturum ve dallandırma", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/role{}                         Spavn uzmanlık rolü (Auto/Coder/Reviewer/Security/Test/Docs/Refactor)", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/plan · /code · \\{}             Faz: 📐 PLAN (salt-okunur) ↔ 💻 CODE (uygulama)", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/janitor (/j){}                 Spavn Janitor kalite kapılarını (check/types/lint/test) koş", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/audit · /blame <dosya>{}       HMAC zincirli AI aksiyon ve dosya değişim izi", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/wiki (/w){}                    Anlık proje modül ve mimari haritası (Repo Wiki)", CYAN, RESET, BOLD, RESET);
-            println!("{}│{}  {}/pin <not> · /unpin <id>{}      Proje bağlamına kalıcı mimari kural sabitle", CYAN, RESET, BOLD, RESET);
-            println!(
-                "{}│{}  {}/goal <hedef> · /goal done N{}  Proje hedeflerini kaydet ve takip et",
-                CYAN, RESET, BOLD, RESET
-            );
-            println!("{}│{}  {}Shift+Tab · Esc · Ctrl+R{}      Yetki değiştir · İşlemi/Menüyü iptal et · Canlı Reload", CYAN, RESET, BOLD, RESET);
-            println!(
-                "{}╰────────────────────────────────────────────────────────────────────────────{}",
-                CYAN, RESET
-            );
-            continue;
+            SlashOutcome::ExitLoop => break,
+            SlashOutcome::Handled => continue,
+            SlashOutcome::NotSlash => {}
         }
 
         let (mut expanded_input, activated_skills) = expand_inline_skills(&input);
@@ -1808,5 +1531,30 @@ fn main() {
             record_knowledge_artifact(&cwd, &touched, &input);
         }
         draw_bottom_dock(&endpoint, ctx.access, &ctx.default_host, &quota_badge, "");
+    }
+}
+
+#[cfg(test)]
+mod premature_stop_tests {
+    use super::is_premature_stop;
+
+    #[test]
+    fn detects_announcements_not_final_answers() {
+        for yes in [
+            "Let me read the file first.",
+            "Şimdi dosyayı okuyacağım.",
+            "I'll now run the tests",
+            "Next step:",
+        ] {
+            assert!(is_premature_stop(yes), "{yes}");
+        }
+        for no in [
+            "Done. Let me know if you need anything else.",
+            "Bitti. Başka bir şey ister misin?",
+            "Tamamlandı, testler geçiyor.",
+            "Which file should I edit?",
+        ] {
+            assert!(!is_premature_stop(no), "{no}");
+        }
     }
 }

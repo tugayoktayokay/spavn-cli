@@ -1,6 +1,6 @@
 # spavn
 
-A terminal-native coding agent in a single Rust binary. It streams from local or cloud OpenAI-compatible models, calls tools against your machine, and keeps every session on disk — no daemon, no telemetry, no runtime dependencies beyond the shell you already use.
+A terminal-native coding agent in a single Rust binary. It streams from local or cloud models (OpenAI-compatible, plus native Anthropic Messages), calls tools against your machine, and keeps every session on disk — no daemon, no telemetry, no runtime dependencies beyond the shell you already use.
 
 ```
 $ spavn "audit the auth module and write the missing tests"
@@ -90,6 +90,8 @@ Any remaining positional arguments are joined into the prompt. With a prompt, `s
 3. The built-in catalog: `openai`, `anthropic`, `gemini`, `openrouter`, `deepseek`, `minimax`, `glm`, `groq`, `xai`, `ollama`.
 4. Any model currently advertised by the local discovery endpoint.
 5. Fallback: first configured provider, else `SPAVN_BASE_URL`, else `https://api.openai.com/v1`; key from `SPAVN_API_KEY`, else `OPENAI_API_KEY`.
+
+**Anthropic:** endpoints whose base URL is `api.anthropic.com` (the built-in `anthropic` / `sonnet` / `opus` keys) speak the **native Anthropic Messages API** (`POST /v1/messages`, `x-api-key` + `anthropic-version`, `max_tokens`, `content_block_delta` / `input_json_delta` SSE). spavn converts its internal message/tool format to Anthropic's block format (system extraction, `tool_use` / `tool_result` blocks, consecutive-role merging) and maps `stop_reason` back to the shared `finish_reason`. To point a *custom* Anthropic-protocol proxy whose host is not `anthropic.com` at the native path, set `SPAVN_FORCE_ANTHROPIC=1`. OpenAI-compatible Anthropic proxies keep using the OpenAI path automatically.
 
 Inside the TUI:
 
@@ -189,7 +191,7 @@ Path decisions resolve in this order:
 5. Temp directories → allow.
 6. Anything else → ask.
 
-Shell commands are classified as `Safe`, `Destructive` (e.g. `rm`, `chmod -R`, `git reset --hard`, `git push --force`, `docker`, `systemctl`), or `Catastrophic` (e.g. `mkfs`, `diskutil erase`, `shutdown`). `Catastrophic` is always blocked.
+Shell commands are classified as `Safe`, `Destructive` (e.g. `rm`, `chmod -R`, `git reset --hard`, `git push --force`, `docker`, `systemctl`), or `Catastrophic` (e.g. `mkfs`, `diskutil erase`, `shutdown`). `Catastrophic` is always blocked. The classifier also looks inside `sh -c`/`bash -c`/`eval`, follows `cd`, and flags `curl | sh` and variable command names. A closed stdin or a bare Enter at the approval prompt declines.
 
 ## Configuration
 
@@ -250,6 +252,8 @@ Environment variables:
 | `SPAVN_LOCAL_BASE_URL` | Local OpenAI-compatible endpoint |
 | `SPAVN_BASE_URL` | Fallback endpoint |
 | `SPAVN_API_KEY` | Fallback API key |
+| `ANTHROPIC_API_KEY` | Key for the built-in `anthropic` / `sonnet` / `opus` models |
+| `SPAVN_FORCE_ANTHROPIC` | `1` to use the native Anthropic path on a non-`anthropic.com` proxy |
 | `SPAVN_SHELL` | Shell used by the `bash` tool |
 | `SPAVN_LANG` | `tr` or `en` |
 

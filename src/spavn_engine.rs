@@ -58,8 +58,39 @@ fn now_iso_local() -> String {
     format!("{}", now_unix())
 }
 
-fn keyed_chain_hash(prev_hash: &str, payload: &str) -> String {
-    let secret = "spavn-audit-chain-v0.1";
+fn audit_secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| {
+        let key_path = spavn_dir().join("audit.key");
+        if let Ok(existing) = fs::read_to_string(&key_path) {
+            let trimmed = existing.trim().to_string();
+            if trimmed.len() >= 16 {
+                return trimmed;
+            }
+        }
+        let mut raw_bytes = [0u8; 24];
+        let mut filled = false;
+        if let Ok(mut urandom) = fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            filled = urandom.read_exact(&mut raw_bytes).is_ok();
+        }
+        let generated = if filled {
+            raw_bytes.iter().map(|b| format!("{:02x}", b)).collect()
+        } else {
+            format!("spavn-audit-{}-{}", now_unix(), std::process::id())
+        };
+        if fs::write(&key_path, format!("{}\n", generated)).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
+            }
+        }
+        generated
+    })
+}
+
+fn keyed_chain_hash_with(secret: &str, prev_hash: &str, payload: &str) -> String {
     let mut h1: u64 = 0xcbf29ce484222325;
     let mut h2: u64 = 0x84222325cbf29ce4;
     for b in secret
@@ -73,6 +104,10 @@ fn keyed_chain_hash(prev_hash: &str, payload: &str) -> String {
         h2 = (h2 ^ (h2 >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     }
     format!("{:016x}{:016x}", h1, h2)
+}
+
+fn keyed_chain_hash(prev_hash: &str, payload: &str) -> String {
+    keyed_chain_hash_with(audit_secret(), prev_hash, payload)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +190,13 @@ pub enum AgentPhase {
 }
 
 impl AgentPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentPhase::Plan => "plan",
+            AgentPhase::Code => "code",
+        }
+    }
+
     pub fn badge(&self) -> &'static str {
         match self {
             AgentPhase::Plan => "📐 PLAN (Salt-Okunur Tasarım)",
@@ -480,7 +522,11 @@ pub fn load_audit_records(
                     rec.prompt_preview
                 );
                 let expected = keyed_chain_hash(&prev_hash, &payload);
-                if rec.prev_hash != prev_hash || rec.hash != expected {
+                let legacy_expected =
+                    keyed_chain_hash_with("spavn-audit-chain-v0.1", &prev_hash, &payload);
+                if rec.prev_hash != prev_hash
+                    || (rec.hash != expected && rec.hash != legacy_expected)
+                {
                     chain_valid = false;
                 }
                 prev_hash = rec.hash.clone();
@@ -1060,4 +1106,97 @@ pub fn render_goals_panel(cwd: &str) {
         "{}╰────────────────────────────────────────────────────────────────────────────{}",
         CYAN, RESET
     );
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    #[test]
+    fn role_from_str_handles_aliases_and_unknown() {
+        assert_eq!(AgentRoleKey::from_str("coder"), Some(AgentRoleKey::Coder));
+        assert_eq!(AgentRoleKey::from_str("  CODE "), Some(AgentRoleKey::Coder));
+        assert_eq!(
+            AgentRoleKey::from_str("incele"),
+            Some(AgentRoleKey::Reviewer)
+        );
+        assert_eq!(
+            AgentRoleKey::from_str("güvenlik"),
+            Some(AgentRoleKey::Security)
+        );
+        assert_eq!(AgentRoleKey::from_str("otomatik"), Some(AgentRoleKey::Auto));
+        assert_eq!(AgentRoleKey::from_str("bogus"), None);
+    }
+
+    #[test]
+    fn phase_from_str_and_toggle_roundtrip() {
+        assert_eq!(AgentPhase::from_str("plan"), Some(AgentPhase::Plan));
+        assert_eq!(AgentPhase::from_str("tasarım"), Some(AgentPhase::Plan));
+        assert_eq!(AgentPhase::from_str("uygula"), Some(AgentPhase::Code));
+        assert_eq!(AgentPhase::from_str("nope"), None);
+        assert_eq!(AgentPhase::Plan.toggled(), AgentPhase::Code);
+        assert_eq!(AgentPhase::Code.toggled(), AgentPhase::Plan);
+        assert!(AgentPhase::Plan.preamble().is_some());
+        assert!(AgentPhase::Code.preamble().is_none());
+    }
+
+    #[test]
+    fn dispatch_role_routes_by_keyword_score() {
+        assert_eq!(
+            dispatch_role_from_prompt("review the diff and denetle edge cases"),
+            AgentRoleKey::Reviewer
+        );
+        assert_eq!(
+            dispatch_role_from_prompt("fix the security vulnerability (zafiyet)"),
+            AgentRoleKey::Security
+        );
+        assert_eq!(
+            dispatch_role_from_prompt("add unit tests and pytest coverage"),
+            AgentRoleKey::Test
+        );
+        assert_eq!(
+            dispatch_role_from_prompt("update the readme and dokümantasyon"),
+            AgentRoleKey::Docs
+        );
+        assert_eq!(
+            dispatch_role_from_prompt("refactor this module and cleanup dead code"),
+            AgentRoleKey::Refactor
+        );
+        assert_eq!(
+            dispatch_role_from_prompt("implement the new streaming feature"),
+            AgentRoleKey::Coder
+        );
+    }
+
+    #[test]
+    fn detect_secrets_finds_known_patterns() {
+        let aws = "AKIAIOSFODNN7EXAMPLE";
+        assert!(detect_secrets_in_text(&format!("export key={aws}")).contains(&"aws-access-key"));
+        let gh = "ghp_000000000000000000000000000000000000";
+        assert!(detect_secrets_in_text(&format!("token: {gh}")).contains(&"github-token"));
+        let pk = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----";
+        assert!(detect_secrets_in_text(pk).contains(&"private-key"));
+        assert!(detect_secrets_in_text("nothing sensitive here").is_empty());
+        // Kısa / sahte tokenlar yanlış pozitif üretmemeli
+        assert!(detect_secrets_in_text("AKIA123").is_empty());
+    }
+
+    #[test]
+    fn scrub_secrets_redacts_long_tokens_only() {
+        let gh = "ghp_000000000000000000000000000000000000";
+        let out = scrub_secrets(&format!("token={gh} done"));
+        assert!(!out.contains(gh));
+        assert!(out.contains("[REDACTED:github-token]"));
+
+        let pk = "-----BEGIN PRIVATE KEY-----\nMIIEvQ==\n-----END PRIVATE KEY-----";
+        let out2 = scrub_secrets(&format!("before {pk} after"));
+        assert!(!out2.contains("MIIEvQ"));
+        assert!(out2.contains("[REDACTED:private-key]"));
+        assert!(out2.starts_with("before "));
+        assert!(out2.ends_with(" after"));
+
+        // Kısa eşleşmeler (örn. "AIza123") dokunulmaz kalmalı
+        let short = "AIza123";
+        assert_eq!(scrub_secrets(short), short);
+    }
 }
