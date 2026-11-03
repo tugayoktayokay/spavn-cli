@@ -889,7 +889,9 @@ fn run_agent_turn(
                     } else {
                         format!("{}✓{}", GREEN, YELLOW)
                     };
-                    println!(
+                    let (_, cols) = term_size();
+                    let full_w = cols.saturating_sub(2).max(20);
+                    let raw_footer = format!(
                         "{}╰─ {} {}{} ({} satır · {}ms){}",
                         YELLOW,
                         status_mark,
@@ -899,6 +901,8 @@ fn run_agent_turn(
                         tool_ms,
                         RESET
                     );
+                    let (trunc_footer, _) = truncate_ansi_to_width(&raw_footer, full_w);
+                    println!("{}", trunc_footer);
                 }
 
                 let tool_msg = ChatMessage::tool_result(tc.id, tool_name, tool_output);

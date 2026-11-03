@@ -4676,6 +4676,7 @@ pub fn supports_inline_terminal_images() -> bool {
 
 /// Renders an inline image preview in iTerm2 / WezTerm via OSC 1337 (`\x1b]1337;File=...`).
 pub fn render_inline_image_preview(img: &crate::router::DraggedImage) {
+    pause_active_spinner();
     let kb = (img.size_bytes as f64 / 1024.0).max(0.1);
     println!(
         "{}│{} {}🖼️  [Görsel Eklendi: {}{}{} ({:.1} KB)]{}",
@@ -4690,6 +4691,7 @@ pub fn render_inline_image_preview(img: &crate::router::DraggedImage) {
         );
         let _ = io::stdout().flush();
     }
+    resume_active_spinner();
 }
 
 pub fn render_assistant_footer(
