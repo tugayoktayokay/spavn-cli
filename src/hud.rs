@@ -61,7 +61,14 @@ pub fn build_session_recap_line(
                     continue;
                 }
                 let cleaned = strip_internal_tags_for_display(raw);
-                let flat = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+                let flat = cleaned
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| {
+                        !l.is_empty() && !l.contains('╭') && !l.contains('╰') && !l.contains('│')
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 if !flat.is_empty() {
                     last_user = flat;
                     turn_count += 1;
@@ -210,45 +217,31 @@ pub fn format_context_usage_badge() -> String {
         "▱".repeat(5 - filled),
         RESET
     );
-    if is_en() {
-        format!(
-            "📊 {} {}{}{} / {}{} ({}%){}",
-            bar,
-            color,
-            format_token_short(used),
-            RESET,
-            DIM,
-            format_token_short(max),
-            pct_display,
-            RESET
-        )
-    } else {
-        format!(
-            "📊 {} {}{}{} / {}{} (%{}){}",
-            bar,
-            color,
-            format_token_short(used),
-            RESET,
-            DIM,
-            format_token_short(max),
-            pct_display,
-            RESET
-        )
-    }
+    format!(
+        "{} {}{}{} / {}{} ({}%){}",
+        bar,
+        color,
+        format_token_short(used),
+        RESET,
+        DIM,
+        format_token_short(max),
+        pct_display,
+        RESET
+    )
 }
 
 pub fn effective_quota_badge(endpoint: &ModelEndpoint, quota_badge: &str) -> String {
     if endpoint.is_local() {
-        format!(
-            "{}🟢 {}{}",
-            GREEN,
-            tr_en("Yerel VRAM (Sınırsız)", "Local VRAM (Unlimited)"),
-            RESET
-        )
+        format!("{}🟢 VRAM{}", GREEN, RESET)
     } else if endpoint.is_smart_pool_proxy() {
-        format!("🔋 {}{}{}", DIM, quota_badge, RESET)
+        let short_q = if let Some(idx) = quota_badge.find("Gem:") {
+            quota_badge[idx..].trim()
+        } else {
+            quota_badge.trim()
+        };
+        format!("🔋 {}{}{}", DIM, short_q, RESET)
     } else {
-        format!("{}🔑 BYOK API{}", YELLOW, RESET)
+        format!("{}🔑 BYOK{}", YELLOW, RESET)
     }
 }
 
@@ -357,6 +350,33 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
             "{}│{} {}❯{} {}{}{}{}█{}",
             CYAN, RESET, BOLD, RESET, DIM, ellipsis, RESET, visible_typed, CYAN
         ) + RESET
+    } else if let Some((is_steer, pending_txt)) = crate::peek_last_pending_message() {
+        let short_p: String = pending_txt
+            .chars()
+            .take(max_w.saturating_sub(36).max(16))
+            .collect();
+        let badge = if is_steer {
+            format!("{}⚡ {}{}", YELLOW, tr_en("Müdahale", "Steer"), RESET)
+        } else {
+            format!("{}📥 {}{}", GREEN, tr_en("Kuyruk", "Queued"), RESET)
+        };
+        format!(
+            "{}│{} {}❯{} {} {}·{} {}{}{} {}[↑: {} · Ctrl+X: {}]{}",
+            CYAN,
+            RESET,
+            BOLD,
+            RESET,
+            badge,
+            DIM,
+            RESET,
+            BOLD,
+            short_p,
+            RESET,
+            DIM,
+            tr_en("Düzenle", "Edit"),
+            tr_en("İptal", "Cancel"),
+            RESET
+        )
     } else {
         format!(
             "{}│{} {}❯{} {}{}{}",
@@ -377,6 +397,11 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
         tr_en(
             "Tab: Mod · Esc/Ctrl+U: Metni Sil",
             "Tab: Mode · Esc/Ctrl+U: Clear Text",
+        )
+    } else if s_cnt > 0 || q_cnt > 0 {
+        tr_en(
+            "↑: Kuyruktakini Düzenle · Ctrl+X: Kuyruğu İptal Et · Esc: Durdur",
+            "↑: Edit Queued · Ctrl+X: Cancel Queued · Esc: Stop",
         )
     } else {
         tr_en(
@@ -582,7 +607,7 @@ pub fn pause_active_spinner() {
                     state.partial_line.clear();
                 }
                 state.partial_shown = false;
-                out.push_str("\x1b[?7h\x1b[?25h\x1b[?2026l");
+                out.push_str("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?2026l");
                 print!("{}", out);
                 let _ = io::stdout().flush();
             }
@@ -597,7 +622,7 @@ pub fn resume_active_spinner() {
                 state.paused = false;
                 state.partial_shown = false;
                 print!(
-                    "\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J{}\n{}\n{}\x1b[2A\r\x1b[?7h\x1b[?2026l",
+                    "\x1b[?2004h\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J{}\n{}\n{}\x1b[2A\r\x1b[?7h\x1b[?2026l",
                     state.dock_lines[0], state.dock_lines[1], state.dock_lines[2]
                 );
                 let _ = io::stdout().flush();
@@ -628,27 +653,31 @@ pub fn set_sticky_dock_status(
     } else {
         format!("🧠 {}{}{}", GREEN, endpoint.key, RESET)
     };
+    let host_part = if default_host == "local" || default_host.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}·{} 🖥️  {}{}{}",
+            DIM, RESET, MAGENTA, default_host, RESET
+        )
+    };
     let line = format!(
-        "{}╭─{} {}{}{}{} {}│{} {}{}{} {}│{} {} {}│{} 🖥️  {}{}{}",
+        "{}╭─{} {}{}{}{} {}·{} {}{}{} {}·{} {}{}",
         CYAN,
         RESET,
         BOLD,
         access_color,
         access.short_badge(),
         RESET,
-        CYAN,
+        DIM,
         RESET,
         phase_color,
         phase.short_badge(),
         RESET,
-        CYAN,
+        DIM,
         RESET,
         model_badge,
-        CYAN,
-        RESET,
-        MAGENTA,
-        default_host,
-        RESET
+        host_part
     );
     if let Ok(mut guard) = STICKY_DOCK_STATUS.lock() {
         *guard = Some(line);
@@ -791,11 +820,105 @@ fn empty_termios() -> Termios {
     }
 }
 
+#[cfg(unix)]
 extern "C" {
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32;
     fn tcsetattr(fd: i32, optional_actions: i32, termios_p: *const Termios) -> i32;
     fn read(fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize;
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct Coord {
+    x: i16,
+    y: i16,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct SmallRect {
+    left: i16,
+    top: i16,
+    right: i16,
+    bottom: i16,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ConsoleScreenBufferInfo {
+    dw_size: Coord,
+    dw_cursor_position: Coord,
+    w_attributes: u16,
+    sr_window: SmallRect,
+    dw_maximum_window_size: Coord,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
+    fn GetConsoleMode(h_console_handle: *mut std::ffi::c_void, lp_mode: *mut u32) -> i32;
+    fn SetConsoleMode(h_console_handle: *mut std::ffi::c_void, dw_mode: u32) -> i32;
+    fn GetConsoleScreenBufferInfo(
+        h_console_output: *mut std::ffi::c_void,
+        lp_info: *mut ConsoleScreenBufferInfo,
+    ) -> i32;
+    fn ReadFile(
+        h_file: *mut std::ffi::c_void,
+        lp_buffer: *mut std::ffi::c_void,
+        n_number_of_bytes_to_read: u32,
+        lp_number_of_bytes_read: *mut u32,
+        lp_overlapped: *mut std::ffi::c_void,
+    ) -> i32;
+    fn WaitForSingleObject(h_handle: *mut std::ffi::c_void, dw_milliseconds: u32) -> u32;
+}
+
+#[cfg(windows)]
+unsafe fn tcgetattr(_fd: i32, termios_p: *mut Termios) -> i32 {
+    let h_in = GetStdHandle((-10i32) as u32);
+    let h_out = GetStdHandle((-11i32) as u32);
+    let mut out_mode: u32 = 0;
+    if GetConsoleMode(h_out, &mut out_mode) != 0 {
+        let _ = SetConsoleMode(h_out, out_mode | 0x0004 | 0x0001);
+    }
+    let mut in_mode: u32 = 0;
+    if GetConsoleMode(h_in, &mut in_mode) != 0 {
+        (*termios_p).c_lflag = in_mode;
+        0
+    } else {
+        -1
+    }
+}
+
+#[cfg(windows)]
+unsafe fn tcsetattr(_fd: i32, _optional_actions: i32, termios_p: *const Termios) -> i32 {
+    let h_in = GetStdHandle((-10i32) as u32);
+    let saved = (*termios_p).c_lflag;
+    let mode = if (saved & (ICANON | ECHO)) == 0 {
+        0x0200 | 0x0080
+    } else {
+        saved
+    };
+    if SetConsoleMode(h_in, mode) != 0 {
+        0
+    } else {
+        -1
+    }
+}
+
+#[cfg(windows)]
+unsafe fn read(_fd: i32, buf: *mut std::ffi::c_void, count: usize) -> isize {
+    let h_in = GetStdHandle((-10i32) as u32);
+    if WaitForSingleObject(h_in, 80) != 0 {
+        return 0;
+    }
+    let mut n_read: u32 = 0;
+    if ReadFile(h_in, buf, count as u32, &mut n_read, std::ptr::null_mut()) != 0 {
+        n_read as isize
+    } else {
+        0
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -836,6 +959,7 @@ const VMIN_IDX: usize = 6;
 #[cfg(not(target_os = "macos"))]
 const VTIME_IDX: usize = 5;
 pub fn term_size() -> (usize, usize) {
+    #[cfg(unix)]
     unsafe {
         let mut ws = WinSize {
             ws_row: 0,
@@ -845,6 +969,27 @@ pub fn term_size() -> (usize, usize) {
         };
         if ioctl(1, TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
             return (ws.ws_row as usize, ws.ws_col as usize);
+        }
+    }
+    #[cfg(windows)]
+    unsafe {
+        let h_out = GetStdHandle((-11i32) as u32);
+        let mut info = ConsoleScreenBufferInfo {
+            dw_size: Coord { x: 0, y: 0 },
+            dw_cursor_position: Coord { x: 0, y: 0 },
+            w_attributes: 0,
+            sr_window: SmallRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            dw_maximum_window_size: Coord { x: 0, y: 0 },
+        };
+        if GetConsoleScreenBufferInfo(h_out, &mut info) != 0 {
+            let cols = (info.sr_window.right - info.sr_window.left + 1).max(20) as usize;
+            let rows = (info.sr_window.bottom - info.sr_window.top + 1).max(10) as usize;
+            return (rows, cols);
         }
     }
     (36, 100)
@@ -887,6 +1032,20 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                 tr_en(
                     "/byok (API Anahtarı & Özel Sağlayıcı Ekle)",
                     "/byok (Add API Key & Custom Provider)",
+                ),
+            ),
+            (
+                "/login",
+                tr_en(
+                    "/login (Sağlayıcıya Doğrudan Bağlan / Giriş Yap)",
+                    "/login (Direct Provider Login & Connection)",
+                ),
+            ),
+            (
+                "/provider",
+                tr_en(
+                    "/provider (Sağlayıcı & Sunucu Bağlantı Merkezi)",
+                    "/provider (Provider & Server Connection Hub)",
                 ),
             ),
             (
@@ -1094,6 +1253,58 @@ pub fn flex_wrap_items(
     lines
 }
 
+fn image_token_span_before_cursor(chars: &[char], cursor_pos: usize) -> Option<(usize, usize)> {
+    if cursor_pos == 0 || cursor_pos > chars.len() || chars[cursor_pos - 1] != ']' {
+        return None;
+    }
+    let mut start = cursor_pos - 1;
+    while start > 0 {
+        start -= 1;
+        if chars[start] == '[' && chars.get(start + 1) == Some(&'🖼') {
+            return Some((start, cursor_pos));
+        }
+        if chars[start] == ']' {
+            break;
+        }
+    }
+    None
+}
+
+fn image_token_span_at_cursor(chars: &[char], cursor_pos: usize) -> Option<(usize, usize)> {
+    if cursor_pos + 1 >= chars.len() || chars[cursor_pos] != '[' || chars[cursor_pos + 1] != '🖼'
+    {
+        return None;
+    }
+    for (end, &ch) in chars.iter().enumerate().skip(cursor_pos + 2) {
+        if ch == ']' {
+            return Some((cursor_pos, end + 1));
+        }
+    }
+    None
+}
+
+fn style_inline_image_tokens(line: &str) -> String {
+    if !line.contains("[🖼️ ") {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len() + 16);
+    let mut rest = line;
+    while let Some(s) = rest.find("[🖼️ ") {
+        out.push_str(&rest[..s]);
+        if let Some(e) = rest[s..].find(']') {
+            let token = &rest[s..=s + e];
+            out.push_str(&format!("{}{}{}{}", BOLD, GREEN, token, RESET));
+            rest = &rest[s + e + 1..];
+        } else {
+            out.push_str(&rest[s..]);
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn wrap_input_lines_with_cursor(
     chars: &[char],
     cursor_pos: usize,
@@ -1173,34 +1384,32 @@ fn render_inline_dock(
     };
 
     let queue_tag = if queued_count > 0 {
-        format!(" · 📥:{}", queued_count)
+        format!(" {}📥{}{}", GREEN, queued_count, RESET)
     } else {
         String::new()
     };
-    let mode_tag = if busy_mode == "queue" {
-        tr_en("📥Sırala", "📥Queue")
-    } else {
-        tr_en("⚡Anında", "⚡Steer")
-    };
-
-    let lang_badge = if is_en() { "🌐EN" } else { "🌐TR" };
+    let _ = busy_mode;
     let model_badge = if endpoint.is_local() {
         format!("🟢 {}{}{}", GREEN, endpoint.key, RESET)
     } else {
         format!("🧠 {}{}{}", GREEN, endpoint.key, RESET)
     };
-    let status_items = vec![
+    let mut status_items = vec![
         format!("{}{}{}{}", BOLD, access_color, access.short_badge(), RESET),
         format!("{}{}{}", phase_color, phase.short_badge(), RESET),
         model_badge,
-        format!("🖥️  {}{}{}", MAGENTA, default_host, RESET),
-        effective_quota_badge(endpoint, quota_badge),
-        format!("{}{}{}", CYAN, lang_badge, RESET),
     ];
+    if default_host != "local" && !default_host.is_empty() {
+        status_items.push(format!("🖥️  {}{}{}", MAGENTA, default_host, RESET));
+    }
+    status_items.push(effective_quota_badge(endpoint, quota_badge));
+    if !queue_tag.is_empty() {
+        status_items.push(queue_tag.trim().to_string());
+    }
     set_sticky_dock_status(endpoint, access, phase, default_host, quota_badge);
     let top_prefix_first = format!("{}╭─{} ", CYAN, RESET);
     let top_prefix_cont = format!("{}│{}  ", CYAN, RESET);
-    let top_sep = format!(" {}│{} ", CYAN, RESET);
+    let top_sep = format!(" {}·{} ", DIM, RESET);
     let mut top_lines = flex_wrap_items(
         &top_prefix_first,
         &top_prefix_cont,
@@ -1224,9 +1433,32 @@ fn render_inline_dock(
         .enumerate()
         .map(|(idx, line)| {
             let raw = if idx == 0 {
-                format!("{}│{} {}❯{} {}", CYAN, RESET, BOLD, RESET, line)
+                if input_chars.is_empty() && suggestions.is_empty() {
+                    format!(
+                        "{}│{} {}❯{}   {}{}{}",
+                        CYAN,
+                        RESET,
+                        BOLD,
+                        RESET,
+                        DIM,
+                        tr_en(
+                            "Mesaj yazın veya / ile komutları açın...",
+                            "Type a prompt or press / for commands..."
+                        ),
+                        RESET
+                    )
+                } else {
+                    format!(
+                        "{}│{} {}❯{} {}",
+                        CYAN,
+                        RESET,
+                        BOLD,
+                        RESET,
+                        style_inline_image_tokens(line)
+                    )
+                }
             } else {
-                format!("{}│{}   {}", CYAN, RESET, line)
+                format!("{}│{}   {}", CYAN, RESET, style_inline_image_tokens(line))
             };
             let (trunc, _) = truncate_ansi_to_width(&raw, full_w);
             trunc
@@ -1261,12 +1493,9 @@ fn render_inline_dock(
     } else {
         let h_items = vec![
             format_context_usage_badge(),
-            format!("{}{}{}", DIM, tr_en("Enter: Gönder", "Enter: Send"), RESET),
             format!("{}{}{}", DIM, tr_en("/: Menü", "/: Menu"), RESET),
             format!("{}/model{}", DIM, RESET),
-            format!("{}/byok{}", DIM, RESET),
-            format!("{}/queue({}{}){}", DIM, mode_tag, queue_tag, RESET),
-            format!("{}/lang{}", DIM, RESET),
+            format!("{}/login{}", DIM, RESET),
             format!(
                 "{}{}{}",
                 DIM,
@@ -1274,7 +1503,6 @@ fn render_inline_dock(
                 RESET
             ),
             format!("{}{}{}", DIM, tr_en("\\: Faz", "\\: Phase"), RESET),
-            format!("{}{}{}", DIM, tr_en("Esc: Sil", "Esc: Clear"), RESET),
         ];
         flex_wrap_items(
             &bot_prefix_first,
@@ -1483,7 +1711,15 @@ pub fn read_bottom_dock_input(
             needs_redraw = true;
         }
 
-        let buf: String = chars.iter().collect();
+        let mut buf: String = chars.iter().collect();
+        if buf.contains('/') || buf.contains('~') {
+            let (collapsed, changed) = crate::router::collapse_pasted_image_paths(&buf);
+            if changed {
+                chars = collapsed.chars().collect();
+                cursor_pos = chars.len();
+                buf = collapsed;
+            }
+        }
         let suggestions = compute_input_suggestions(&buf);
         if suggestions.is_empty() {
             suggestion_idx = None;
@@ -1604,6 +1840,14 @@ pub fn read_bottom_dock_input(
                                     cur - 1
                                 };
                                 suggestion_idx = Some(prev);
+                            } else if chars.is_empty()
+                                && (crate::queued_message_count() > 0
+                                    || crate::steer_message_count() > 0)
+                            {
+                                if let Some((_, popped)) = crate::pop_last_pending_message() {
+                                    chars = popped.chars().collect();
+                                    cursor_pos = chars.len();
+                                }
                             } else if !history.is_empty() && hist_idx > 0 {
                                 hist_idx -= 1;
                                 chars = history[hist_idx].chars().collect();
@@ -1626,12 +1870,20 @@ pub fn read_bottom_dock_input(
                             }
                         }
                         b'C' => {
-                            if cursor_pos < chars.len() {
+                            if let Some((_, end)) = image_token_span_at_cursor(&chars, cursor_pos) {
+                                cursor_pos = end;
+                            } else if cursor_pos < chars.len() {
                                 cursor_pos += 1;
                             }
                         }
                         b'D' => {
-                            cursor_pos = cursor_pos.saturating_sub(1);
+                            if let Some((start, _)) =
+                                image_token_span_before_cursor(&chars, cursor_pos)
+                            {
+                                cursor_pos = start;
+                            } else {
+                                cursor_pos = cursor_pos.saturating_sub(1);
+                            }
                         }
                         b'H' => {
                             cursor_pos = 0;
@@ -1643,7 +1895,11 @@ pub fn read_bottom_dock_input(
                             if idx < n && kbuf[idx] == b'~' {
                                 idx += 1;
                             }
-                            if cursor_pos < chars.len() {
+                            if let Some((start, end)) =
+                                image_token_span_at_cursor(&chars, cursor_pos)
+                            {
+                                chars.drain(start..end);
+                            } else if cursor_pos < chars.len() {
                                 chars.remove(cursor_pos);
                             }
                         }
@@ -1773,6 +2029,12 @@ pub fn read_bottom_dock_input(
                     } else {
                         cur_buf.trim().to_string()
                     };
+                    if submitted.is_empty() {
+                        chars.clear();
+                        cursor_pos = 0;
+                        needs_redraw = false;
+                        continue;
+                    }
                     print!("\x1b[?2004l");
                     erase_inline_dock(prev_top_w, prev_cursor_col);
                     unsafe {
@@ -1799,7 +2061,10 @@ pub fn read_bottom_dock_input(
                     }
                 }
                 127 | 8 => {
-                    if cursor_pos > 0 {
+                    if let Some((start, end)) = image_token_span_before_cursor(&chars, cursor_pos) {
+                        chars.drain(start..end);
+                        cursor_pos = start;
+                    } else if cursor_pos > 0 {
                         chars.remove(cursor_pos - 1);
                         cursor_pos -= 1;
                     }
@@ -2013,6 +2278,31 @@ impl LiveSpinner {
                                         bi += 1;
                                         if bi < n && (kbuf[bi] == b'[' || kbuf[bi] == b'O') {
                                             bi += 1;
+                                            if bi < n
+                                                && kbuf[bi] == b'A'
+                                                && state.typing_buf.is_empty()
+                                            {
+                                                // Up-Arrow while input is empty: pull last queued/steered message back for editing!
+                                                if let Some((was_steer, popped)) =
+                                                    crate::pop_last_pending_message()
+                                                {
+                                                    state.steer_mode = Some(was_steer);
+                                                    state.typing_buf = popped.chars().collect();
+                                                    state.is_typing = !state.typing_buf.is_empty();
+                                                }
+                                                bi += 1;
+                                                continue;
+                                            }
+                                            if bi + 1 < n
+                                                && kbuf[bi] == b'3'
+                                                && kbuf[bi + 1] == b'~'
+                                                && state.typing_buf.is_empty()
+                                            {
+                                                // Delete key while input is empty: cancel last queued/steered message
+                                                let _ = crate::pop_last_pending_message();
+                                                bi += 2;
+                                                continue;
+                                            }
                                             while bi < n && !(b'@'..=b'~').contains(&kbuf[bi]) {
                                                 bi += 1;
                                             }
@@ -2051,7 +2341,6 @@ impl LiveSpinner {
                                             state.is_typing = false;
                                             if !trimmed.is_empty() {
                                                 if trimmed.starts_with('/') {
-                                                    crate::push_queued_message(trimmed.clone());
                                                     if matches!(
                                                         trimmed.as_str(),
                                                         "/reload"
@@ -2067,6 +2356,17 @@ impl LiveSpinner {
                                                     ) {
                                                         crate::trigger_interrupt();
                                                         should_break = true;
+                                                    } else if matches!(
+                                                        trimmed.as_str(),
+                                                        "/qclear"
+                                                            | "/queue clear"
+                                                            | "/qcancel"
+                                                            | "/queue cancel"
+                                                    ) {
+                                                        crate::clear_queued_messages();
+                                                        crate::clear_steer_messages();
+                                                    } else {
+                                                        crate::push_queued_message(trimmed.clone());
                                                     }
                                                 } else if state.steer_mode.unwrap_or(false) {
                                                     crate::push_steer_message(trimmed);
@@ -2077,15 +2377,34 @@ impl LiveSpinner {
                                             bi += 1;
                                         }
                                         127 | 8 => {
-                                            state.typing_buf.pop();
+                                            let cur_len = state.typing_buf.len();
+                                            if let Some((start, end)) =
+                                                image_token_span_before_cursor(
+                                                    &state.typing_buf,
+                                                    cur_len,
+                                                )
+                                            {
+                                                state.typing_buf.drain(start..end);
+                                            } else {
+                                                state.typing_buf.pop();
+                                            }
                                             if state.typing_buf.is_empty() {
                                                 state.is_typing = false;
                                             }
                                             bi += 1;
                                         }
                                         21 => {
-                                            state.typing_buf.clear();
-                                            state.is_typing = false;
+                                            if state.typing_buf.is_empty() {
+                                                let _ = crate::pop_last_pending_message();
+                                            } else {
+                                                state.typing_buf.clear();
+                                                state.is_typing = false;
+                                            }
+                                            bi += 1;
+                                        }
+                                        24 => {
+                                            // Ctrl+X: cancel last queued/steer message immediately
+                                            let _ = crate::pop_last_pending_message();
                                             bi += 1;
                                         }
                                         23 => {
@@ -2128,6 +2447,18 @@ impl LiveSpinner {
                                                 for ch in s.chars() {
                                                     state.is_typing = true;
                                                     state.typing_buf.push(ch);
+                                                }
+                                                let cur_s: String =
+                                                    state.typing_buf.iter().collect();
+                                                if cur_s.contains('/') || cur_s.contains('~') {
+                                                    let (collapsed, changed) =
+                                                        crate::router::collapse_pasted_image_paths(
+                                                            &cur_s,
+                                                        );
+                                                    if changed {
+                                                        state.typing_buf =
+                                                            collapsed.chars().collect();
+                                                    }
                                                 }
                                             }
                                         }
@@ -2204,8 +2535,11 @@ impl LiveSpinner {
                         state.partial_line.clear();
                     }
                     state.partial_shown = false;
-                    out.push_str("\x1b[?7h\x1b[?25h\x1b[?2026l");
+                    out.push_str("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?2026l");
                     print!("{}", out);
+                    let _ = io::stdout().flush();
+                } else {
+                    print!("\x1b[?2004l");
                     let _ = io::stdout().flush();
                 }
                 state.active = false;
@@ -2279,29 +2613,34 @@ pub fn render_welcome_header(
         cwd.to_string()
     };
     let short_session = session_name.trim_end_matches(".jsonl");
+    let git_branch = Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|b| !b.is_empty());
 
     let p_top = format!("{}╭─{} ", CYAN, RESET);
-    let p_mid = format!("{}│{}  ", CYAN, RESET);
     let p_bot = format!("{}╰─{} ", CYAN, RESET);
-    let sep = " · ".to_string();
-    let row1_items = vec![format!("{}⚡ SPAVN v0.1 (spavn.dev){}", BOLD, RESET)];
-    let row2_items = vec![
+    let sep = format!(" {}·{} ", DIM, RESET);
+    let mut row1_items = vec![
+        format!("{}⚡ SPAVN v{}{}", BOLD, env!("CARGO_PKG_VERSION"), RESET),
         format!("📂 {}{}{}", DIM, short_cwd, RESET),
-        format!("💬 {}{}{}", DIM, short_session, RESET),
     ];
+    if let Some(br) = git_branch {
+        row1_items.push(format!("🌿 {}{}{}", GREEN, br, RESET));
+    }
+    row1_items.push(format!(
+        "💬 {}{}{}",
+        DIM,
+        short_session.trim_start_matches("session-"),
+        RESET
+    ));
 
     println!();
-    for line in flex_wrap_items(&p_top, &p_mid, &sep, &row1_items, full_w) {
+    for line in flex_wrap_items(&p_top, &p_bot, &sep, &row1_items, full_w) {
         println!("{}", line);
-    }
-    let r2_lines = flex_wrap_items(&p_mid, &p_mid, &sep, &row2_items, full_w);
-    let r2_len = r2_lines.len();
-    for (i, line) in r2_lines.into_iter().enumerate() {
-        if i + 1 == r2_len {
-            println!("{}", line.replacen(&p_mid, &p_bot, 1));
-        } else {
-            println!("{}", line);
-        }
     }
 }
 
@@ -2517,15 +2856,29 @@ pub fn select_interactive_menu(
         }
 
         if needs_redraw {
-            let max_w = last_cols.saturating_sub(2).clamp(4, 78);
-            print!("\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
+            let max_w = last_cols.saturating_sub(2).max(20);
+            let inner_w = max_w.saturating_sub(2);
+            let mut out = format!("\x1b[?2026h\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
             let raw_hdr = format!(
-                "{}╭─ {} {}(↑/↓/Tab: Gezin · Enter: Seç · Esc/q: İptal){} ",
+                "{}╭─ {} {}(↑/↓ · Enter · Esc){} ",
                 CYAN, title, YELLOW, CYAN
             );
-            let (trunc_hdr, used_hdr) = truncate_ansi_to_width(&raw_hdr, max_w);
-            let hdr_pad = "─".repeat(max_w.saturating_sub(used_hdr));
-            println!("{}{}{}{}", trunc_hdr, CYAN, hdr_pad, RESET);
+            let (trunc_hdr, used_hdr) = truncate_ansi_to_width(&raw_hdr, max_w.saturating_sub(1));
+            let hdr_pad = "─".repeat(max_w.saturating_sub(used_hdr + 1));
+            out.push_str(&format!("{}{}{}╮{}\n", trunc_hdr, CYAN, hdr_pad, RESET));
+
+            let key_col_w = items
+                .iter()
+                .map(|it| truncate_ansi_to_width(&it.key, 26).1)
+                .max()
+                .unwrap_or(10)
+                .clamp(10, 22);
+            let badge_col_w = items
+                .iter()
+                .map(|it| truncate_ansi_to_width(&it.badge, 30).1)
+                .max()
+                .unwrap_or(12)
+                .clamp(10, 24);
 
             let win_start = if selected >= max_vis_items {
                 selected + 1 - max_vis_items
@@ -2535,22 +2888,51 @@ pub fn select_interactive_menu(
 
             let end = (win_start + max_vis_items).min(items.len());
             for (i, item) in items.iter().enumerate().take(end).skip(win_start) {
-                let row_str = if i == selected {
+                let (k_str, k_used) = truncate_ansi_to_width(&item.key, key_col_w);
+                let k_pad = " ".repeat(key_col_w.saturating_sub(k_used));
+                let (b_str, b_used) = truncate_ansi_to_width(&item.badge, badge_col_w);
+                let b_pad = " ".repeat(badge_col_w.saturating_sub(b_used));
+                let fixed_used = 4 + key_col_w + 3 + badge_col_w + 3;
+                let desc_budget = inner_w.saturating_sub(fixed_used);
+
+                let row_inner = if desc_budget >= 8 && !item.desc.is_empty() {
+                    let (d_str, _) = truncate_ansi_to_width(&item.desc, desc_budget);
+                    if i == selected {
+                        format!(
+                            " \x1b[1;36m❯\x1b[0m \x1b[1;7;36m {}{} \x1b[0m {}│{} {}{} {}│{} {}{}{}",
+                            k_str, k_pad, DIM, RESET, b_str, b_pad, DIM, RESET, BOLD, d_str, RESET
+                        )
+                    } else {
+                        format!(
+                            "    {}{} {}│{} {}{} {}│{} {}{}{}",
+                            k_str, k_pad, DIM, RESET, b_str, b_pad, DIM, RESET, DIM, d_str, RESET
+                        )
+                    }
+                } else if i == selected {
                     format!(
-                        "{}│{} \x1b[1;36m❯\x1b[0m \x1b[1;7;36m {:<24} \x1b[0m │ {:<22} │ {}{}{}",
-                        CYAN, RESET, item.key, item.badge, BOLD, item.desc, RESET
+                        " \x1b[1;36m❯\x1b[0m \x1b[1;7;36m {}{} \x1b[0m {}│{} {}{}",
+                        k_str, k_pad, DIM, RESET, b_str, b_pad
                     )
                 } else {
                     format!(
-                        "{}│{}   {:<24}   │ {:<22} │ {}{}{}",
-                        CYAN, RESET, item.key, item.badge, DIM, item.desc, RESET
+                        "    {}{} {}│{} {}{}",
+                        k_str, k_pad, DIM, RESET, b_str, b_pad
                     )
                 };
-                let (trunc_row, _) = truncate_ansi_to_width(&row_str, max_w);
-                println!("{}", trunc_row);
+
+                let (trunc_inner, used_inner) = truncate_ansi_to_width(&row_inner, inner_w);
+                let right_pad = " ".repeat(inner_w.saturating_sub(used_inner));
+                out.push_str(&format!(
+                    "{}│{}{}{}{}│{}\n",
+                    CYAN, RESET, trunc_inner, right_pad, CYAN, RESET
+                ));
             }
-            let bot_pad = "─".repeat(max_w.saturating_sub(2).max(10));
-            print!("{}╰{}{}\n\x1b[?7h", CYAN, bot_pad, RESET);
+            let bot_pad = "─".repeat(inner_w);
+            out.push_str(&format!(
+                "{}╰{}╯{}\n\x1b[?7h\x1b[?2026l",
+                CYAN, bot_pad, RESET
+            ));
+            print!("{}", out);
             let _ = io::stdout().flush();
             needs_redraw = false;
         }
@@ -2562,7 +2944,13 @@ pub fn select_interactive_menu(
                 continue;
             }
             Err(_) => break,
-            Ok(n) => {
+            Ok(mut n) => {
+                if n == 1 && kbuf[0] == 27 {
+                    thread::sleep(Duration::from_millis(25));
+                    if let Ok(n2) = stdin.read(&mut kbuf[1..]) {
+                        n += n2;
+                    }
+                }
                 needs_redraw = true;
                 n
             }
@@ -3096,22 +3484,19 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
         }
 
         if needs_redraw {
-            let max_w = last_cols.saturating_sub(2).clamp(20, 100);
-            print!("\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
+            let max_w = last_cols.saturating_sub(2).max(20);
+            let right_inner_w = max_w.saturating_sub(33);
+            let mut out = format!("\x1b[?2026h\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
             let raw_hdr = format!(
-                "{}╭─ {} {}{} ",
+                "{}╭─ {} {}(←/→: Sütun · ↑/↓: Seç · Enter · Esc){} ",
                 CYAN,
                 tr_en("🧠 MODEL SEÇİMİ", "🧠 SELECT MODEL"),
                 YELLOW,
-                tr_en(
-                    "(←/→: Sağlayıcı/Model Geçişi · ↑/↓: Seç · Enter: Onayla · Esc: İptal)",
-                    "(←/→: Switch Column · ↑/↓: Select · Enter: Confirm · Esc: Cancel)"
-                )
+                CYAN
             );
-            let raw_hdr = format!("{}{}", raw_hdr, CYAN);
-            let (trunc_hdr, used_hdr) = truncate_ansi_to_width(&raw_hdr, max_w);
-            let hdr_pad = "─".repeat(max_w.saturating_sub(used_hdr));
-            println!("{}{}{}{}", trunc_hdr, CYAN, hdr_pad, RESET);
+            let (trunc_hdr, used_hdr) = truncate_ansi_to_width(&raw_hdr, max_w.saturating_sub(1));
+            let hdr_pad = "─".repeat(max_w.saturating_sub(used_hdr + 1));
+            out.push_str(&format!("{}{}{}╮{}\n", trunc_hdr, CYAN, hdr_pad, RESET));
 
             let left_hdr_style = if !focus_right {
                 tr_en(
@@ -3135,20 +3520,21 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                     "\x1b[2m  MODELS (→ Right arrow to focus)\x1b[0m",
                 )
             };
+            let (r_hdr_trunc, r_hdr_used) =
+                truncate_ansi_to_width(right_hdr_style, right_inner_w.saturating_sub(1));
+            let r_hdr_pad = " ".repeat(right_inner_w.saturating_sub(r_hdr_used + 1));
             let col_hdr = format!(
-                "{}│{} {} {}│{} {}",
-                CYAN, RESET, left_hdr_style, CYAN, RESET, right_hdr_style
+                "{}│{} {} {}│{} {}{}{}│{}",
+                CYAN, RESET, left_hdr_style, CYAN, RESET, r_hdr_trunc, r_hdr_pad, CYAN, RESET
             );
-            let (trunc_col_hdr, _) = truncate_ansi_to_width(&col_hdr, max_w);
-            println!("{}", trunc_col_hdr);
+            out.push_str(&format!("{}\n", col_hdr));
 
-            let sep_right = "─".repeat(max_w.saturating_sub(32));
+            let sep_right = "─".repeat(right_inner_w);
             let raw_sep = format!(
-                "{}├──────────────────────────────┼{}{}",
+                "{}├──────────────────────────────┼{}┤{}",
                 CYAN, sep_right, RESET
             );
-            let (trunc_sep, _) = truncate_ansi_to_width(&raw_sep, max_w);
-            println!("{}", trunc_sep);
+            out.push_str(&format!("{}\n", raw_sep));
 
             let p_win_start = if prov_idx >= body_rows {
                 prov_idx + 1 - body_rows
@@ -3192,43 +3578,70 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 let right_cell = if let Some(m) = cur_models.get(m_idx) {
                     let (trunc_k, used_k) = truncate_ansi_to_width(&m.key, 24);
                     let pad_k = " ".repeat(24usize.saturating_sub(used_k));
+                    let (trunc_b, used_b) = truncate_ansi_to_width(&m.badge, 22);
+                    let pad_b = " ".repeat(22usize.saturating_sub(used_b));
                     if m_idx == cur_m_idx {
                         if focus_right {
                             format!(
-                                "\x1b[1;36m❯\x1b[0m \x1b[1;7;36m {}{} \x1b[0m │ {} │ {}{}{}",
-                                trunc_k, pad_k, m.badge, BOLD, m.desc, RESET
+                                "\x1b[1;36m❯\x1b[0m \x1b[1;7;36m {}{} \x1b[0m {}│{} {}{} {}│{} {}{}{}",
+                                trunc_k, pad_k, DIM, RESET, trunc_b, pad_b, DIM, RESET, BOLD, m.desc, RESET
                             )
                         } else {
                             format!(
-                                "\x1b[1;36m▸\x1b[0m  {}{}{}{}  │ {} │ {}{}{}",
-                                BOLD, trunc_k, pad_k, RESET, m.badge, DIM, m.desc, RESET
+                                "\x1b[1;36m▸\x1b[0m  {}{}{}{}  {}│{} {}{} {}│{} {}{}{}",
+                                BOLD,
+                                trunc_k,
+                                pad_k,
+                                RESET,
+                                DIM,
+                                RESET,
+                                trunc_b,
+                                pad_b,
+                                DIM,
+                                RESET,
+                                DIM,
+                                m.desc,
+                                RESET
                             )
                         }
                     } else {
                         format!(
-                            "   {}{}{}  │ {} │ {}{}{}",
-                            trunc_k, pad_k, RESET, m.badge, DIM, m.desc, RESET
+                            "   {}{}{}  {}│{} {}{} {}│{} {}{}{}",
+                            trunc_k,
+                            pad_k,
+                            RESET,
+                            DIM,
+                            RESET,
+                            trunc_b,
+                            pad_b,
+                            DIM,
+                            RESET,
+                            DIM,
+                            m.desc,
+                            RESET
                         )
                     }
                 } else {
                     String::new()
                 };
 
+                let (r_trunc, r_used) =
+                    truncate_ansi_to_width(&right_cell, right_inner_w.saturating_sub(1));
+                let r_pad = " ".repeat(right_inner_w.saturating_sub(r_used + 1));
                 let full_row = format!(
-                    "{}│{}{}{}│{} {}",
-                    CYAN, RESET, left_cell, CYAN, RESET, right_cell
+                    "{}│{}{}{}│{} {}{}{}│{}",
+                    CYAN, RESET, left_cell, CYAN, RESET, r_trunc, r_pad, CYAN, RESET
                 );
-                let (trunc_row, _) = truncate_ansi_to_width(&full_row, max_w);
-                println!("{}", trunc_row);
+                out.push_str(&format!("{}\n", full_row));
             }
 
-            let bot_right = "─".repeat(max_w.saturating_sub(32));
+            let bot_right = "─".repeat(right_inner_w);
             let raw_bot = format!(
-                "{}╰──────────────────────────────┴{}{}",
+                "{}╰──────────────────────────────┴{}╯{}",
                 CYAN, bot_right, RESET
             );
-            let (trunc_bot, _) = truncate_ansi_to_width(&raw_bot, max_w);
-            print!("{}\n\x1b[?7h", trunc_bot);
+            out.push_str(&format!("{}\n\x1b[?7h\x1b[?2026l", raw_bot));
+            print!("{}", out);
             let _ = io::stdout().flush();
             needs_redraw = false;
         }
@@ -3240,7 +3653,13 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 continue;
             }
             Err(_) => break,
-            Ok(n) => {
+            Ok(mut n) => {
+                if n == 1 && kbuf[0] == 27 {
+                    thread::sleep(Duration::from_millis(25));
+                    if let Ok(n2) = stdin.read(&mut kbuf[1..]) {
+                        n += n2;
+                    }
+                }
                 needs_redraw = true;
                 n
             }
@@ -3368,70 +3787,198 @@ fn prompt_inline_line(prompt_label: &str) -> Option<String> {
     }
 }
 
-/// Interactive BYOK Manager (`/byok`):
-/// Allows any user to configure API keys for built-in providers (saved in `~/.spavn/secrets.env` with 0600)
-/// OR add any custom OpenAI-compatible Base URL + Model + API Key into `~/.spavn/config.json`!
-pub fn interactive_byok_manager() -> Option<String> {
+fn open_url_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
+fn provider_portal_url(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "openai" => Some("https://platform.openai.com/api-keys"),
+        "anthropic" => Some("https://console.anthropic.com/settings/keys"),
+        "gemini" => Some("https://aistudio.google.com/app/apikey"),
+        "openrouter" => Some("https://openrouter.ai/keys"),
+        "deepseek" => Some("https://platform.deepseek.com/api_keys"),
+        "minimax" => Some("https://platform.minimax.io"),
+        "glm" => Some("https://open.bigmodel.cn/usercenter/apikeys"),
+        "groq" => Some("https://console.groq.com/keys"),
+        "xai" => Some("https://console.x.ai"),
+        "microsoft-github" => Some("https://github.com/settings/tokens"),
+        _ => None,
+    }
+}
+
+fn detect_cli_token_for_provider(provider_id: &str) -> Option<(String, &'static str)> {
+    match provider_id {
+        "microsoft-github" => {
+            let out = Command::new("gh").args(["auth", "token"]).output().ok()?;
+            if out.status.success() {
+                let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !tok.is_empty() {
+                    return Some((tok, "GitHub CLI (`gh auth token`)"));
+                }
+            }
+            None
+        }
+        "gemini" => {
+            let out = Command::new("gcloud")
+                .args(["auth", "print-access-token"])
+                .output()
+                .ok()?;
+            if out.status.success() {
+                let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !tok.is_empty() {
+                    return Some((tok, "Google Cloud CLI (`gcloud auth`)"));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Interactive BYOK / Login / Provider Connection Manager (`/login`, `/provider`, `/connect`, `/byok`):
+/// Allows any user to connect providers via auto-detected CLI auth (`gh`, `gcloud`), one-click browser
+/// portal launch, API key entry (saved in `~/.spavn/secrets.env` with 0600), local server discovery,
+/// OR custom OpenAI-compatible Base URL + Model + API Key!
+pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<String> {
     let catalog = builtin_byok_catalog();
-    let mut items: Vec<MenuItem> = catalog
-        .iter()
-        .map(|g| {
+    let chosen = if let Some(pre) = preselected_provider
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let low = pre.to_ascii_lowercase();
+        if matches!(low.as_str(), "local" | "m3" | "llama" | "vllm" | "lmstudio") {
+            "local-server".to_string()
+        } else if matches!(low.as_str(), "custom" | "url") {
+            "custom-provider".to_string()
+        } else if matches!(low.as_str(), "github" | "copilot" | "microsoft" | "azure") {
+            "microsoft-github".to_string()
+        } else if matches!(low.as_str(), "claude" | "anthropic") {
+            "anthropic".to_string()
+        } else if matches!(low.as_str(), "google" | "gemini") {
+            "gemini".to_string()
+        } else if let Some(g) = catalog.iter().find(|g| g.id.eq_ignore_ascii_case(&low)) {
+            g.id.clone()
+        } else {
+            low
+        }
+    } else {
+        let mut items: Vec<MenuItem> = vec![MenuItem {
+            key: "local-server".to_string(),
+            badge: format!(
+                "{}{}{}",
+                GREEN,
+                tr_en("🟢 Yerel Sunucu", "🟢 Local Server"),
+                RESET
+            ),
+            desc: tr_en(
+                "llama-swap / Ollama / LM Studio / vLLM adresini tara ve bağlan",
+                "Scan & connect llama-swap / Ollama / LM Studio / vLLM endpoint",
+            )
+            .to_string(),
+        }];
+        items.extend(catalog.iter().map(|g| {
             let has_key = g.is_local || resolve_api_key(&g.api_key_env).is_some();
             let badge = if g.is_local {
                 format!(
                     "{}{}{}",
                     GREEN,
-                    tr_en("🟢 Yerel (Anahtarsız)", "🟢 Local (Keyless)"),
+                    tr_en("🟢 Yerel (Hazır)", "🟢 Local (Ready)"),
                     RESET
                 )
             } else if has_key {
-                format!(
-                    "{}{} ({}){}",
-                    GREEN,
-                    tr_en("🟢 Anahtar Kayıtlı", "🟢 Key Configured"),
-                    g.api_key_env,
-                    RESET
-                )
+                format!("{}{}{}", GREEN, tr_en("🟢 Bağlı", "🟢 Connected"), RESET)
             } else {
                 format!(
-                    "{}{} ({}){}",
+                    "{}{}{}",
                     YELLOW,
-                    tr_en("⚪ Anahtar Gir", "⚪ Enter Key"),
-                    g.api_key_env,
+                    tr_en("🔗 Bağlan / Giriş", "🔗 Connect / Login"),
                     RESET
                 )
             };
+            let clean_title = g.title.replace(" (BYOK)", "");
             MenuItem {
                 key: g.id.clone(),
                 badge,
-                desc: format!("{} -> {}", g.title, g.base_url),
+                desc: format!("{} · {}", clean_title, g.base_url),
             }
-        })
-        .collect();
+        }));
 
-    items.push(MenuItem {
-        key: "custom-provider".to_string(),
-        badge: format!(
-            "{}{}{}",
+        items.push(MenuItem {
+            key: "custom-provider".to_string(),
+            badge: format!(
+                "{}{}{}",
+                CYAN,
+                tr_en("➕ Özel Sağlayıcı Ekle", "➕ Add Custom Provider"),
+                RESET
+            ),
+            desc: tr_en(
+                "Kendi OpenAI/Azure-uyumlu Base URL, Model ve API Anahtarınızı bağlayın",
+                "Connect your own OpenAI/Azure-compatible Base URL, Model ID, and API Key",
+            )
+            .to_string(),
+        });
+
+        select_interactive_menu(
+            tr_en(
+                "🔐 SPAVN HIZLI BAĞLANTI & SAĞLAYICI MERKEZİ (/login · /provider · /byok)",
+                "🔐 SPAVN QUICK CONNECT & PROVIDER HUB (/login · /provider · /byok)",
+            ),
+            &items,
+            0,
+        )?
+    };
+
+    if chosen == "local-server" {
+        let mut cfg = load_user_config();
+        let cur_base = cfg
+            .local_base_url
+            .clone()
+            .unwrap_or_else(|| "http://127.0.0.1:8000/v1".to_string());
+        println!(
+            "\n{}╭─ 🟢 {} ───────────────────────────────{}",
             CYAN,
-            tr_en("➕ Özel Sağlayıcı Ekle", "➕ Add Custom Provider"),
+            tr_en(
+                "YEREL MODEL SUNUCUSU BAĞLANTISI",
+                "LOCAL MODEL SERVER CONNECTION"
+            ),
             RESET
-        ),
-        desc: tr_en(
-            "Kendi OpenAI-uyumlu Base URL, Model ve API Anahtarınızı ekleyin",
-            "Add your own OpenAI-compatible Base URL, Model ID, and API Key",
-        )
-        .to_string(),
-    });
-
-    let chosen = select_interactive_menu(
-        tr_en(
-            "🔑 SPAVN BYOK SAĞLAYICI & ANAHTAR YÖNETİCİSİ (/byok)",
-            "🔑 SPAVN BYOK PROVIDER & KEY MANAGER (/byok)",
-        ),
-        &items,
-        0,
-    )?;
+        );
+        let entered_base = prompt_inline_line(&format!(
+            "│ {} [{}]",
+            tr_en(
+                "Yerel Sunucu Base URL (Enter = mevcut adresi kullan)",
+                "Local Server Base URL (Enter = keep current)"
+            ),
+            cur_base
+        ))
+        .unwrap_or(cur_base);
+        let clean_base = entered_base.trim().trim_end_matches('/').to_string();
+        let disc_url = format!("{}/models", clean_base);
+        cfg.local_base_url = Some(clean_base.clone());
+        cfg.local_discovery_url = Some(disc_url.clone());
+        let _ = save_user_config(&cfg);
+        println!(
+            "{}╰─ ✅ {}: {}{}{}",
+            CYAN,
+            tr_en("Yerel sunucu bağlandı", "Local server connected"),
+            GREEN,
+            clean_base,
+            RESET
+        );
+        return interactive_select_model(&cfg.default_model, true);
+    }
 
     if chosen == "custom-provider" {
         println!(
@@ -3511,49 +4058,110 @@ pub fn interactive_byok_manager() -> Option<String> {
 
     let group = catalog.into_iter().find(|g| g.id == chosen)?;
     if !group.is_local {
-        println!(
-            "\n{}╭─ 🔑 {} {} (~/.spavn/secrets.env — 0600) ───────────{}",
-            CYAN,
-            group.title,
-            tr_en("API ANAHTARI", "API KEY"),
-            RESET
-        );
-        if let Some(new_key) = prompt_inline_line(&format!(
-            "│ {} {}",
-            group.api_key_env,
-            tr_en(
-                "değerini girin (Mevcut anahtarı korumak için boş Enter)",
-                "value (Press Enter empty to keep existing key)"
-            )
-        )) {
-            match upsert_spavn_secret(&group.api_key_env, &new_key) {
-                Ok(()) => println!(
-                    "{}│{} {}✅ {} {}{}",
-                    CYAN,
-                    RESET,
-                    GREEN,
-                    group.api_key_env,
-                    tr_en(
-                        "güvenli olarak ~/.spavn/secrets.env dosyasına kaydedildi.",
-                        "securely saved to ~/.spavn/secrets.env."
-                    ),
-                    RESET
-                ),
-                Err(e) => println!(
-                    "{}│{} {}✗ {}: {}{}",
-                    CYAN,
-                    RESET,
-                    RED,
-                    tr_en("Hata", "Error"),
-                    e,
-                    RESET
-                ),
-            }
+        let mut key_configured = false;
+        if let Some((auto_tok, source_label)) = detect_cli_token_for_provider(&group.id) {
+            let _ = upsert_spavn_secret(&group.api_key_env, &auto_tok);
+            println!(
+                "\n{}╭─ 🔐 {} ───────────────────────────────────────────{}\n{}│{} {}⚡ {} üzerinden oturum otomatik algılandı ve bağlandı!{}\n{}╰────────────────────────────────────────────────────────────────────────────{}",
+                CYAN,
+                group.title,
+                RESET,
+                CYAN,
+                RESET,
+                GREEN,
+                source_label,
+                RESET,
+                CYAN,
+                RESET
+            );
+            key_configured = true;
         }
-        println!(
-            "{}╰────────────────────────────────────────────────────────────────────────────{}",
-            CYAN, RESET
-        );
+        if !key_configured {
+            let portal = provider_portal_url(&group.id);
+            println!(
+                "\n{}╭─ 🔐 {} {} (~/.spavn/secrets.env — 0600) ───────────{}",
+                CYAN,
+                group.title,
+                tr_en("BAĞLANTI & GİRİŞ", "LOGIN & CONNECT"),
+                RESET
+            );
+            if let Some(u) = portal {
+                println!(
+                    "{}│{} {}🌐 {}: {}{}{} {}",
+                    CYAN,
+                    RESET,
+                    DIM,
+                    tr_en("Anahtar Sayfası", "Key Portal"),
+                    CYAN,
+                    u,
+                    RESET,
+                    tr_en(
+                        "(Tarayıcıda açmak için 'o' yazıp Enter'a basın)",
+                        "(Type 'o' + Enter to open in browser)"
+                    )
+                );
+            }
+            let prompt_msg = format!(
+                "│ {} {}",
+                group.api_key_env,
+                tr_en(
+                    "anahtarını yapıştırın ('o' = Tarayıcıda Aç, boş Enter = Mevcutu Koru)",
+                    "paste key ('o' = Open Browser, empty Enter = Keep Existing)"
+                )
+            );
+            if let Some(first_in) = prompt_inline_line(&prompt_msg) {
+                let final_key = if first_in.eq_ignore_ascii_case("o")
+                    || first_in.eq_ignore_ascii_case("open")
+                {
+                    if let Some(u) = portal {
+                        open_url_in_browser(u);
+                        println!(
+                            "{}│{} {}🌐 {}{}",
+                            CYAN,
+                            RESET,
+                            GREEN,
+                            tr_en(
+                                "Tarayıcı açıldı — anahtarı kopyalayıp aşağıya yapıştırın:",
+                                "Browser opened — copy your key and paste below:"
+                            ),
+                            RESET
+                        );
+                    }
+                    prompt_inline_line(&format!("│ {} ", group.api_key_env))
+                } else {
+                    Some(first_in)
+                };
+                if let Some(new_key) = final_key {
+                    match upsert_spavn_secret(&group.api_key_env, &new_key) {
+                        Ok(()) => println!(
+                            "{}│{} {}✅ {} {}{}",
+                            CYAN,
+                            RESET,
+                            GREEN,
+                            group.api_key_env,
+                            tr_en(
+                                "güvenli olarak ~/.spavn/secrets.env dosyasına kaydedildi ve bağlandı.",
+                                "securely saved to ~/.spavn/secrets.env and connected."
+                            ),
+                            RESET
+                        ),
+                        Err(e) => println!(
+                            "{}│{} {}✗ {}: {}{}",
+                            CYAN,
+                            RESET,
+                            RED,
+                            tr_en("Hata", "Error"),
+                            e,
+                            RESET
+                        ),
+                    }
+                }
+            }
+            println!(
+                "{}╰────────────────────────────────────────────────────────────────────────────{}",
+                CYAN, RESET
+            );
+        }
     }
 
     let model_items: Vec<MenuItem> = group
@@ -4049,9 +4657,39 @@ pub fn interactive_select_session(current_path: &Path) -> Option<PathBuf> {
 pub fn render_assistant_header(model_key: &str) {
     close_thinking_box_if_open();
     spinner_print(&format!(
-        "\n{}╭─ ⚡ SPAVN {}[{}]{}\n",
-        CYAN, DIM, model_key, RESET
+        "\n{}╭─ {}⚡ SPAVN{} {}· {}{}{}\n",
+        CYAN, BOLD, RESET, DIM, CYAN, model_key, RESET
     ));
+}
+
+#[allow(dead_code)]
+pub fn supports_inline_terminal_images() -> bool {
+    let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let lc_term = std::env::var("LC_TERMINAL").unwrap_or_default();
+    let term = std::env::var("TERM").unwrap_or_default();
+    term_prog == "iTerm.app"
+        || term_prog == "WezTerm"
+        || lc_term == "iTerm2"
+        || term_prog.eq_ignore_ascii_case("ghostty")
+        || term.contains("kitty")
+}
+
+/// Renders an inline image preview in iTerm2 / WezTerm via OSC 1337 (`\x1b]1337;File=...`).
+pub fn render_inline_image_preview(img: &crate::router::DraggedImage) {
+    let kb = (img.size_bytes as f64 / 1024.0).max(0.1);
+    println!(
+        "{}│{} {}🖼️  [Görsel Eklendi: {}{}{} ({:.1} KB)]{}",
+        CYAN, RESET, GREEN, BOLD, img.filename, RESET, kb, RESET
+    );
+    let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let lc_term = std::env::var("LC_TERMINAL").unwrap_or_default();
+    if term_prog == "iTerm.app" || term_prog == "WezTerm" || lc_term == "iTerm2" {
+        println!(
+            "{}│{} \x1b]1337;File=inline=1;width=46;height=12;preserveAspectRatio=1:{}\x07",
+            CYAN, RESET, img.base64
+        );
+        let _ = io::stdout().flush();
+    }
 }
 
 pub fn render_assistant_footer(
@@ -4061,9 +4699,27 @@ pub fn render_assistant_footer(
     total_sec: f64,
     tok_per_sec: f64,
 ) {
+    let speed_color = if tok_per_sec >= 40.0 {
+        GREEN
+    } else if tok_per_sec >= 18.0 {
+        CYAN
+    } else {
+        DIM
+    };
     spinner_print(&format!(
-        "{}╰─{} {}{} · {} · TTFT {}ms · {:.1}s · {:.0} tok/s{}\n",
-        CYAN, RESET, DIM, model_key, access_badge, ttft_ms, total_sec, tok_per_sec, RESET
+        "{}╰─{} {}✓ {}{} {}· {} · TTFT {}ms · {:.1}s · {}{:.1} tok/s{}\n",
+        CYAN,
+        RESET,
+        GREEN,
+        RESET,
+        model_key,
+        DIM,
+        access_badge,
+        ttft_ms,
+        total_sec,
+        speed_color,
+        tok_per_sec,
+        RESET
     ));
 }
 
@@ -4125,5 +4781,21 @@ mod recap_tests {
                 line
             );
         }
+    }
+
+    #[test]
+    fn atomic_image_token_deletes_and_navigates_as_single_unit() {
+        let s = "merhaba [🖼️ Screenshot 2026-11-04.png (136KB)] test";
+        let mut chars: Vec<char> = s.chars().collect();
+        let close_pos = chars.iter().position(|&c| c == ']').unwrap() + 1;
+        let span = super::image_token_span_before_cursor(&chars, close_pos)
+            .expect("should detect atomic image token before cursor");
+        assert_eq!(
+            super::image_token_span_at_cursor(&chars, span.0),
+            Some(span)
+        );
+        chars.drain(span.0..span.1);
+        let after: String = chars.into_iter().collect();
+        assert_eq!(after, "merhaba  test");
     }
 }

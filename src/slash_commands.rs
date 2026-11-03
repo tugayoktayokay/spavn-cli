@@ -1,6 +1,6 @@
 use crate::config::{self, is_en, load_user_config, tr_en};
 use crate::hud::{
-    self, build_session_recap_line, fetch_quick_quota_line, interactive_byok_manager,
+    self, build_session_recap_line, fetch_quick_quota_line, interactive_provider_login,
     interactive_queue_manager, interactive_select_access, interactive_select_host,
     interactive_select_language, interactive_select_model, interactive_select_role,
     interactive_select_session, interactive_select_skill, render_fleet_radar,
@@ -25,6 +25,7 @@ use crate::{
     perform_manual_compact, push_queued_message, queued_message_count,
     render_session_resume_preview,
 };
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
@@ -97,25 +98,50 @@ pub fn dispatch_slash_command(
             AccessMode::Sovereign => "sovereign",
         };
         let session_path_str = session_file.to_string_lossy().to_string();
-        let _ = std::process::Command::new(&exe_path)
-            .args([
-                "-s",
-                &session_path_str,
-                "-m",
-                &endpoint.key,
-                "-a",
-                access_str,
-                "-P",
-                active_phase.as_str(),
-                "--host",
-                &ctx.default_host,
-            ])
-            .exec();
+        let reload_args = [
+            "-s",
+            &session_path_str,
+            "-m",
+            &endpoint.key,
+            "-a",
+            access_str,
+            "-P",
+            active_phase.as_str(),
+            "--host",
+            &ctx.default_host,
+        ];
+        #[cfg(unix)]
+        {
+            let _ = std::process::Command::new(&exe_path)
+                .args(reload_args)
+                .exec();
+        }
+        #[cfg(not(unix))]
+        {
+            if let Ok(mut child) = std::process::Command::new(&exe_path)
+                .args(reload_args)
+                .spawn()
+            {
+                let _ = child.wait();
+                std::process::exit(0);
+            }
+        }
         return SlashOutcome::ExitLoop;
     }
 
-    if input == "/byok" || input == "/b" || input == "/keys" {
-        if let Some(chosen_model) = interactive_byok_manager() {
+    if matches!(
+        input,
+        "/byok" | "/b" | "/keys" | "/login" | "/provider" | "/providers" | "/connect" | "/auth"
+    ) || input.starts_with("/login ")
+        || input.starts_with("/provider ")
+        || input.starts_with("/connect ")
+    {
+        let pre = input
+            .strip_prefix("/login ")
+            .or_else(|| input.strip_prefix("/provider "))
+            .or_else(|| input.strip_prefix("/connect "))
+            .map(str::trim);
+        if let Some(chosen_model) = interactive_provider_login(pre) {
             *endpoint = resolve_endpoint(&chosen_model);
             let mut cfg = load_user_config();
             cfg.default_model = endpoint.key.clone();
@@ -179,6 +205,39 @@ pub fn dispatch_slash_command(
     if input == "/queue" || input == "/qlist" || input == "/qedit" {
         if let QueueAction::EditMessage(msg_to_edit) = interactive_queue_manager() {
             *prefill_input = Some(msg_to_edit);
+        }
+        return SlashOutcome::Handled;
+    }
+    if matches!(
+        input,
+        "/queue clear" | "/qclear" | "/queue cancel" | "/qcancel"
+    ) {
+        crate::clear_queued_messages();
+        crate::clear_steer_messages();
+        println!(
+            "\n{}🗑️  {}{}",
+            GREEN,
+            tr_en(
+                "Bekleyen tüm kuyruk ve canlı müdahale mesajları iptal edildi.",
+                "All queued and live-steer messages have been cancelled."
+            ),
+            RESET
+        );
+        return SlashOutcome::Handled;
+    }
+    if matches!(input, "/queue pop" | "/qpop" | "/queue edit") {
+        if let Some((_, popped)) = crate::pop_last_pending_message() {
+            *prefill_input = Some(popped);
+        } else {
+            println!(
+                "\n{}{}{}",
+                YELLOW,
+                tr_en(
+                    "Kuyrukta düzenlenecek mesaj yok.",
+                    "No queued message to edit."
+                ),
+                RESET
+            );
         }
         return SlashOutcome::Handled;
     }
@@ -587,6 +646,7 @@ pub fn dispatch_slash_command(
                     .to_string_lossy()
                     .to_string();
                 *messages = loaded;
+                refresh_system_prompt(cwd, endpoint, session_file, messages);
                 render_session_resume_preview(session_file, messages);
             }
         }
@@ -630,32 +690,61 @@ pub fn dispatch_slash_command(
         return SlashOutcome::Handled;
     }
 
+    if let Some(rest) = input
+        .strip_prefix("/refactor ")
+        .or_else(|| input.strip_prefix("/review "))
+        .or_else(|| input.strip_prefix("/security "))
+        .or_else(|| input.strip_prefix("/test "))
+        .or_else(|| input.strip_prefix("/docs "))
+    {
+        let cmd_head = input.split_whitespace().next().unwrap_or("");
+        if let Some(r) = AgentRoleKey::from_str(cmd_head.trim_start_matches('/')) {
+            *active_role = r;
+            push_queued_message(rest.trim().to_string());
+            return SlashOutcome::Handled;
+        }
+    }
+
     if input == "/role" {
         if let Some(chosen_role) = interactive_select_role(*active_role) {
             *active_role = chosen_role;
             println!(
-                "\n{}🎭 Aktif Spavn Uzmanlık Rolü: {}{}{}",
+                "\n{}🎭 {}: {}{}{} {}{}",
                 GREEN,
+                tr_en("Aktif Spavn Uzmanlık Rolü", "Active Spavn Specialist Role"),
                 BOLD,
                 active_role.badge(),
-                RESET
+                RESET,
+                DIM,
+                tr_en(
+                    "(Hedef görevi aşağıya yazın veya 'devam et' diyerek başlatın)",
+                    "(Type your target task below or type 'continue' to start)"
+                ),
             );
+            print!("{}", RESET);
         }
         return SlashOutcome::Handled;
     }
     if let Some(rest) = input.strip_prefix("/role ") {
-        if let Some(r) = AgentRoleKey::from_str(rest) {
+        let mut parts = rest.trim().splitn(2, ' ');
+        let role_tok = parts.next().unwrap_or("");
+        let inline_prompt = parts.next().map(str::trim).filter(|s| !s.is_empty());
+        if let Some(r) = AgentRoleKey::from_str(role_tok) {
             *active_role = r;
             println!(
-                "\n{}🎭 Aktif Spavn Uzmanlık Rolü: {}{}{}",
+                "\n{}🎭 {}: {}{}{}",
                 GREEN,
+                tr_en("Aktif Spavn Uzmanlık Rolü", "Active Spavn Specialist Role"),
                 BOLD,
                 active_role.badge(),
                 RESET
             );
+            if let Some(p) = inline_prompt {
+                push_queued_message(p.to_string());
+            }
         } else {
             println!(
-                "{}Kullanım: /role <auto|coder|reviewer|security|test|docs|refactor>{}",
+                "{}Kullanım: /role <auto|coder|reviewer|security|test|docs|refactor> [isteğe bağlı görev]{}",
                 YELLOW, RESET
             );
         }
@@ -772,6 +861,7 @@ pub fn dispatch_slash_command(
         println!("{}│{}  {}/model (/m) · /local{}          İki sütunlu Sağlayıcı (←/→) & Model (↑/↓) seçici", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/bench [model]{}                Aktif/belirtilen modelde TTFT, tok/s ve Tool-Call testi", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/byok (/b){}                    BYOK API Anahtarı & Özel Sağlayıcı (Base URL) yöneticisi", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/login · /provider (/connect){} Sağlayıcıya doğrudan giriş (CLI Auth, Tarayıcı veya Yerel Sunucu)", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/queue (/qlist){}               Mesaj Kuyruğu düzenleme & Canlı Müdahale (Steer/Queue) modu", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/resume (-r) · /new · /fork{}   Geçmiş oturum seçici, yeni oturum ve dallandırma", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/recap (/recap toggle){}        Oturumun son adım özeti (※ recap:) ve 6s boşta kalma özeti", CYAN, RESET, BOLD, RESET);

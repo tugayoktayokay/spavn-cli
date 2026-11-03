@@ -2,18 +2,25 @@ use crate::config::spavn_dir;
 use crate::router::ChatMessage;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
 const PRIVATE_FILE_MODE: u32 = 0o600;
+#[cfg(unix)]
 const PRIVATE_DIR_MODE: u32 = 0o700;
 
 fn secure_file(path: &Path) {
+    #[cfg(unix)]
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE));
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 fn harden_sessions_dir(dir: &Path) {
+    #[cfg(unix)]
     let _ = fs::set_permissions(dir, fs::Permissions::from_mode(PRIVATE_DIR_MODE));
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -245,6 +252,7 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionSummary> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn session_files_and_dir_are_private() {
         let dir = std::env::temp_dir().join(format!("spavn-session-test-{}", std::process::id()));

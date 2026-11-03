@@ -1,9 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+fn set_owner_only_mode(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+}
 
 static LANG_EN: AtomicBool = AtomicBool::new(false);
 
@@ -190,6 +201,7 @@ fn default_language() -> String {
 
 pub fn home_dir() -> PathBuf {
     std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -198,12 +210,12 @@ pub fn spavn_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("SPAVN_HOME") {
         let p = PathBuf::from(custom);
         let _ = fs::create_dir_all(&p);
-        let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o700));
+        set_owner_only_mode(&p, 0o700);
         return p;
     }
     let dir = home_dir().join(".spavn");
     let _ = fs::create_dir_all(&dir);
-    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    set_owner_only_mode(&dir, 0o700);
     dir
 }
 
@@ -212,7 +224,7 @@ pub fn secrets_env_path() -> PathBuf {
 }
 
 /// Returns an available user shell. `SPAVN_SHELL` wins, then `$SHELL`, then the
-/// first existing fallback. Avoids hard-coding macOS-only `/bin/zsh`.
+/// first existing fallback (POSIX shells on Unix, PowerShell/cmd on Windows).
 pub fn shell_bin() -> String {
     for candidate in [
         std::env::var("SPAVN_SHELL").ok(),
@@ -225,16 +237,32 @@ pub fn shell_bin() -> String {
             return candidate;
         }
     }
-    for candidate in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
-        if PathBuf::from(candidate).exists() {
-            return candidate.to_string();
+    #[cfg(windows)]
+    {
+        for candidate in [
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Windows\System32\cmd.exe",
+        ] {
+            if PathBuf::from(candidate).exists() {
+                return candidate.to_string();
+            }
         }
+        return "powershell.exe".to_string();
     }
-    "sh".to_string()
+    #[cfg(not(windows))]
+    {
+        for candidate in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+            if PathBuf::from(candidate).exists() {
+                return candidate.to_string();
+            }
+        }
+        "sh".to_string()
+    }
 }
 
 pub fn expand_user_path(raw: &str) -> PathBuf {
-    if let Some(stripped) = raw.strip_prefix("~/") {
+    if let Some(stripped) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix(r"~\")) {
         return home_dir().join(stripped);
     }
     PathBuf::from(raw)
@@ -307,7 +335,7 @@ pub fn upsert_spavn_secret(env_name: &str, value: &str) -> Result<(), String> {
     }
     let body = format!("{}\n", lines.join("\n"));
     fs::write(&path, body).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    set_owner_only_mode(&path, 0o600);
     Ok(())
 }
 
@@ -561,6 +589,32 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             }],
         },
         ProviderGroupConfig {
+            id: "microsoft-github".to_string(),
+            title: "🪟 Microsoft / GitHub Models (BYOK)".to_string(),
+            base_url: "https://models.inference.ai.azure.com".to_string(),
+            api_key_env: "GITHUB_TOKEN".to_string(),
+            is_local: false,
+            context_window: Some(128_000),
+            models: vec![
+                ModelConfigEntry {
+                    key: "github:gpt-4.1".to_string(),
+                    model_id: "gpt-4.1".to_string(),
+                    label: "GitHub Models GPT-4.1".to_string(),
+                    badge: "🪟 Azure/GitHub".to_string(),
+                    desc: "Microsoft Azure AI Inference".to_string(),
+                    context_window: Some(128_000),
+                },
+                ModelConfigEntry {
+                    key: "github:phi-4".to_string(),
+                    model_id: "Phi-4".to_string(),
+                    label: "Microsoft Phi-4".to_string(),
+                    badge: "🪟 Microsoft Research".to_string(),
+                    desc: "Microsoft Phi-4 Reasoning".to_string(),
+                    context_window: Some(128_000),
+                },
+            ],
+        },
+        ProviderGroupConfig {
             id: "ollama".to_string(),
             title: "🦙 Ollama / LM Studio (Local)".to_string(),
             base_url: "http://127.0.0.1:11434/v1".to_string(),
@@ -592,7 +646,7 @@ fn default_hosts() -> Vec<RemoteHostConfig> {
 pub fn load_user_config() -> SpavnUserConfig {
     let cfg_path = spavn_dir().join("config.json");
     if let Ok(raw) = fs::read_to_string(&cfg_path) {
-        let _ = fs::set_permissions(&cfg_path, fs::Permissions::from_mode(0o600));
+        set_owner_only_mode(&cfg_path, 0o600);
         if let Ok(parsed) = serde_json::from_str::<SpavnUserConfig>(&raw) {
             set_lang_en(parsed.language.eq_ignore_ascii_case("en"));
             return parsed;
@@ -623,7 +677,7 @@ pub fn save_user_config(cfg: &SpavnUserConfig) -> Result<(), String> {
     let cfg_path = spavn_dir().join("config.json");
     let json_str = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     fs::write(&cfg_path, format!("{}\n", json_str)).map_err(|e| e.to_string())?;
-    let _ = fs::set_permissions(&cfg_path, fs::Permissions::from_mode(0o600));
+    set_owner_only_mode(&cfg_path, 0o600);
     Ok(())
 }
 

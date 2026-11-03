@@ -480,9 +480,59 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+#[derive(Clone, Debug)]
+pub struct DraggedImage {
+    pub raw_span: String,
+    pub path: String,
+    pub filename: String,
+    pub mime: &'static str,
+    pub size_bytes: usize,
+    pub base64: String,
+}
+
+static PASTED_IMAGE_CACHE: std::sync::Mutex<Vec<(String, DraggedImage)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Collapses any dragged local image file paths inside `input` into compact OMP-style
+/// `[🖼️ Screenshot.png (136KB)]` tokens and caches their `DraggedImage` payload for submission!
+pub fn collapse_pasted_image_paths(input: &str) -> (String, bool) {
+    let found = extract_dragged_images_raw(input);
+    if found.is_empty() {
+        return (input.to_string(), false);
+    }
+    let mut updated = input.to_string();
+    let mut changed = false;
+    if let Ok(mut cache) = PASTED_IMAGE_CACHE.lock() {
+        for img in found {
+            let kb = (img.size_bytes as f64 / 1024.0).max(1.0);
+            let badge = format!("[🖼️ {} ({:.0}KB)]", img.filename, kb);
+            if updated.contains(&img.raw_span) {
+                updated = updated.replace(&img.raw_span, &badge);
+                changed = true;
+            }
+            if !cache.iter().any(|(b, _)| b == &badge) {
+                cache.push((badge, img));
+            }
+        }
+    }
+    (updated, changed)
+}
+
 /// Detects local image paths dragged into the terminal (including macOS `\ `-escaped paths)
-/// and returns `(mime_type, base64_data)` pairs for multimodal vision.
-fn extract_dragged_images(text: &str) -> Vec<(&'static str, String)> {
+/// OR previously collapsed `[🖼️ ...]` tokens, returning full metadata + base64.
+pub fn extract_dragged_images_info(text: &str) -> Vec<DraggedImage> {
+    let mut results = extract_dragged_images_raw(text);
+    if let Ok(cache) = PASTED_IMAGE_CACHE.lock() {
+        for (badge, img) in cache.iter() {
+            if text.contains(badge) && !results.iter().any(|r| r.path == img.path) {
+                results.push(img.clone());
+            }
+        }
+    }
+    results
+}
+
+fn extract_dragged_images_raw(text: &str) -> Vec<DraggedImage> {
     let mut results = Vec::new();
     let exts = [
         (".png", "image/png"),
@@ -497,7 +547,6 @@ fn extract_dragged_images(text: &str) -> Vec<(&'static str, String)> {
         while let Some(pos) = lower[search_from..].find(ext) {
             let end_idx = search_from + pos + ext.len();
             search_from = end_idx;
-            // Walk backwards to find the start of the path (`/`, `~`)
             let prefix = &text[..end_idx];
             let mut start_candidates = Vec::new();
             for (i, ch) in prefix.char_indices() {
@@ -513,14 +562,26 @@ fn extract_dragged_images(text: &str) -> Vec<(&'static str, String)> {
                 }
             }
             for &start_idx in start_candidates.iter().rev() {
-                let raw_path = text[start_idx..end_idx]
+                let raw_slice = &text[start_idx..end_idx];
+                let raw_path = raw_slice
                     .trim_matches(|c| c == '\'' || c == '"')
                     .replace("\\ ", " ");
                 let expanded = crate::config::expand_user_path(&raw_path);
                 if expanded.is_file() {
                     if let Ok(bytes) = std::fs::read(&expanded) {
                         if bytes.len() <= 15 * 1024 * 1024 {
-                            results.push((mime, base64_encode(&bytes)));
+                            let fname = expanded
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| raw_path.clone());
+                            results.push(DraggedImage {
+                                raw_span: raw_slice.to_string(),
+                                path: expanded.to_string_lossy().to_string(),
+                                filename: fname,
+                                mime,
+                                size_bytes: bytes.len(),
+                                base64: base64_encode(&bytes),
+                            });
                             break;
                         }
                     }
@@ -529,6 +590,13 @@ fn extract_dragged_images(text: &str) -> Vec<(&'static str, String)> {
         }
     }
     results
+}
+
+fn extract_dragged_images(text: &str) -> Vec<(&'static str, String)> {
+    extract_dragged_images_info(text)
+        .into_iter()
+        .map(|img| (img.mime, img.base64))
+        .collect()
 }
 
 fn sanitize_messages_for_openai_jinja(messages: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -729,10 +797,16 @@ where
         }
     }
     let body_str = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-    let url = format!(
-        "{}/chat/completions",
-        endpoint.base_url.trim_end_matches('/')
-    );
+    let base_trimmed = endpoint.base_url.trim_end_matches('/');
+    let url = if base_trimmed.contains("openai.azure.com") && !base_trimmed.contains("api-version=")
+    {
+        format!(
+            "{}/chat/completions?api-version=2025-01-01-preview",
+            base_trimmed
+        )
+    } else {
+        format!("{}/chat/completions", base_trimmed)
+    };
 
     enum StreamEvent {
         Line(String),
@@ -742,6 +816,7 @@ where
 
     let (tx, rx) = std::sync::mpsc::channel::<StreamEvent>();
     let auth_header = format!("Bearer {}", endpoint.api_key);
+    let raw_api_key = endpoint.api_key.clone();
     let request_url = url.clone();
     std::thread::spawn(move || {
         let agent = crate::http::agent_stream();
@@ -749,6 +824,7 @@ where
             .post(&request_url)
             .header("Content-Type", "application/json")
             .header("Authorization", &auth_header)
+            .header("api-key", &raw_api_key)
             .send(body_str.as_str());
         let mut response = match response {
             Ok(response) => response,
@@ -972,12 +1048,14 @@ where
         let recovered = recover_inline_tool_calls(&content);
         if !recovered.is_empty() {
             tool_calls = recovered;
+            content = strip_recovered_tool_markup(&content);
         }
     }
     if tool_calls.is_empty() && !reasoning.is_empty() {
         let recovered_from_think = recover_inline_tool_calls(&reasoning);
         if !recovered_from_think.is_empty() {
             tool_calls = recovered_from_think;
+            reasoning = strip_recovered_tool_markup(&reasoning);
         }
     }
 
@@ -1018,10 +1096,42 @@ where
     })
 }
 
+fn strip_recovered_tool_markup(text: &str) -> String {
+    let mut out = text.to_string();
+    for (open, close) in [
+        ("<tool_call>", "</tool_call>"),
+        ("<function=", "</function>"),
+    ] {
+        while let Some(s) = out.find(open) {
+            if let Some(e) = out[s..].find(close) {
+                let end_idx = s + e + close.len();
+                out.replace_range(s..end_idx, "");
+            } else {
+                break;
+            }
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
 fn recover_inline_tool_calls(text: &str) -> Vec<ToolCall> {
     let mut calls = Vec::new();
     let valid_names = [
-        "read", "edit", "write", "bash", "search", "memory", "skill", "web",
+        "read",
+        "edit",
+        "write",
+        "bash",
+        "search",
+        "memory",
+        "skill",
+        "web",
+        "subagent",
+        "spawn_submodels",
+        "task",
     ];
     let mut search_from = 0;
     while let Some(start) = text[search_from..].find("<tool_call>") {
