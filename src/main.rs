@@ -40,7 +40,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use tools::{execute_tool, tool_definitions, AccessMode, ToolContext};
+use tools::{execute_tool, tool_definitions_for_phase, AccessMode, ToolContext};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static RESIZED: AtomicBool = AtomicBool::new(false);
@@ -373,6 +373,7 @@ fn run_agent_turn(
     session_file: &PathBuf,
     show_thinking: bool,
     quota_badge: Option<&str>,
+    quiet: bool,
 ) -> Result<(), String> {
     clear_interrupted();
     hud::set_sticky_dock_status(
@@ -382,7 +383,7 @@ fn run_agent_turn(
         &ctx.default_host,
         quota_badge.unwrap_or("aktif"),
     );
-    let tools_spec = tool_definitions();
+    let tools_spec = tool_definitions_for_phase(ctx.phase);
     let mut last_tool_sig = String::new();
     let mut repeat_count = 0usize;
     let mut unverified_edits = false;
@@ -414,7 +415,9 @@ fn run_agent_turn(
     // verification gates, recovery retries, and queued steering/follow-up messages settle.
     loop {
         if is_interrupted() {
-            println!("\n{}⚡ [İşlem Esc/Ctrl+C ile durduruldu]{}", YELLOW, RESET);
+            if !quiet {
+                println!("\n{}⚡ [İşlem Esc/Ctrl+C ile durduruldu]{}", YELLOW, RESET);
+            }
             return Ok(());
         }
 
@@ -437,10 +440,12 @@ fn run_agent_turn(
 
         let escalated_cloud = endpoint.is_local() && repeat_count >= 2;
         let step_endpoint = if escalated_cloud {
-            println!(
-                "\n{}⚡ [SPAVN Hibrit Escalation: Yerel model döngüye girdi -> Bu adım {} ile çözülüyor...]{}",
-                MAGENTA, cfg.fallback_cloud_model, RESET
-            );
+            if !quiet {
+                println!(
+                    "\n{}⚡ [SPAVN Hibrit Escalation: Yerel model döngüye girdi -> Bu adım {} ile çözülüyor...]{}",
+                    MAGENTA, cfg.fallback_cloud_model, RESET
+                );
+            }
             resolve_endpoint(&cfg.fallback_cloud_model)
         } else {
             endpoint.clone()
@@ -451,11 +456,15 @@ fn run_agent_turn(
             hud::estimate_messages_tokens(&view_messages),
             step_endpoint.context_window_tokens(),
         );
-        let mut spinner = LiveSpinner::start(&format!(
-            "{} {}",
-            step_endpoint.label,
-            tr_en("düşünülüyor", "thinking")
-        ));
+        let mut spinner = if quiet {
+            LiveSpinner::silent()
+        } else {
+            LiveSpinner::start(&format!(
+                "{} {}",
+                step_endpoint.label,
+                tr_en("düşünülüyor", "thinking")
+            ))
+        };
         let content_started = std::cell::Cell::new(false);
         let content_chars = std::cell::Cell::new(0usize);
         let md_renderer = RefCell::new(MarkdownStreamRenderer::new());
@@ -465,9 +474,14 @@ fn run_agent_turn(
             &view_messages,
             &tools_spec,
             |think_delta| {
-                hud::stream_thinking_delta(think_delta, show_thinking);
+                if !quiet {
+                    hud::stream_thinking_delta(think_delta, show_thinking);
+                }
             },
             |content_delta| {
+                if quiet {
+                    return;
+                }
                 content_chars.set(content_chars.get() + content_delta.chars().count());
                 hud::set_spinner_label(&format!(
                     "✍️ {} ({} {})",
@@ -499,32 +513,43 @@ fn run_agent_turn(
                     return Ok(());
                 }
                 if step_endpoint.is_local() {
-                    println!(
-                        "\n{}⚠️  {} ({}) -> {} {}{}",
-                        YELLOW,
-                        tr_en("Yerel model hatası", "Local model error"),
-                        err,
-                        cfg.fallback_cloud_model,
-                        tr_en(
-                            "modeline otomatik geçiliyor...",
-                            "failing over automatically..."
-                        ),
-                        RESET
-                    );
+                    if !quiet {
+                        println!(
+                            "\n{}⚠️  {} ({}) -> {} {}{}",
+                            YELLOW,
+                            tr_en("Yerel model hatası", "Local model error"),
+                            err,
+                            cfg.fallback_cloud_model,
+                            tr_en(
+                                "modeline otomatik geçiliyor...",
+                                "failing over automatically..."
+                            ),
+                            RESET
+                        );
+                    }
                     let fallback_ep = resolve_endpoint(&cfg.fallback_cloud_model);
-                    let mut fb_spinner = LiveSpinner::start(&format!(
-                        "{} {}",
-                        fallback_ep.label,
-                        tr_en("düşünülüyor", "thinking")
-                    ));
+                    let mut fb_spinner = if quiet {
+                        LiveSpinner::silent()
+                    } else {
+                        LiveSpinner::start(&format!(
+                            "{} {}",
+                            fallback_ep.label,
+                            tr_en("düşünülüyor", "thinking")
+                        ))
+                    };
                     let fb_res = stream_chat_completion(
                         &fallback_ep,
                         &view_messages,
                         &tools_spec,
                         |think_delta| {
-                            hud::stream_thinking_delta(think_delta, show_thinking);
+                            if !quiet {
+                                hud::stream_thinking_delta(think_delta, show_thinking);
+                            }
                         },
                         |c| {
+                            if quiet {
+                                return;
+                            }
                             if !content_started.get() {
                                 content_started.set(true);
                                 render_assistant_header(&fallback_ep.key);
@@ -535,7 +560,9 @@ fn run_agent_turn(
                     if content_started.get() {
                         md_renderer.borrow_mut().finish();
                     }
-                    hud::close_thinking_box_if_open();
+                    if !quiet {
+                        hud::close_thinking_box_if_open();
+                    }
                     fb_spinner.stop();
                     fb_res?
                 } else {
@@ -547,7 +574,9 @@ fn run_agent_turn(
         if content_started.get() {
             md_renderer.borrow_mut().finish();
         }
-        hud::close_thinking_box_if_open();
+        if !quiet {
+            hud::close_thinking_box_if_open();
+        }
         spinner.stop();
 
         let assistant_msg = result.message;
@@ -575,10 +604,12 @@ fn run_agent_turn(
                     repeat_count = 0;
                 }
 
-                if matches!(
-                    tool_name.as_str(),
-                    "edit" | "edit_file" | "replace" | "write" | "write_file"
-                ) {
+                if ctx.phase == AgentPhase::Code
+                    && matches!(
+                        tool_name.as_str(),
+                        "edit" | "edit_file" | "replace" | "write" | "write_file"
+                    )
+                {
                     unverified_edits = true;
                 } else if matches!(
                     tool_name.as_str(),
@@ -587,16 +618,21 @@ fn run_agent_turn(
                     unverified_edits = false;
                 }
 
-                let summary =
-                    summarize_tool_args(&tool_name, &tc.function.arguments, &ctx.default_host);
-                println!(
-                    "{}╭─ ⚡ {}{} {}{}{}",
-                    YELLOW, BOLD, tool_name, RESET, DIM, summary
-                );
-                let mut tool_spinner =
-                    LiveSpinner::start(&format!("⚡ {} çalıştırılıyor", tool_name));
-                let mut tool_output = execute_tool(ctx, &tool_name, &tc.function.arguments);
-                tool_spinner.stop();
+                let mut tool_output = if quiet {
+                    execute_tool(ctx, &tool_name, &tc.function.arguments)
+                } else {
+                    let summary =
+                        summarize_tool_args(&tool_name, &tc.function.arguments, &ctx.default_host);
+                    println!(
+                        "{}╭─ ⚡ {}{} {}{}{}",
+                        YELLOW, BOLD, tool_name, RESET, DIM, summary
+                    );
+                    let mut tool_spinner =
+                        LiveSpinner::start(&format!("⚡ {} çalıştırılıyor", tool_name));
+                    let out = execute_tool(ctx, &tool_name, &tc.function.arguments);
+                    tool_spinner.stop();
+                    out
+                };
                 if repeat_count >= 2 {
                     tool_output.push_str(&format!(
                         "\n\n[SPAVN LOOP GUARD (count={})]: You called `{}` with identical arguments {} times consecutively. Do NOT repeat the same call; change your approach or proceed directly to the next step.",
@@ -606,21 +642,23 @@ fn run_agent_turn(
                     ));
                 }
 
-                let preview_line = tool_output
-                    .lines()
-                    .next()
-                    .unwrap_or("(tamamlandı)")
-                    .chars()
-                    .take(80)
-                    .collect::<String>();
-                println!(
-                    "{}╰─ ↳ {}{} ({} satır){}",
-                    YELLOW,
-                    DIM,
-                    preview_line,
-                    tool_output.lines().count().max(1),
-                    RESET
-                );
+                if !quiet {
+                    let preview_line = tool_output
+                        .lines()
+                        .next()
+                        .unwrap_or("(tamamlandı)")
+                        .chars()
+                        .take(80)
+                        .collect::<String>();
+                    println!(
+                        "{}╰─ ↳ {}{} ({} satır){}",
+                        YELLOW,
+                        DIM,
+                        preview_line,
+                        tool_output.lines().count().max(1),
+                        RESET
+                    );
+                }
 
                 let tool_msg = ChatMessage::tool_result(tc.id, tool_name, tool_output);
                 append_message(session_file, &tool_msg);
@@ -649,10 +687,12 @@ fn run_agent_turn(
         // 1. Max-Tokens (`finish_reason == "length"`) Auto-Continuation (OMP `length-stop-retry`)
         if result.finish_reason.as_deref() == Some("length") && length_stop_retries < 3 {
             length_stop_retries += 1;
-            println!(
-                "\n{}⚡ [SPAVN Turn Recovery: Çıktı token sınırına ulaştı ({}/3) -> Kaldığı yerden devam ediliyor...]{}",
-                YELLOW, length_stop_retries, RESET
-            );
+            if !quiet {
+                println!(
+                    "\n{}⚡ [SPAVN Turn Recovery: Çıktı token sınırına ulaştı ({}/3) -> Kaldığı yerden devam ediliyor...]{}",
+                    YELLOW, length_stop_retries, RESET
+                );
+            }
             let cont_msg = ChatMessage::user(
                 "[SPAVN LENGTH-STOP RECOVERY]: Your previous response hit the output token limit (`finish_reason=length`). Continue immediately from the exact point where you stopped without repeating prior output.",
             );
@@ -693,10 +733,12 @@ fn run_agent_turn(
                 || lower_tail.contains("i'll now "));
         if looks_like_premature_stop && premature_stop_retries < 2 {
             premature_stop_retries += 1;
-            println!(
-                "\n{}⚡ [SPAVN Turn Recovery: Yarım kalan aksiyon tespit edildi ({}/2) -> Araç çağrısı tetikleniyor...]{}",
-                YELLOW, premature_stop_retries, RESET
-            );
+            if !quiet {
+                println!(
+                    "\n{}⚡ [SPAVN Turn Recovery: Yarım kalan aksiyon tespit edildi ({}/2) -> Araç çağrısı tetikleniyor...]{}",
+                    YELLOW, premature_stop_retries, RESET
+                );
+            }
             let u_nudge = ChatMessage::user(
                 "[SPAVN UNEXPECTED-STOP RECOVERY]: You announced an action you were about to take but stopped without calling a tool. Call the concrete tool now.",
             );
@@ -709,10 +751,12 @@ fn run_agent_turn(
         if unverified_edits && !verification_nudged {
             verification_nudged = true;
             unverified_edits = false;
-            println!(
-                "{}⚡ [SPAVN Otonom Doğrulama Kapısı: Dosya değişikliği sonrası derleme/test kontrolü tetikleniyor...]{}",
-                YELLOW, RESET
-            );
+            if !quiet {
+                println!(
+                    "{}⚡ [SPAVN Otonom Doğrulama Kapısı: Dosya değişikliği sonrası derleme/test kontrolü tetikleniyor...]{}",
+                    YELLOW, RESET
+                );
+            }
             let nudge = ChatMessage::user(
                 "[SPAVN VERIFICATION GATE]: You modified file(s) via edit/write without running a verification check (`bash` build/test). Run a verification command now, then report the final result.",
             );
@@ -721,7 +765,7 @@ fn run_agent_turn(
             continue;
         }
 
-        if content_started.get() || result.usage.total_tokens > 0 {
+        if !quiet && (content_started.get() || result.usage.total_tokens > 0) {
             render_assistant_footer(
                 &step_endpoint.key,
                 ctx.access.short_badge(),
@@ -847,6 +891,7 @@ fn main() {
     let mut resume_last = false;
     let mut interactive_resume = false;
     let mut show_thinking = true;
+    let mut quiet = false;
     let mut phase_opt: Option<AgentPhase> = None;
     let mut prompt_parts: Vec<String> = Vec::new();
 
@@ -900,8 +945,13 @@ fn main() {
                 i += 1;
                 continue;
             }
+            "-q" | "--quiet" => {
+                quiet = true;
+                i += 1;
+                continue;
+            }
             "-h" | "--help" => {
-                println!("Usage: spavn [-m <model>] [-a safe|auto|sovereign] [-P plan|code] [--host <host>] [-c|--continue] [-r|--resume] [prompt...]");
+                println!("Usage: spavn [-m <model>] [-a safe|auto|sovereign] [-P plan|code] [-q|--quiet] [--host <host>] [-c|--continue] [-r|--resume] [prompt...]");
                 return;
             }
             _ => {
@@ -941,15 +991,21 @@ fn main() {
     };
 
     if !prompt_parts.is_empty() {
+        if quiet {
+            show_thinking = false;
+        }
         let raw_text = prompt_parts.join(" ");
-        let (expanded_text, activated_skills) = expand_inline_skills(&raw_text);
-        if !activated_skills.is_empty() {
+        let (mut expanded_text, activated_skills) = expand_inline_skills(&raw_text);
+        if !activated_skills.is_empty() && !quiet {
             println!(
                 "{}🧩 Aktif Yetenek(ler) Yüklendi: @{}{}",
                 GREEN,
                 activated_skills.join(", @"),
                 RESET
             );
+        }
+        if let Some(phase_preamble) = ctx.phase.preamble() {
+            expanded_text = format!("{}\n\n{}", phase_preamble, expanded_text);
         }
         let user_msg = ChatMessage::user(expanded_text);
         append_message(&session_file, &user_msg);
@@ -962,9 +1018,23 @@ fn main() {
             &session_file,
             show_thinking,
             None,
+            quiet,
         ) {
-            eprintln!("{}✗ Hata: {}{}", RED, err, RESET);
+            if quiet {
+                eprintln!("Hata: {}", err);
+            } else {
+                eprintln!("{}✗ Hata: {}{}", RED, err, RESET);
+            }
             std::process::exit(1);
+        }
+        if quiet {
+            if let Some(last) = messages.iter().rev().find(|m| m.role == "assistant") {
+                if let Some(text) = last.content.as_deref() {
+                    if !text.trim().is_empty() {
+                        println!("{}", text.trim_end());
+                    }
+                }
+            }
         }
         return;
     }
@@ -1676,17 +1746,26 @@ fn main() {
             art_block.push_str("</spavn_knowledge_artifacts>\n\n");
             expanded_input = format!("{}{}", art_block, expanded_input);
         }
-        expanded_input = format!("{}\n\n{}", dispatched_role.preamble(), expanded_input);
         if let Some(phase_preamble) = active_phase.preamble() {
+            if matches!(
+                dispatched_role,
+                AgentRoleKey::Reviewer | AgentRoleKey::Security | AgentRoleKey::Docs
+            ) {
+                expanded_input = format!("{}\n\n{}", dispatched_role.preamble(), expanded_input);
+            }
             expanded_input = format!("{}\n\n{}", phase_preamble, expanded_input);
+        } else {
+            expanded_input = format!("{}\n\n{}", dispatched_role.preamble(), expanded_input);
         }
 
+        let user_header_badge = if active_phase == AgentPhase::Plan {
+            active_phase.badge()
+        } else {
+            dispatched_role.badge()
+        };
         println!(
             "\n{}╭─ 👤 Siz · {}{}{}",
-            CYAN,
-            DIM,
-            dispatched_role.badge(),
-            RESET
+            CYAN, DIM, user_header_badge, RESET
         );
         for line in input.lines() {
             println!("{}│{} {}{}{}", CYAN, RESET, BOLD, line, RESET);
@@ -1716,6 +1795,7 @@ fn main() {
             &session_file,
             show_thinking,
             Some(&quota_badge),
+            false,
         ) {
             eprintln!("\n{}✗ Hata: {}{}", RED, err, RESET);
         }

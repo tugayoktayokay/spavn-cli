@@ -319,6 +319,29 @@ pub fn tool_definitions() -> Value {
     ])
 }
 
+pub fn tool_definitions_for_phase(phase: crate::spavn_engine::AgentPhase) -> Value {
+    let all = tool_definitions();
+    if phase == crate::spavn_engine::AgentPhase::Code {
+        return all;
+    }
+    if let Value::Array(items) = all {
+        let filtered: Vec<Value> = items
+            .into_iter()
+            .filter(|item| {
+                let name = item
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                !matches!(name, "edit" | "write" | "bash")
+            })
+            .collect();
+        Value::Array(filtered)
+    } else {
+        all
+    }
+}
+
 fn expand_tilde(path_str: &str) -> PathBuf {
     if path_str == "~" {
         return home_dir();
@@ -1265,7 +1288,8 @@ fn check_bash_gate(ctx: &mut ToolContext, cmd: &str, host: &str) -> Result<(), S
         ));
     }
 
-    let auto_sensitive = matches!(risk, ShellRisk::Destructive(_)) || host == "server";
+    let auto_sensitive =
+        matches!(risk, ShellRisk::Destructive(_)) || crate::config::host_is_sensitive(host);
     match ctx.access {
         AccessMode::Safe => {
             if !prompt_user_approval(ctx, &format!("Komut Çalıştırma [{}]", host), cmd) {
@@ -1276,7 +1300,7 @@ fn check_bash_gate(ctx: &mut ToolContext, cmd: &str, host: &str) -> Result<(), S
             if auto_sensitive {
                 let reason = match &risk {
                     ShellRisk::Destructive(reason) => reason.clone(),
-                    _ => format!("uzak host üzerinde çalıştırma: {}", host),
+                    _ => format!("hassas host üzerinde çalıştırma: {}", host),
                 };
                 if !prompt_user_approval(
                     ctx,
@@ -1934,5 +1958,20 @@ mod phase_tests {
         assert_eq!(AgentPhase::from_str("bogus"), None);
         assert_eq!(AgentPhase::Plan.toggled(), AgentPhase::Code);
         assert_eq!(AgentPhase::Code.toggled(), AgentPhase::Plan);
+    }
+
+    #[test]
+    fn plan_schema_omits_mutating_tools() {
+        let plan_tools = super::tool_definitions_for_phase(AgentPhase::Plan);
+        let arr = plan_tools.as_array().expect("array");
+        let names: Vec<&str> = arr
+            .iter()
+            .filter_map(|v| v.get("function")?.get("name")?.as_str())
+            .collect();
+        assert!(names.contains(&"read"));
+        assert!(names.contains(&"search"));
+        assert!(!names.contains(&"edit"));
+        assert!(!names.contains(&"write"));
+        assert!(!names.contains(&"bash"));
     }
 }
