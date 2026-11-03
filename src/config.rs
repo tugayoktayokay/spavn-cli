@@ -153,6 +153,16 @@ mod catalog_tests {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct McpServerConfig {
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SpavnUserConfig {
     #[serde(default = "default_model_key")]
     pub default_model: String,
@@ -176,6 +186,8 @@ pub struct SpavnUserConfig {
     pub providers: Vec<ProviderGroupConfig>,
     #[serde(default = "default_hosts")]
     pub hosts: Vec<RemoteHostConfig>,
+    #[serde(default, rename = "mcpServers")]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 fn default_model_key() -> String {
@@ -669,6 +681,7 @@ pub fn load_user_config() -> SpavnUserConfig {
         allowed_paths: Vec::new(),
         providers: Vec::new(),
         hosts: default_hosts(),
+        mcp_servers: HashMap::new(),
     }
 }
 
