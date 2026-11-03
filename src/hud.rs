@@ -1370,11 +1370,16 @@ pub fn read_bottom_dock_input(
                     return PromptEvent::Reload;
                 }
                 92 => {
-                    erase_inline_dock(prev_top_w, prev_cursor_col);
-                    unsafe {
-                        tcsetattr(0, TCSANOW, &orig_termios);
+                    if chars.is_empty() && n == 1 {
+                        erase_inline_dock(prev_top_w, prev_cursor_col);
+                        unsafe {
+                            tcsetattr(0, TCSANOW, &orig_termios);
+                        }
+                        return PromptEvent::CyclePhase;
+                    } else {
+                        chars.insert(cursor_pos, '\\');
+                        cursor_pos += 1;
                     }
-                    return PromptEvent::CyclePhase;
                 }
                 19 => {
                     erase_inline_dock(prev_top_w, prev_cursor_col);
@@ -1522,6 +1527,14 @@ pub struct LiveSpinner {
 }
 
 impl LiveSpinner {
+    /// No-op spinner for quiet/scripted runs: renders nothing, accepts no input.
+    pub fn silent() -> Self {
+        Self {
+            stop_flag: Arc::new(AtomicBool::new(true)),
+            handle: None,
+        }
+    }
+
     pub fn start(label: &str) -> Self {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let flag_clone = Arc::clone(&stop_flag);

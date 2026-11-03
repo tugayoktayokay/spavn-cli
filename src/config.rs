@@ -55,6 +55,90 @@ pub struct RemoteHostConfig {
     pub ssh_target: String,
     pub badge: String,
     pub desc: String,
+    #[serde(default)]
+    pub sensitive: bool,
+}
+
+/// A host is sensitive when commands run on it deserve an explicit approval in
+/// AUTO mode: either the config marks it `sensitive`, or it executes remotely
+/// (`ssh_target != "local"`). Unknown non-local aliases are treated as
+/// sensitive by default; `local` never is.
+pub fn host_is_sensitive(host: &str) -> bool {
+    let cfg = load_user_config();
+    host_is_sensitive_in(host, &cfg.hosts)
+}
+
+pub fn host_is_sensitive_in(host: &str, hosts: &[RemoteHostConfig]) -> bool {
+    if host.is_empty() || host == "local" {
+        return false;
+    }
+    match hosts.iter().find(|h| h.key.eq_ignore_ascii_case(host)) {
+        Some(h) => h.sensitive || h.ssh_target != "local",
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    fn h(key: &str, ssh: &str, sensitive: bool) -> RemoteHostConfig {
+        RemoteHostConfig {
+            key: key.to_string(),
+            ssh_target: ssh.to_string(),
+            badge: String::new(),
+            desc: String::new(),
+            sensitive,
+        }
+    }
+
+    #[test]
+    fn local_is_never_sensitive() {
+        let hosts = vec![h("local", "local", false), h("weird", "local", true)];
+        assert!(!host_is_sensitive_in("local", &hosts));
+        assert!(!host_is_sensitive_in("", &hosts));
+    }
+
+    #[test]
+    fn remote_host_is_sensitive_by_default() {
+        let hosts = vec![h("prod", "user@1.2.3.4", false)];
+        assert!(host_is_sensitive_in("prod", &hosts));
+    }
+
+    #[test]
+    fn explicit_sensitive_flag_wins_on_local_ssh() {
+        let hosts = vec![h("weird", "local", true)];
+        assert!(host_is_sensitive_in("weird", &hosts));
+    }
+
+    #[test]
+    fn unknown_nonlocal_alias_is_sensitive() {
+        let hosts = vec![h("local", "local", false)];
+        assert!(host_is_sensitive_in("mystery", &hosts));
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_short_aliases_resolve() {
+        let catalog = builtin_byok_catalog();
+        let anthropic = catalog
+            .iter()
+            .find(|g| g.id == "anthropic")
+            .expect("anthropic group present");
+        let by_key = |k: &str| anthropic.models.iter().find(|m| m.key == k);
+        assert_eq!(
+            by_key("sonnet").map(|m| m.model_id.as_str()),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(
+            by_key("opus").map(|m| m.model_id.as_str()),
+            Some("claude-opus-4-6")
+        );
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -306,6 +390,22 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
                     desc: "Anthropic Claude Sonnet 4.6".to_string(),
                     context_window: Some(200_000),
                 },
+                ModelConfigEntry {
+                    key: "sonnet".to_string(),
+                    model_id: "claude-sonnet-4-6".to_string(),
+                    label: "Sonnet (kısa ad)".to_string(),
+                    badge: "⚡ Balanced".to_string(),
+                    desc: "Alias → claude-sonnet-4-6".to_string(),
+                    context_window: Some(200_000),
+                },
+                ModelConfigEntry {
+                    key: "opus".to_string(),
+                    model_id: "claude-opus-4-6".to_string(),
+                    label: "Opus (kısa ad)".to_string(),
+                    badge: "🧠 Deep".to_string(),
+                    desc: "Alias → claude-opus-4-6".to_string(),
+                    context_window: Some(200_000),
+                },
             ],
         },
         ProviderGroupConfig {
@@ -485,6 +585,7 @@ fn default_hosts() -> Vec<RemoteHostConfig> {
         ssh_target: "local".to_string(),
         badge: "💻 Local Workspace".to_string(),
         desc: "Local development machine".to_string(),
+        sensitive: false,
     }]
 }
 
