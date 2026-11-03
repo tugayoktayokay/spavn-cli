@@ -85,25 +85,30 @@ fn build_workspace_repo_map(cwd: &str, compact: bool) -> String {
         }
     }
 
-    // 2b. Symbol Map for src/ (.rs, .py, .ts, .tsx, .js, .jsx) with exact 1-based line numbers
-    let src_dir = root.join("src");
-    if src_dir.is_dir() {
-        let mut sym_entries = Vec::new();
-        collect_symbol_map(&src_dir, root, &mut sym_entries, 0);
-        if !sym_entries.is_empty() {
-            map.push_str("\n## Symbol Map (src/ — Jump directly to line numbers with `read`)\n");
-            let mut budget = if compact {
-                SYMBOL_MAP_BUDGET_COMPACT
-            } else {
-                SYMBOL_MAP_BUDGET
-            };
-            for line in sym_entries.into_iter().take(20) {
-                if line.len() + 3 > budget {
-                    break;
-                }
-                budget -= line.len() + 3;
-                map.push_str(&format!("- {}\n", line));
+    // 2b. Symbol Map for src/, backend/, app/, lib/ or root (.rs, .py, .ts, .tsx, .js, .jsx, .go) with 1-based line numbers
+    let mut sym_entries = Vec::new();
+    for subdir in ["src", "backend", "app", "lib"] {
+        let candidate = root.join(subdir);
+        if candidate.is_dir() && sym_entries.len() < 20 {
+            collect_symbol_map(&candidate, root, &mut sym_entries, 0);
+        }
+    }
+    if sym_entries.is_empty() {
+        collect_symbol_map(root, root, &mut sym_entries, 2);
+    }
+    if !sym_entries.is_empty() {
+        map.push_str("\n## Symbol Map (Jump directly to line numbers with `read`)\n");
+        let mut budget = if compact {
+            SYMBOL_MAP_BUDGET_COMPACT
+        } else {
+            SYMBOL_MAP_BUDGET
+        };
+        for line in sym_entries.into_iter().take(20) {
+            if line.len() + 3 > budget {
+                break;
             }
+            budget -= line.len() + 3;
+            map.push_str(&format!("- {}\n", line));
         }
     }
 
@@ -177,7 +182,7 @@ fn collect_symbol_map(dir: &Path, root: &Path, out: &mut Vec<String>, depth: usi
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "rs" | "py" | "ts" | "tsx" | "js" | "jsx") {
+        if !matches!(ext, "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go") {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
@@ -192,6 +197,8 @@ fn collect_symbol_map(dir: &Path, root: &Path, out: &mut Vec<String>, depth: usi
                 || trimmed.starts_with("pub enum ")
                 || trimmed.starts_with("def ")
                 || trimmed.starts_with("async def ")
+                || trimmed.starts_with("class ")
+                || trimmed.starts_with("func ")
                 || trimmed.starts_with("export function ")
                 || trimmed.starts_with("export async function ")
                 || trimmed.starts_with("export class ")

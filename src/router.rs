@@ -456,6 +456,10 @@ pub struct CompletionResult {
     pub finish_reason: Option<String>,
 }
 
+pub fn base64_encode_bytes(data: &[u8]) -> String {
+    base64_encode(data)
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -492,6 +496,14 @@ pub struct DraggedImage {
 
 static PASTED_IMAGE_CACHE: std::sync::Mutex<Vec<(String, DraggedImage)>> =
     std::sync::Mutex::new(Vec::new());
+
+pub fn register_read_image(path_key: &str, img: DraggedImage) {
+    let marker = format!("[SPAVN Vision Image Loaded: {}", path_key);
+    if let Ok(mut cache) = PASTED_IMAGE_CACHE.lock() {
+        cache.retain(|(k, _)| k != &marker);
+        cache.push((marker, img));
+    }
+}
 
 /// Collapses any dragged local image file paths inside `input` into compact OMP-style
 /// `[🖼️ Screenshot.png (136KB)]` tokens and caches their `DraggedImage` payload for submission!
@@ -656,19 +668,42 @@ fn sanitize_messages_for_openai_jinja(messages: &[ChatMessage]) -> Vec<ChatMessa
 fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
     let sanitized = sanitize_messages_for_openai_jinja(messages);
     let last_user_idx = sanitized.iter().rposition(|m| m.role == "user");
-    sanitized
-        .iter()
-        .enumerate()
-        .map(|(idx, m)| {
-            let mut v = serde_json::to_value(m).unwrap_or_else(|_| json!({}));
-            if m.role == "assistant" && v.get("content").is_none() {
-                v["content"] = json!("");
+    let mut out_vals = Vec::with_capacity(sanitized.len() + 2);
+    let total_len = sanitized.len();
+
+    for (idx, m) in sanitized.iter().enumerate() {
+        let mut v = serde_json::to_value(m).unwrap_or_else(|_| json!({}));
+        if m.role == "assistant" && v.get("content").is_none() {
+            v["content"] = json!("");
+        }
+        if Some(idx) == last_user_idx {
+            if let Some(ref txt) = m.content {
+                let imgs = extract_dragged_images(txt);
+                if !imgs.is_empty() {
+                    let mut parts = vec![json!({ "type": "text", "text": txt })];
+                    for (mime, b64) in imgs {
+                        parts.push(json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", mime, b64)
+                            }
+                        }));
+                    }
+                    v["content"] = Value::Array(parts);
+                }
             }
-            if Some(idx) == last_user_idx {
-                if let Some(ref txt) = m.content {
+        }
+        out_vals.push(v);
+
+        if m.role == "tool" && idx + 4 >= total_len {
+            if let Some(ref txt) = m.content {
+                if txt.starts_with("[SPAVN Vision Image Loaded:") {
                     let imgs = extract_dragged_images(txt);
                     if !imgs.is_empty() {
-                        let mut parts = vec![json!({ "type": "text", "text": txt })];
+                        let mut parts = vec![json!({
+                            "type": "text",
+                            "text": format!("[Visual content of tool result `{}`]:", txt)
+                        })];
                         for (mime, b64) in imgs {
                             parts.push(json!({
                                 "type": "image_url",
@@ -677,13 +712,16 @@ fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
                                 }
                             }));
                         }
-                        v["content"] = Value::Array(parts);
+                        out_vals.push(json!({
+                            "role": "user",
+                            "content": parts
+                        }));
                     }
                 }
             }
-            v
-        })
-        .collect()
+        }
+    }
+    out_vals
 }
 
 /// Appends the server's `Retry-After` (seconds form) to the error text as `[retry-after=N]`.
@@ -1132,6 +1170,8 @@ fn recover_inline_tool_calls(text: &str) -> Vec<ToolCall> {
         "subagent",
         "spawn_submodels",
         "task",
+        "lsp",
+        "mcp",
     ];
     let mut search_from = 0;
     while let Some(start) = text[search_from..].find("<tool_call>") {
@@ -1460,12 +1500,30 @@ fn split_and_convert_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) 
             "tool" => {
                 let tool_use_id = m.tool_call_id.clone().unwrap_or_default();
                 let text = m.content.clone().unwrap_or_default();
+                let mut result_blocks = vec![json!({ "type": "text", "text": text })];
+                if text.starts_with("[SPAVN Vision Image Loaded:") {
+                    for (mime, b64) in extract_dragged_images(&text) {
+                        result_blocks.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime,
+                                "data": b64,
+                            }
+                        }));
+                    }
+                }
+                let content_val = if result_blocks.len() == 1 {
+                    json!(text)
+                } else {
+                    Value::Array(result_blocks)
+                };
                 blocks.push(json!({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": text,
+                        "content": content_val,
                     }],
                 }));
             }

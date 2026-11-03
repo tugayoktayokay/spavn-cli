@@ -261,7 +261,8 @@ pub fn tool_definitions() -> Value {
                         "command": { "type": "string", "description": "Shell command to execute" },
                         "host": { "type": "string", "description": "Target host alias (default: 'local')" },
                         "cwd": { "type": "string", "description": "Optional working directory" },
-                        "timeout_sec": { "type": "integer", "description": "Command timeout in seconds (default: 45)" }
+                        "timeout_sec": { "type": "integer", "description": "Command timeout in seconds (default: 120)" },
+                        "background": { "type": "boolean", "description": "If true, start command in background and return its PID + log file path immediately" }
                     },
                     "required": ["command"]
                 }
@@ -332,15 +333,47 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "subagent",
-                "description": "Delegate an isolated read-only investigation or analysis sub-task to a fresh sub-agent with its own context window, returning a concise summary.",
+                "description": "Delegate one or multiple isolated read-only investigations (`task` or `tasks: [...]`) in parallel to sub-agents with their own context windows.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "task": { "type": "string", "description": "Self-contained sub-question or investigation task" },
-                        "context": { "type": "string", "description": "Relevant file paths or background context for the sub-agent" },
-                        "expected_output": { "type": "string", "description": "Expected format or specific findings to return" }
+                        "task": { "type": "string", "description": "Single sub-question or investigation task" },
+                        "context": { "type": "string", "description": "Relevant file paths or background context" },
+                        "expected_output": { "type": "string", "description": "Expected format or specific findings to return" },
+                        "model": { "type": "string", "description": "Optional model override (e.g. 'local', 'flash', 'argon')" },
+                        "tasks": {
+                            "type": "array",
+                            "description": "Optional list of up to 4 sub-tasks to run concurrently in parallel",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "task": { "type": "string" },
+                                    "context": { "type": "string" },
+                                    "expected_output": { "type": "string" }
+                                },
+                                "required": ["task"]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "lsp",
+                "description": "Fast symbol navigation (`op='definition'`, `'references'`, `'symbols'`) and generic MCP client (`op='mcp'`, `server`, `tool`, `arguments`).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "op": { "type": "string", "enum": ["definition", "references", "symbols", "mcp"], "description": "Operation type" },
+                        "symbol": { "type": "string", "description": "Symbol/identifier name for definition or references" },
+                        "path": { "type": "string", "description": "File or directory path for symbols/search" },
+                        "server": { "type": "string", "description": "MCP server name in ~/.spavn/config.json mcpServers (when op='mcp')" },
+                        "tool": { "type": "string", "description": "MCP tool name to invoke (when op='mcp')" },
+                        "arguments": { "type": "object", "description": "JSON arguments for the MCP tool" }
                     },
-                    "required": ["task"]
+                    "required": ["op"]
                 }
             }
         }
@@ -1031,6 +1064,57 @@ fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
     }
 
     let key = path.to_string_lossy().to_string();
+    if let Some(ext) = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+    {
+        let mime_opt = match ext.as_str() {
+            "png" => Some("image/png"),
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "webp" => Some("image/webp"),
+            "gif" => Some("image/gif"),
+            _ => None,
+        };
+        if let Some(mime) = mime_opt {
+            return match fs::read(&path) {
+                Ok(bytes) => {
+                    if bytes.len() > 15 * 1024 * 1024 {
+                        format!(
+                            "Read error ({}): image exceeds 15MB limit ({} bytes)",
+                            path.display(),
+                            bytes.len()
+                        )
+                    } else {
+                        let kb = (bytes.len() as f64 / 1024.0).max(0.1);
+                        let fname = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| raw_path.to_string());
+                        let b64 = crate::router::base64_encode_bytes(&bytes);
+                        let drag_img = crate::router::DraggedImage {
+                            raw_span: raw_path.to_string(),
+                            path: key.clone(),
+                            filename: fname.clone(),
+                            mime,
+                            size_bytes: bytes.len(),
+                            base64: b64,
+                        };
+                        crate::hud::render_inline_image_preview(&drag_img);
+                        crate::router::register_read_image(&key, drag_img);
+                        format!(
+                            "[SPAVN Vision Image Loaded: {} ({}, {:.1} KB) — multimodal image attached to your visual context]",
+                            key, mime, kb
+                        )
+                    }
+                }
+                Err(e) => {
+                    let hint = suggest_similar_path(raw_path);
+                    format!("Read error ({}): {}{}", path.display(), e, hint)
+                }
+            };
+        }
+    }
     if let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
         if let Some(&(prev_mtime, prev_s, prev_e, prev_step)) = ctx.read_ranges.get(&key) {
             if prev_mtime == mtime
@@ -1333,6 +1417,37 @@ pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Op
                         "[SPAVN ZERO-STOP COMPILER GATE]: `tsc --noEmit` failed with errors. Fix these type/syntax errors immediately before finishing:\n{}",
                         diag
                     ));
+                }
+            }
+        }
+    } else {
+        let py_files: Vec<String> = modified_files
+            .iter()
+            .filter(|raw| {
+                split_remote_prefix(raw).is_none()
+                    && expand_tilde(raw)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.eq_ignore_ascii_case("py"))
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        for py in &py_files {
+            let p = expand_tilde(py);
+            if p.is_file() {
+                let mut cmd = Command::new("python3");
+                cmd.args(["-m", "py_compile", &p.to_string_lossy()]);
+                if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 8) {
+                    if !timed_out && code != 0 {
+                        let diag = first_n_diagnostic_lines(&out, &err, 15);
+                        if !diag.is_empty() {
+                            return Some(format!(
+                                "[SPAVN ZERO-STOP PYTHON GATE]: `py_compile` failed on `{}`:\n{}",
+                                py, diag
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1977,13 +2092,17 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
     let timeout_sec = args
         .get("timeout_sec")
         .and_then(|v| v.as_u64())
-        .unwrap_or(45);
+        .unwrap_or(120);
+    let background = args
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if let Err(blocked) = check_bash_gate(ctx, command, &host, cwd) {
         return blocked;
     }
 
-    let cmd_obj = if host != "local" && !host.is_empty() {
+    let mut cmd_obj = if host != "local" && !host.is_empty() {
         let ssh_target = resolve_ssh_target(&host);
         let remote_cmd = if let Some(dir) = cwd {
             format!("cd {} && {}", shell_quote_remote_path(dir), command)
@@ -2054,6 +2173,29 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
         }
         c
     };
+
+    if background {
+        let log_path = std::env::temp_dir().join(format!(
+            "spavn-bg-{}-{}.log",
+            std::process::id(),
+            ctx.tool_step_counter
+        ));
+        if let Ok(log_file) = fs::File::create(&log_path) {
+            if let Ok(err_file) = log_file.try_clone() {
+                cmd_obj
+                    .stdout(std::process::Stdio::from(log_file))
+                    .stderr(std::process::Stdio::from(err_file));
+            }
+        }
+        return match cmd_obj.spawn() {
+            Ok(child) => format!(
+                "Background job started (PID: {}). Output is streaming to `{}` — use `read` or `bash` to inspect progress.",
+                child.id(),
+                log_path.display()
+            ),
+            Err(e) => format!("Background spawn error: {}", e),
+        };
+    }
 
     match run_command_with_timeout(cmd_obj, timeout_sec) {
         Ok((code, stdout, stderr, timed_out)) => {
@@ -2560,22 +2702,22 @@ fn exec_web(args: &Value) -> String {
     "Web search returned no results.".to_string()
 }
 
-fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
-    let task = get_str_alias(args, &["task", "prompt", "query", "objective"]);
-    if task.trim().is_empty() {
-        return "Subagent error: missing 'task' parameter.".to_string();
-    }
-    let extra_ctx = get_str_alias(args, &["context", "files", "background"]);
-    let expected = get_str_alias(args, &["expected_output", "format", "output"]);
-
-    let ep = crate::router::resolve_endpoint(&ctx.current_model);
+fn run_single_subagent_worker(
+    model_key: &str,
+    default_host: &str,
+    policy: &PathPolicy,
+    task: &str,
+    extra_ctx: &str,
+    expected: &str,
+) -> String {
+    let ep = crate::router::resolve_endpoint(model_key);
     let mut sub_ctx = ToolContext::new(
         AccessMode::Safe,
-        ctx.default_host.clone(),
-        ctx.policy.cwd.clone(),
+        default_host.to_string(),
+        policy.cwd.clone(),
         crate::spavn_engine::AgentPhase::Plan,
     );
-    sub_ctx.policy = ctx.policy.clone();
+    sub_ctx.policy = policy.clone();
 
     let mut sub_tools = tool_definitions_for_phase(crate::spavn_engine::AgentPhase::Plan);
     if let Value::Array(ref mut items) = sub_tools {
@@ -2602,11 +2744,11 @@ fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
         crate::router::ChatMessage::user(user_prompt),
     ];
 
-    for step in 0..4 {
+    for step in 0..6 {
         if crate::is_interrupted() {
             return "[Subagent cancelled via Esc/Ctrl+C]".to_string();
         }
-        crate::hud::set_spinner_label(&format!("🐝 Alt-ajan araştırıyor (adım {}/4)", step + 1));
+        crate::hud::set_spinner_label(&format!("🐝 Alt-ajan araştırıyor (adım {}/6)", step + 1));
         let Ok(res) = crate::router::stream_chat_completion(&ep, &msgs, &sub_tools, |_| {}, |_| {})
         else {
             break;
@@ -2614,7 +2756,7 @@ fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
         let msg = res.message;
         msgs.push(msg.clone());
         if let Some(tcs) = msg.tool_calls {
-            for tc in tcs.into_iter().take(3) {
+            for tc in tcs.into_iter().take(4) {
                 let tname = tc.function.name.trim().to_string();
                 let out = if matches!(tname.as_str(), "read" | "search" | "memory" | "web") {
                     execute_tool(&mut sub_ctx, &tname, &tc.function.arguments)
@@ -2645,6 +2787,215 @@ fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
         .unwrap_or_else(|| "(Sub-agent completed without textual summary)".to_string())
 }
 
+fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
+    let model_override = get_str_alias(args, &["model", "endpoint"]);
+    let target_model = if model_override.is_empty() {
+        ctx.current_model.clone()
+    } else if model_override.eq_ignore_ascii_case("local") {
+        let cfg = crate::config::load_user_config();
+        cfg.local_discovery_url
+            .as_deref()
+            .and_then(crate::router::detect_active_local_model)
+            .unwrap_or(cfg.default_model)
+    } else {
+        model_override.to_string()
+    };
+
+    if let Some(tasks_arr) = args.get("tasks").and_then(|v| v.as_array()) {
+        if !tasks_arr.is_empty() {
+            let batch: Vec<(String, String, String)> = tasks_arr
+                .iter()
+                .take(4)
+                .filter_map(|item| {
+                    let t = get_str_alias(item, &["task", "prompt", "query", "objective"]);
+                    if t.trim().is_empty() {
+                        return None;
+                    }
+                    let c = get_str_alias(item, &["context", "files", "background"]);
+                    let e = get_str_alias(item, &["expected_output", "format", "output"]);
+                    Some((t.to_string(), c.to_string(), e.to_string()))
+                })
+                .collect();
+            if batch.is_empty() {
+                return "Subagent error: missing 'task' parameter in tasks array.".to_string();
+            }
+            let host = ctx.default_host.clone();
+            let policy = ctx.policy.clone();
+            let results: Vec<String> = std::thread::scope(|s| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (t, c, e))| {
+                        let m = target_model.as_str();
+                        let h = host.as_str();
+                        let p = &policy;
+                        s.spawn(move || {
+                            let res = run_single_subagent_worker(m, h, p, t, c, e);
+                            format!("### Sub-Agent #{} ({})\n{}", idx + 1, t, res)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            return results.join("\n\n");
+        }
+    }
+
+    let task = get_str_alias(args, &["task", "prompt", "query", "objective"]);
+    if task.trim().is_empty() {
+        return "Subagent error: missing 'task' parameter.".to_string();
+    }
+    let extra_ctx = get_str_alias(args, &["context", "files", "background"]);
+    let expected = get_str_alias(args, &["expected_output", "format", "output"]);
+
+    run_single_subagent_worker(
+        &target_model,
+        &ctx.default_host,
+        &ctx.policy,
+        task,
+        extra_ctx,
+        expected,
+    )
+}
+
+fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
+    let op = get_str_alias(args, &["op", "action", "mode"]).to_ascii_lowercase();
+    if op == "mcp" || !get_str_alias(args, &["server", "mcp_server"]).is_empty() {
+        let server_name = get_str_alias(args, &["server", "mcp_server"]);
+        let tool_name = get_str_alias(args, &["tool", "name", "method"]);
+        let mcp_args = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let cfg = crate::config::load_user_config();
+        let Some(srv) = cfg.mcp_servers.get(server_name) else {
+            let available: Vec<String> = cfg.mcp_servers.keys().cloned().collect();
+            return format!(
+                "MCP server '{}' not found in ~/.spavn/config.json `mcpServers`. Configured servers: {:?}",
+                server_name, available
+            );
+        };
+        if let Some(ref url) = srv.url {
+            let req_body = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": if tool_name.is_empty() { "tools/list" } else { "tools/call" },
+                "params": if tool_name.is_empty() {
+                    json!({})
+                } else {
+                    json!({ "name": tool_name, "arguments": mcp_args })
+                }
+            });
+            return match crate::http::post_json(
+                url,
+                &req_body.to_string(),
+                &[("Accept", "application/json, text/event-stream")],
+                20,
+            ) {
+                Ok((_, body)) => body.chars().take(8000).collect(),
+                Err(e) => format!("MCP HTTP error ({}): {}", server_name, e),
+            };
+        }
+        if let Some(ref cmd_bin) = srv.command {
+            let mut cmd = Command::new(cmd_bin);
+            cmd.args(&srv.args)
+                .envs(&srv.env)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let Ok(mut child) = cmd.spawn() else {
+                return format!("MCP error: failed to spawn `{}`", cmd_bin);
+            };
+            let init_msg = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "spavn", "version": env!("CARGO_PKG_VERSION") }
+                }
+            });
+            let call_msg = json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": if tool_name.is_empty() { "tools/list" } else { "tools/call" },
+                "params": if tool_name.is_empty() {
+                    json!({})
+                } else {
+                    json!({ "name": tool_name, "arguments": mcp_args })
+                }
+            });
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = writeln!(stdin, "{}", init_msg);
+                let _ = writeln!(
+                    stdin,
+                    "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}"
+                );
+                let _ = writeln!(stdin, "{}", call_msg);
+            }
+            let out_handle = capture_capped(child.stdout.take());
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let _ = child.kill();
+            let _ = child.wait();
+            let out_bytes = out_handle.join().unwrap_or_default();
+            let out_str = String::from_utf8_lossy(&out_bytes);
+            if let Some(last_line) = out_str.lines().rev().find(|l| l.trim().starts_with('{')) {
+                return last_line.chars().take(8000).collect();
+            }
+            return out_str.chars().take(4000).collect();
+        }
+        return format!(
+            "MCP server '{}' has neither `command` nor `url`.",
+            server_name
+        );
+    }
+
+    let symbol = get_str_alias(args, &["symbol", "name", "query", "identifier"]);
+    let raw_path = {
+        let p = get_str_alias(args, &["path", "file", "dir"]);
+        if p.is_empty() {
+            "."
+        } else {
+            p
+        }
+    };
+    if op == "symbols" || (symbol.is_empty() && !raw_path.is_empty()) {
+        let target = expand_tilde(raw_path);
+        if target.is_file() {
+            if let Ok(content) = fs::read_to_string(&target) {
+                let mut syms = Vec::new();
+                for (idx, line) in content.lines().enumerate() {
+                    if is_structural_outline_line(line) {
+                        syms.push(format!("{:>4}: {}", idx + 1, line.trim()));
+                    }
+                }
+                if syms.is_empty() {
+                    return "(No structural symbols found in file)".to_string();
+                }
+                return syms.join("\n");
+            }
+        }
+        return build_live_project_signatures(raw_path);
+    }
+
+    if symbol.is_empty() {
+        return "LSP error: missing 'symbol' parameter.".to_string();
+    }
+    let pattern = if op == "definition" || op == "def" {
+        format!(
+            r"(fn|struct|enum|trait|type|const|static|def|class|function|interface|func)\s+{}\b",
+            symbol
+        )
+    } else {
+        format!(r"\b{}\b", symbol)
+    };
+    exec_search(
+        ctx,
+        &json!({
+            "pattern": pattern,
+            "path": raw_path
+        }),
+    )
+}
+
 pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> String {
     ctx.tool_step_counter += 1;
     let args = parse_args_resilient(args_json);
@@ -2665,8 +3016,11 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
         "skill" | "load_skill" | "use_skill" => exec_skill(&args),
         "web" | "web_search" | "websearch" | "webfetch" | "web_fetch" => exec_web(&args),
         "subagent" | "spawn_submodels" | "task" | "delegate" => exec_subagent(ctx, &args),
+        "lsp" | "mcp" | "goto_definition" | "find_references" | "document_symbols" => {
+            exec_lsp_and_mcp(ctx, &args)
+        }
         _ => format!(
-            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, memory, skill, web, subagent.",
+            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, memory, skill, web, subagent, lsp.",
             name
         ),
     }
@@ -2753,6 +3107,7 @@ mod phase_tests {
         assert!(names.contains(&"read"));
         assert!(names.contains(&"search"));
         assert!(names.contains(&"subagent"));
+        assert!(names.contains(&"lsp"));
         assert!(!names.contains(&"edit"));
         assert!(!names.contains(&"write"));
         assert!(!names.contains(&"bash"));
@@ -2763,6 +3118,29 @@ mod phase_tests {
         let mut c = ctx(AgentPhase::Plan);
         let out = execute_tool(&mut c, "subagent", "{}");
         assert!(out.contains("missing 'task' parameter"), "{out}");
+    }
+
+    #[test]
+    fn read_tool_handles_png_image_as_multimodal_vision_instead_of_utf8_error() {
+        let dir = std::env::temp_dir().join(format!("spavn-vision-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let img_path = dir.join("test_render.png");
+        // Non-UTF8 PNG header bytes (`\x89PNG\r\n\x1a\n`)
+        fs::write(&img_path, b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        let args = serde_json::json!({ "path": img_path.to_string_lossy() });
+        let out = execute_tool(&mut c, "read", &args.to_string());
+        assert!(
+            out.contains("[SPAVN Vision Image Loaded:"),
+            "expected vision image load, got: {out}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
