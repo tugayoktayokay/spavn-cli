@@ -498,7 +498,7 @@ static PASTED_IMAGE_CACHE: std::sync::Mutex<Vec<(String, DraggedImage)>> =
     std::sync::Mutex::new(Vec::new());
 
 pub fn register_read_image(path_key: &str, img: DraggedImage) {
-    let marker = format!("[SPAVN Vision Image Loaded: {}", path_key);
+    let marker = format!("[SPAVN Vision Image Loaded: {} (", path_key);
     if let Ok(mut cache) = PASTED_IMAGE_CACHE.lock() {
         cache.retain(|(k, _)| k != &marker);
         cache.push((marker, img));
@@ -1527,14 +1527,31 @@ fn split_and_convert_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) 
                 } else {
                     Value::Array(result_blocks)
                 };
-                blocks.push(json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": content_val,
-                    }],
-                }));
+                let tool_res_block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content_val,
+                });
+                let appended = if let Some(last) = blocks.last_mut() {
+                    if last.get("role").and_then(|r| r.as_str()) == Some("user") {
+                        if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                            arr.push(tool_res_block.clone());
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !appended {
+                    blocks.push(json!({
+                        "role": "user",
+                        "content": [tool_res_block],
+                    }));
+                }
             }
             _ => {
                 let text = m.content.clone().unwrap_or_default();
