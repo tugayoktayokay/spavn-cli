@@ -411,6 +411,206 @@ pub fn render_markdown_table(raw_rows: &[String], term_cols: usize) -> String {
     out
 }
 
+fn highlight_code_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") || (trimmed.starts_with('#') && !trimmed.starts_with("#[")) {
+        return format!("{}{}{}", DIM, line, RESET);
+    }
+
+    const KEYWORDS: &[&str] = &[
+        "fn",
+        "pub",
+        "let",
+        "mut",
+        "const",
+        "static",
+        "struct",
+        "enum",
+        "impl",
+        "trait",
+        "for",
+        "in",
+        "while",
+        "loop",
+        "if",
+        "else",
+        "match",
+        "return",
+        "break",
+        "continue",
+        "use",
+        "mod",
+        "crate",
+        "super",
+        "self",
+        "Self",
+        "async",
+        "await",
+        "where",
+        "type",
+        "unsafe",
+        "extern",
+        "ref",
+        "move",
+        "def",
+        "class",
+        "import",
+        "from",
+        "as",
+        "try",
+        "except",
+        "finally",
+        "with",
+        "yield",
+        "lambda",
+        "pass",
+        "function",
+        "var",
+        "export",
+        "default",
+        "interface",
+        "extends",
+        "implements",
+        "new",
+        "switch",
+        "case",
+        "throw",
+        "catch",
+        "package",
+        "func",
+        "defer",
+        "go",
+        "select",
+        "chan",
+    ];
+    const LITERALS_AND_TYPES: &[&str] = &[
+        "true",
+        "false",
+        "None",
+        "Some",
+        "Ok",
+        "Err",
+        "null",
+        "undefined",
+        "True",
+        "False",
+        "String",
+        "str",
+        "usize",
+        "isize",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "f32",
+        "f64",
+        "bool",
+        "char",
+        "Vec",
+        "Option",
+        "Result",
+        "Box",
+        "Arc",
+        "Mutex",
+        "Path",
+        "PathBuf",
+        "Value",
+    ];
+
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    let mut out = String::with_capacity(line.len() + 32);
+
+    while i < n {
+        let ch = chars[i];
+        if ch == '/' && i + 1 < n && chars[i + 1] == '/' {
+            let comment: String = chars[i..].iter().collect();
+            out.push_str(DIM);
+            out.push_str(&comment);
+            out.push_str(RESET);
+            break;
+        }
+        if ch == '"' || (ch == '\'' && (i + 2 < n && chars[i + 2] == '\'')) {
+            let quote = ch;
+            let start = i;
+            i += 1;
+            while i < n {
+                if chars[i] == '\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            let lit: String = chars[start..i].iter().collect();
+            out.push_str("\x1b[32m");
+            out.push_str(&lit);
+            out.push_str(RESET);
+            continue;
+        }
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let start = i;
+            while i < n && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            if i < n && chars[i] == '!' {
+                i += 1;
+                out.push_str("\x1b[36m");
+                out.push_str(&word);
+                out.push('!');
+                out.push_str(RESET);
+            } else if KEYWORDS.contains(&word.as_str()) {
+                out.push_str("\x1b[1;35m");
+                out.push_str(&word);
+                out.push_str(RESET);
+            } else if LITERALS_AND_TYPES.contains(&word.as_str())
+                || word
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false)
+            {
+                out.push_str("\x1b[33m");
+                out.push_str(&word);
+                out.push_str(RESET);
+            } else if i < n && chars[i] == '(' {
+                out.push_str("\x1b[36m");
+                out.push_str(&word);
+                out.push_str(RESET);
+            } else {
+                out.push_str(&word);
+            }
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            let start = i;
+            while i < n && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_')
+            {
+                i += 1;
+            }
+            let num: String = chars[start..i].iter().collect();
+            out.push_str("\x1b[33m");
+            out.push_str(&num);
+            out.push_str(RESET);
+            continue;
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out
+}
+
 pub struct MarkdownStreamRenderer {
     at_line_start: bool,
     prefix_buf: String,
@@ -465,7 +665,22 @@ impl MarkdownStreamRenderer {
     pub fn finish(&mut self) {
         if self.at_line_start && !self.prefix_buf.is_empty() {
             let pending = std::mem::take(&mut self.prefix_buf);
-            if pending.trim_start().starts_with('|') {
+            if self.in_code_block {
+                let line = pending.trim_end_matches(['\r', '\n']);
+                if line.trim().starts_with("```") {
+                    self.in_code_block = false;
+                    let rule_w = term_size().1.saturating_sub(8).clamp(16, 60);
+                    self.out_buf
+                        .push_str(&format!("  {}╰{}{}\n", DIM, "─".repeat(rule_w), RESET));
+                } else {
+                    self.out_buf.push_str(&format!(
+                        "  {}│{} {}\n",
+                        DIM,
+                        RESET,
+                        highlight_code_line(line)
+                    ));
+                }
+            } else if pending.trim_start().starts_with('|') {
                 self.table_rows.push(pending.trim().to_string());
             } else {
                 self.flush_table();
@@ -608,22 +823,15 @@ impl MarkdownStreamRenderer {
                     self.out_buf
                         .push_str(&format!("  {}╰{}{}\n", DIM, "─".repeat(rule_w), RESET));
                 } else {
-                    self.out_buf
-                        .push_str(&format!("  {}│{} {}{}{}\n", DIM, RESET, CYAN, line, RESET));
+                    self.out_buf.push_str(&format!(
+                        "  {}│{} {}\n",
+                        DIM,
+                        RESET,
+                        highlight_code_line(line)
+                    ));
                 }
                 self.prefix_buf.clear();
                 self.at_line_start = true;
-            } else {
-                let trimmed = self.prefix_buf.trim_start();
-                if !trimmed.is_empty() && !trimmed.starts_with('`') {
-                    let pending = std::mem::take(&mut self.prefix_buf);
-                    self.at_line_start = false;
-                    self.out_buf
-                        .push_str(&format!("  {}│{} {}", DIM, RESET, CYAN));
-                    for c in pending.chars() {
-                        self.emit_inline_char(c);
-                    }
-                }
             }
             return;
         }
@@ -951,5 +1159,15 @@ mod robustness_tests {
             r.push(chunk);
         }
         r.finish();
+    }
+
+    #[test]
+    fn code_line_highlighter_colors_keywords_strings_and_comments() {
+        let h = super::highlight_code_line("pub fn compute(x: usize) -> String { // note");
+        assert!(h.contains("\x1b[1;35mpub\x1b[0m"));
+        assert!(h.contains("\x1b[1;35mfn\x1b[0m"));
+        assert!(h.contains("\x1b[36mcompute\x1b[0m"));
+        assert!(h.contains("\x1b[33mString\x1b[0m"));
+        assert!(h.contains("// note"));
     }
 }

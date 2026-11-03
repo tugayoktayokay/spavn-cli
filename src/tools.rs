@@ -211,15 +211,27 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Surgical hashless file edit. Replaces old_text with new_text (with whitespace-normalized fallback).",
+                "description": "Surgical hashless file edit. Replaces old_text with new_text, or applies multiple non-overlapping replacements in one call via `edits: [{\"old_text\":\"...\",\"new_text\":\"...\"}]`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Path to file to edit" },
-                        "old_text": { "type": "string", "description": "Exact existing snippet to replace" },
-                        "new_text": { "type": "string", "description": "Replacement snippet" }
+                        "old_text": { "type": "string", "description": "Exact existing snippet to replace (when performing a single edit)" },
+                        "new_text": { "type": "string", "description": "Replacement snippet (when performing a single edit)" },
+                        "edits": {
+                            "type": "array",
+                            "description": "Optional batch of multiple `{old_text, new_text}` edits to apply atomically to the same file",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_text": { "type": "string" },
+                                    "new_text": { "type": "string" }
+                                },
+                                "required": ["old_text", "new_text"]
+                            }
+                        }
                     },
-                    "required": ["path", "old_text", "new_text"]
+                    "required": ["path"]
                 }
             }
         },
@@ -1487,6 +1499,47 @@ fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
     if let Err(blocked) = ctx.enforce_path(raw_path, true, "edit") {
         return blocked;
     }
+    if let Some(edits_arr) = args.get("edits").and_then(|v| v.as_array()) {
+        if !edits_arr.is_empty() {
+            let mut results = Vec::new();
+            for (idx, item) in edits_arr.iter().enumerate() {
+                let sub_old = get_str_alias(
+                    item,
+                    &["old_text", "old_string", "old_str", "search", "target"],
+                );
+                let sub_new = item
+                    .get("new_text")
+                    .or_else(|| item.get("new_string"))
+                    .or_else(|| item.get("new_str"))
+                    .or_else(|| item.get("replace"))
+                    .or_else(|| item.get("replacement"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let single_arg = json!({
+                    "path": raw_path,
+                    "old_text": sub_old,
+                    "new_text": sub_new,
+                });
+                let out = exec_edit_single(ctx, &single_arg);
+                if !out.starts_with("Successfully ") {
+                    return format!("Multi-edit failed at hunk #{}: {}", idx + 1, out);
+                }
+                results.push(out);
+            }
+            return results.last().cloned().unwrap_or_else(|| {
+                format!(
+                    "Successfully edited {} ({} hunks applied)",
+                    raw_path,
+                    edits_arr.len()
+                )
+            });
+        }
+    }
+    exec_edit_single(ctx, args)
+}
+
+fn exec_edit_single(ctx: &mut ToolContext, args: &Value) -> String {
+    let raw_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
     let old_text = get_str_alias(
         args,
         &["old_text", "old_string", "old_str", "search", "target"],
@@ -2812,5 +2865,34 @@ mod atomic_write_tests {
             res.is_err(),
             "rm -rf proj with cwd=/protected/apps must be blocked as Catastrophic"
         );
+    }
+
+    #[test]
+    fn multi_hunk_edit_applies_multiple_replacements_in_one_call() {
+        let dir = std::env::temp_dir().join(format!("spavn-multiedit-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sample.rs");
+        fs::write(&file, "fn a() -> i32 { 1 }\nfn b() -> i32 { 2 }\n").unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            crate::spavn_engine::AgentPhase::Code,
+        );
+        let args = serde_json::json!({
+            "path": file.to_string_lossy(),
+            "edits": [
+                { "old_text": "fn a() -> i32 { 1 }", "new_text": "fn a() -> i32 { 10 }" },
+                { "old_text": "fn b() -> i32 { 2 }", "new_text": "fn b() -> i32 { 20 }" }
+            ]
+        });
+        let res = execute_tool(&mut c, "edit", &args.to_string());
+        assert!(res.starts_with("Successfully "), "{res}");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "fn a() -> i32 { 10 }\nfn b() -> i32 { 20 }\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
