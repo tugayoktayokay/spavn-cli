@@ -1,5 +1,19 @@
 # Değişiklik Günlüğü
 
+## 2026-11-03 — PLAN/CODE fazları ve MIT lisansı
+
+### Faz: PLAN (salt-okunur) / CODE (uygulama)
+- Yeni `AgentPhase` (`spavn_engine.rs`): `Plan` / `Code`; `badge`, `short_badge`, `from_str`, `toggled`, `preamble`.
+- Zorlama prompt'ta değil tool katmanında: `execute_tool` başında `phase_locked_tool` kontrolü. PLAN'da `write`/`edit`/`bash` (ve tüm takma adları) yapılandırılmış `READ-ONLY PHASE` bildirimi döndürür, dosya asla dokunulmaz. `read`/`search`/`web`/`memory`/`skill` açık.
+- `ToolContext.phase` alanı; `new()` imzasına parametre eklendi.
+- TUI: status bar'a `📐 PLAN` / `💻 CODE` çipi (access rozetinin yanına); `\` tuşu faz değiştirir (`PromptEvent::CyclePhase`); `/plan`, `/code`, `/act` komutları; faz preamble'ı her turda role preamble'ıyla birlikte enjekte edilir.
+- CLI: `-P, --phase plan|code` (script'li salt-okunur plan koşuları için).
+- 4 yeni birim testi (kilitleme, açılma, memory/read erişimi, parse/toggle). Toplam 26 test.
+- Uçtan uca doğrulama: PLAN'da `write` çağrısında dosya oluşmaz ve oturuma `READ-ONLY PHASE` yazar; CODE'da (varsayılan) `write` çalışır.
+
+### Lisans
+- MIT: `LICENSE` eklendi, `Cargo.toml`'a `license`/`authors`/`repository`, `CONTRIBUTING.md`.
+
 ## 2026-11-03 — Sertleştirme, taşınabilirlik ve CI
 
 ### Güvenlik: yol politikası ve kabuk kapısı

@@ -82,15 +82,22 @@ pub struct ToolContext {
     pub tool_step_counter: usize,
     pub current_model: String,
     pub current_prompt: String,
+    pub phase: crate::spavn_engine::AgentPhase,
     pub policy: PathPolicy,
 }
 
 impl ToolContext {
-    pub fn new(access: AccessMode, default_host: String, workspace_root: PathBuf) -> Self {
+    pub fn new(
+        access: AccessMode,
+        default_host: String,
+        workspace_root: PathBuf,
+        phase: crate::spavn_engine::AgentPhase,
+    ) -> Self {
         let policy = PathPolicy::new(&workspace_root);
         Self {
             access,
             default_host,
+            phase,
             undo_stack: Vec::new(),
             read_mtimes: std::collections::HashMap::new(),
             read_ranges: std::collections::HashMap::new(),
@@ -1837,6 +1844,12 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
     ctx.tool_step_counter += 1;
     let args = parse_args_resilient(args_json);
     let normalized = name.trim().to_lowercase();
+    if ctx.phase == crate::spavn_engine::AgentPhase::Plan && phase_locked_tool(&normalized) {
+        return format!(
+            "[SPAVN] READ-ONLY PHASE (PLAN): tool '{}' is locked. Present your plan and stop; the user unlocks changes with /code or \\\\ . Do not retry write, edit or bash.",
+            normalized
+        );
+    }
     match normalized.as_str() {
         "read" | "read_file" | "cat" | "view" => exec_read(ctx, &args),
         "edit" | "edit_file" | "replace" | "patch" => exec_edit(ctx, &args),
@@ -1850,5 +1863,76 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
             "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, memory, skill, web.",
             name
         ),
+    }
+}
+
+pub fn phase_locked_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write"
+            | "write_file"
+            | "create_file"
+            | "save"
+            | "edit"
+            | "edit_file"
+            | "replace"
+            | "patch"
+            | "bash"
+            | "run_command"
+            | "shell"
+            | "exec"
+            | "terminal"
+    )
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    use crate::spavn_engine::AgentPhase;
+
+    fn ctx(phase: AgentPhase) -> ToolContext {
+        ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            PathBuf::from("/tmp"),
+            phase,
+        )
+    }
+
+    #[test]
+    fn plan_locks_write_edit_bash() {
+        let mut c = ctx(AgentPhase::Plan);
+        for tool in ["write", "edit", "bash"] {
+            let out = execute_tool(&mut c, tool, "{}");
+            assert!(
+                out.contains("READ-ONLY PHASE"),
+                "tool {tool} should be locked in PLAN, got: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_allows_read() {
+        let mut c = ctx(AgentPhase::Code);
+        let out = execute_tool(&mut c, "read", r#"{"path":"/nonexistent-phase-test-xyz"}"#);
+        assert!(!out.contains("READ-ONLY PHASE"), "read in CODE: {out}");
+    }
+
+    #[test]
+    fn plan_allows_read_and_memory() {
+        let mut c = ctx(AgentPhase::Plan);
+        let out = execute_tool(&mut c, "memory", r#"{"op":"recall","query":"x"}"#);
+        assert!(!out.contains("READ-ONLY PHASE"), "memory in PLAN: {out}");
+        let out = execute_tool(&mut c, "read", r#"{"path":"/nonexistent-phase-test-xyz"}"#);
+        assert!(!out.contains("READ-ONLY PHASE"), "read in PLAN: {out}");
+    }
+
+    #[test]
+    fn phase_from_str_and_toggle() {
+        assert_eq!(AgentPhase::from_str("plan"), Some(AgentPhase::Plan));
+        assert_eq!(AgentPhase::from_str("CODE"), Some(AgentPhase::Code));
+        assert_eq!(AgentPhase::from_str("bogus"), None);
+        assert_eq!(AgentPhase::Plan.toggled(), AgentPhase::Code);
+        assert_eq!(AgentPhase::Code.toggled(), AgentPhase::Plan);
     }
 }

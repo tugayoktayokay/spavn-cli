@@ -32,7 +32,7 @@ use skills::{
 use spavn_engine::{
     add_goal, add_pin, complete_goal, dispatch_role_from_prompt, record_knowledge_artifact,
     remove_pin, render_audit_panel, render_goals_panel, render_janitor_panel, render_pins_panel,
-    render_repo_wiki, retrieve_relevant_artifacts, AgentRoleKey,
+    render_repo_wiki, retrieve_relevant_artifacts, AgentPhase, AgentRoleKey,
 };
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -378,6 +378,7 @@ fn run_agent_turn(
     hud::set_sticky_dock_status(
         endpoint,
         ctx.access,
+        &ctx.phase,
         &ctx.default_host,
         quota_badge.unwrap_or("aktif"),
     );
@@ -846,6 +847,7 @@ fn main() {
     let mut resume_last = false;
     let mut interactive_resume = false;
     let mut show_thinking = true;
+    let mut phase_opt: Option<AgentPhase> = None;
     let mut prompt_parts: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -862,6 +864,15 @@ fn main() {
                 if i + 1 < args.len() {
                     if let Some(m) = AccessMode::from_str(&args[i + 1]) {
                         access_mode = m;
+                    }
+                    i += 2;
+                    continue;
+                }
+            }
+            "-P" | "--phase" => {
+                if i + 1 < args.len() {
+                    if let Some(ph) = AgentPhase::from_str(&args[i + 1]) {
+                        phase_opt = Some(ph);
                     }
                     i += 2;
                     continue;
@@ -890,7 +901,7 @@ fn main() {
                 continue;
             }
             "-h" | "--help" => {
-                println!("Usage: spavn [-m <model>] [-a safe|auto|sovereign] [--host <host>] [-c|--continue] [-r|--resume] [prompt...]");
+                println!("Usage: spavn [-m <model>] [-a safe|auto|sovereign] [-P plan|code] [--host <host>] [-c|--continue] [-r|--resume] [prompt...]");
                 return;
             }
             _ => {
@@ -902,7 +913,8 @@ fn main() {
 
     let cwd = current_workdir();
     let mut endpoint = resolve_endpoint(&model_key);
-    let mut ctx = ToolContext::new(access_mode, default_host, PathBuf::from(&cwd));
+    let mut active_phase = phase_opt.unwrap_or(AgentPhase::Code);
+    let mut ctx = ToolContext::new(access_mode, default_host, PathBuf::from(&cwd), active_phase);
 
     let (mut session_file, mut messages) = if resume_last {
         if let Some(path) = latest_session_path() {
@@ -1017,6 +1029,7 @@ fn main() {
                 let ev = read_bottom_dock_input(
                     &endpoint,
                     &mut ctx.access,
+                    &active_phase,
                     &ctx.default_host,
                     &quota_badge,
                     &cmd_history,
@@ -1031,6 +1044,17 @@ fn main() {
                         break;
                     }
                     PromptEvent::CycleAccess => continue,
+                    PromptEvent::CyclePhase => {
+                        active_phase = active_phase.toggled();
+                        ctx.phase = active_phase;
+                        println!(
+                            "\n{}{} — phase değişti{}",
+                            CYAN,
+                            active_phase.badge(),
+                            RESET
+                        );
+                        continue;
+                    }
                     PromptEvent::ShowSkills => "/skills".to_string(),
                     PromptEvent::Reload => "/reload".to_string(),
                     PromptEvent::Submit(s) => s,
@@ -1041,6 +1065,7 @@ fn main() {
             let ev = read_bottom_dock_input(
                 &endpoint,
                 &mut ctx.access,
+                &active_phase,
                 &ctx.default_host,
                 &quota_badge,
                 &cmd_history,
@@ -1055,6 +1080,17 @@ fn main() {
                     break;
                 }
                 PromptEvent::CycleAccess => continue,
+                PromptEvent::CyclePhase => {
+                    active_phase = active_phase.toggled();
+                    ctx.phase = active_phase;
+                    println!(
+                        "\n{}{} — phase değişti{}",
+                        CYAN,
+                        active_phase.badge(),
+                        RESET
+                    );
+                    continue;
+                }
                 PromptEvent::ShowSkills => "/skills".to_string(),
                 PromptEvent::Reload => "/reload".to_string(),
                 PromptEvent::Submit(s) => s,
@@ -1289,6 +1325,29 @@ fn main() {
                     "{}Kullanım: /access <safe | auto | sovereign>{}",
                     YELLOW, RESET
                 );
+            }
+            continue;
+        }
+        if input == "/plan" || input == "/code" || input == "/act" {
+            let next = if input == "/plan" {
+                AgentPhase::Plan
+            } else {
+                AgentPhase::Code
+            };
+            if next != active_phase {
+                active_phase = next;
+                ctx.phase = next;
+                if next == AgentPhase::Plan {
+                    println!(
+                        "\n{}📐 PLAN — salt-okunur: write/edit/bash kilitli. Planı yaz, kullanıcı /code ile açar.{}",
+                        MAGENTA, RESET
+                    );
+                } else {
+                    println!(
+                        "\n{}💻 CODE — değişiklikler açık; yukarıdaki plan referans.{}",
+                        GREEN, RESET
+                    );
+                }
             }
             continue;
         }
@@ -1580,6 +1639,7 @@ fn main() {
             println!("{}│{}  {}/queue (/qlist){}               Mesaj Kuyruğu düzenleme & Canlı Müdahale (Steer/Queue) modu", CYAN, RESET, BOLD, RESET);
             println!("{}│{}  {}/resume (-r) · /new · /fork{}   Geçmiş oturum seçici, yeni oturum ve dallandırma", CYAN, RESET, BOLD, RESET);
             println!("{}│{}  {}/role{}                         Spavn uzmanlık rolü (Auto/Coder/Reviewer/Security/Test/Docs/Refactor)", CYAN, RESET, BOLD, RESET);
+            println!("{}│{}  {}/plan · /code · \\{}             Faz: 📐 PLAN (salt-okunur) ↔ 💻 CODE (uygulama)", CYAN, RESET, BOLD, RESET);
             println!("{}│{}  {}/janitor (/j){}                 Spavn Janitor kalite kapılarını (check/types/lint/test) koş", CYAN, RESET, BOLD, RESET);
             println!("{}│{}  {}/audit · /blame <dosya>{}       HMAC zincirli AI aksiyon ve dosya değişim izi", CYAN, RESET, BOLD, RESET);
             println!("{}│{}  {}/wiki (/w){}                    Anlık proje modül ve mimari haritası (Repo Wiki)", CYAN, RESET, BOLD, RESET);
@@ -1617,6 +1677,9 @@ fn main() {
             expanded_input = format!("{}{}", art_block, expanded_input);
         }
         expanded_input = format!("{}\n\n{}", dispatched_role.preamble(), expanded_input);
+        if let Some(phase_preamble) = active_phase.preamble() {
+            expanded_input = format!("{}\n\n{}", phase_preamble, expanded_input);
+        }
 
         println!(
             "\n{}╭─ 👤 Siz · {}{}{}",

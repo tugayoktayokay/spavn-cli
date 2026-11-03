@@ -11,6 +11,7 @@ $ spavn "audit the auth module and write the missing tests"
 - **Streaming TUI** — token-by-token rendering with a live status bar, interruptible mid-stream, and a model picker you can drive from the keyboard.
 - **Local first, cloud when needed** — point `spavn` at LM Studio, Ollama, llama.cpp, or vLLM; switch to a hosted model with `/model` without restarting.
 - **Real tools, guarded** — file reads/writes, regex search, shell commands, web search/fetch, persistent memory, and on-demand skills, all behind one permission gate.
+- **Plan / Code phases** — a read-only 📐 PLAN phase that hard-locks `write`/`edit`/`bash` at the tool layer (not just the prompt), and a 💻 CODE phase to act. Toggle live with `/plan`, `/code`, or `\`.
 - **Three access modes** — from ask-everything to fully autonomous, with destructive commands and secret files still fenced off.
 - **Sessions as JSONL** — resumable, forkable, greppable, `0600` on disk.
 - **HMAC-chained audit log** — every AI action is recorded in a tamper-evident trail (`/audit`, `/blame`).
@@ -71,6 +72,7 @@ Keys can also live in `~/.spavn/secrets.env` (see [State and storage](#state-and
 | --- | --- |
 | `-m, --model <key>` | Model key, provider-prefixed model (`openai:gpt-5.4`), or `local[:id]` |
 | `-a, --access <mode>` | `safe`, `auto` (default), or `sovereign` |
+| `-P, --phase <phase>` | `plan` (read-only) or `code` (default); useful for scripted plan runs |
 | `-H, --host <alias>` | Default target host for tools (`local` by default) |
 | `-c, --continue` | Resume the most recent session |
 | `-r, --resume` | Open the session picker |
@@ -103,6 +105,7 @@ Inside the TUI:
 | `Esc` | Cancel the running turn or close a menu |
 | `Tab` | Cycle access mode |
 | `Shift+Tab` | Cycle access mode |
+| `\` | Toggle phase (📐 PLAN ↔ 💻 CODE) |
 | `Ctrl+R` | Reload configuration |
 | `Up` / `Down` | History or menu navigation |
 | `Ctrl+C` | Interrupt the agent |
@@ -115,6 +118,7 @@ While a turn is running, input either **steers** the agent immediately or is **q
 | --- | --- |
 | `/model`, `/local` | Provider/model picker |
 | `/access <mode>` | Switch permission mode |
+| `/plan`, `/code` | Switch phase: read-only plan vs act |
 | `/byok`, `/keys` | API key and provider manager |
 | `/resume`, `/sessions` | Session picker |
 | `/new`, `/fork` | New session, or branch the current one |
@@ -152,6 +156,19 @@ While a turn is running, input either **steers** the agent immediately or is **q
 | `skill` | Load a skill's instructions on demand |
 
 Skills are discovered in `~/.spavn/skills` and `~/.claude/skills`; inline `@skill-name` activates one for a single prompt.
+
+## Plan / Code phases
+
+Two orthogonal phases control what the agent is *allowed* to do, independent of access mode and role:
+
+| Phase | Tools | Use for |
+| --- | --- | --- |
+| 📐 `plan` | `read`, `search`, `web`, `memory`, `skill` | Research, impact analysis, design, review |
+| 💻 `code` | everything | Implementation |
+
+The phase is enforced in `execute_tool` (`src/tools.rs`), not in the prompt. In `plan` mode a call to `write`, `edit`, or `bash` returns a structured read-only notice and the file is never touched — the model cannot "decide" to write, the harness refuses. `memory` stays available so a plan can end with a recorded decision.
+
+Switch live with `/plan`, `/code`, or the `\` key (the current phase is always shown in the status bar). Start a scripted read-only run with `spavn -P plan "design the migration"`. The current phase is independent of `/role`: a role shapes *how* the model thinks, the phase controls *what it may do*.
 
 ## Permissions and path policy
 

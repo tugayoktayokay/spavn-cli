@@ -148,6 +148,52 @@ impl AgentRoleKey {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPhase {
+    Plan,
+    Code,
+}
+
+impl AgentPhase {
+    pub fn badge(&self) -> &'static str {
+        match self {
+            AgentPhase::Plan => "📐 PLAN (Salt-Okunur Tasarım)",
+            AgentPhase::Code => "💻 CODE (Uygulama)",
+        }
+    }
+
+    pub fn short_badge(&self) -> &'static str {
+        match self {
+            AgentPhase::Plan => "📐 PLAN",
+            AgentPhase::Code => "💻 CODE",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "plan" | "tasarim" | "tasarım" | "design" => Some(Self::Plan),
+            "code" | "kod" | "act" | "apply" | "uygula" => Some(Self::Code),
+            _ => None,
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            AgentPhase::Plan => AgentPhase::Code,
+            AgentPhase::Code => AgentPhase::Plan,
+        }
+    }
+
+    pub fn preamble(&self) -> Option<&'static str> {
+        match self {
+            AgentPhase::Plan => Some(
+                "[SPAVN PHASE: PLAN] READ-ONLY phase: the write, edit and bash tools are hard-locked; you may use read, search, web, memory and skill only. Your deliverable is a concrete plan: target files, ordered steps, risks, and a verification/test strategy. When the plan is complete, stop and wait — the user unlocks changes with /code or \\. Do not attempt writes.",
+            ),
+            AgentPhase::Code => None,
+        }
+    }
+}
+
 pub fn dispatch_role_from_prompt(prompt: &str) -> AgentRoleKey {
     let lower = prompt.to_lowercase();
     let rules: &[(AgentRoleKey, &[&str])] = &[

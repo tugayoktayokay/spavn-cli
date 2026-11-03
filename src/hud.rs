@@ -377,6 +377,7 @@ pub fn resume_active_spinner() {
 pub fn set_sticky_dock_status(
     endpoint: &ModelEndpoint,
     access: AccessMode,
+    phase: &crate::spavn_engine::AgentPhase,
     default_host: &str,
     quota_badge: &str,
 ) {
@@ -386,6 +387,10 @@ pub fn set_sticky_dock_status(
         AccessMode::Auto => YELLOW,
         AccessMode::Sovereign => RED,
     };
+    let phase_color = match phase {
+        crate::spavn_engine::AgentPhase::Plan => MAGENTA,
+        crate::spavn_engine::AgentPhase::Code => GREEN,
+    };
     let model_badge = if endpoint.is_local() {
         format!("🟢 {}{}{}", GREEN, endpoint.key, RESET)
     } else {
@@ -393,12 +398,17 @@ pub fn set_sticky_dock_status(
     };
     let eff_quota = effective_quota_badge(endpoint, quota_badge);
     let line = format!(
-        "{}╭─{} {}{}{}{} {}│{} {} {}│{} 🖥️  {}{}{} {}│{} {}",
+        "{}╭─{} {}{}{}{} {}│{} {}{}{} {}│{} {} {}│{} 🖥️  {}{}{} {}│{} {}",
         CYAN,
         RESET,
         BOLD,
         access_color,
         access.short_badge(),
+        RESET,
+        CYAN,
+        RESET,
+        phase_color,
+        phase.short_badge(),
         RESET,
         CYAN,
         RESET,
@@ -821,6 +831,7 @@ pub fn flex_wrap_items(
 fn render_inline_dock(
     endpoint: &ModelEndpoint,
     access: AccessMode,
+    phase: &crate::spavn_engine::AgentPhase,
     default_host: &str,
     quota_badge: &str,
     visible_input: &str,
@@ -839,6 +850,10 @@ fn render_inline_dock(
         AccessMode::Safe => CYAN,
         AccessMode::Auto => YELLOW,
         AccessMode::Sovereign => RED,
+    };
+    let phase_color = match phase {
+        crate::spavn_engine::AgentPhase::Plan => MAGENTA,
+        crate::spavn_engine::AgentPhase::Code => GREEN,
     };
 
     let queue_tag = if queued_count > 0 {
@@ -860,12 +875,13 @@ fn render_inline_dock(
     };
     let status_items = vec![
         format!("{}{}{}{}", BOLD, access_color, access.short_badge(), RESET),
+        format!("{}{}{}", phase_color, phase.short_badge(), RESET),
         model_badge,
         format!("🖥️  {}{}{}", MAGENTA, default_host, RESET),
         effective_quota_badge(endpoint, quota_badge),
         format!("{}{}{}", CYAN, lang_badge, RESET),
     ];
-    set_sticky_dock_status(endpoint, access, default_host, quota_badge);
+    set_sticky_dock_status(endpoint, access, phase, default_host, quota_badge);
     let top_prefix_first = format!("{}╭─{} ", CYAN, RESET);
     let top_prefix_cont = format!("{}│{}  ", CYAN, RESET);
     let top_sep = format!(" {}│{} ", CYAN, RESET);
@@ -1048,6 +1064,7 @@ pub fn redraw_full_viewport(
 pub enum PromptEvent {
     Submit(String),
     CycleAccess,
+    CyclePhase,
     Reload,
     ShowSkills,
     Exit,
@@ -1057,6 +1074,7 @@ pub enum PromptEvent {
 pub fn read_bottom_dock_input(
     endpoint: &ModelEndpoint,
     access: &mut AccessMode,
+    phase: &crate::spavn_engine::AgentPhase,
     default_host: &str,
     quota_badge: &str,
     history: &[String],
@@ -1165,6 +1183,7 @@ pub fn read_bottom_dock_input(
             render_inline_dock(
                 endpoint,
                 *access,
+                phase,
                 default_host,
                 quota_badge,
                 &visible_slice,
@@ -1349,6 +1368,13 @@ pub fn read_bottom_dock_input(
                         tcsetattr(0, TCSANOW, &orig_termios);
                     }
                     return PromptEvent::Reload;
+                }
+                92 => {
+                    erase_inline_dock(prev_top_w, prev_cursor_col);
+                    unsafe {
+                        tcsetattr(0, TCSANOW, &orig_termios);
+                    }
+                    return PromptEvent::CyclePhase;
                 }
                 19 => {
                     erase_inline_dock(prev_top_w, prev_cursor_col);
