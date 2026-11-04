@@ -694,7 +694,7 @@ fn run_command_with_timeout(
                     timed_out = true;
                     break -1;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(25));
+                std::thread::sleep(std::time::Duration::from_millis(4));
             }
             Err(e) => return Err(e.to_string()),
         }
@@ -1527,73 +1527,7 @@ fn run_instant_syntax_check(raw_path: &str, content: &str) -> String {
                 String::new()
             }
         }
-        "rs" => {
-            let open_braces = content.matches('{').count();
-            let close_braces = content.matches('}').count();
-            let brace_note = if open_braces != close_braces {
-                format!(
-                    "\n[AUTO-DIAGNOSTIC WARNING in {}: Brace count mismatch ('{{': {}, '}}': {}) — verify block closure]",
-                    raw_path, open_braces, close_braces
-                )
-            } else {
-                " [Syntax Check: RS Braces Balanced]".to_string()
-            };
-            if let Some(cargo_dir) = find_project_manifest_dir(&path, "Cargo.toml") {
-                let mut cmd = Command::new("cargo");
-                cmd.args(["check", "--message-format=short", "-q"])
-                    .current_dir(&cargo_dir);
-                if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 12) {
-                    if !timed_out {
-                        if code == 0 {
-                            return format!("{} [Compiler Check: cargo check OK]", brace_note);
-                        } else {
-                            let diag = first_n_diagnostic_lines(&out, &err, 15);
-                            if !diag.is_empty() {
-                                return format!(
-                                    "{}\n[AUTO-DIAGNOSTIC COMPILER ERROR in {}]:\n{}",
-                                    brace_note, raw_path, diag
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            brace_note
-        }
-        "ts" | "tsx" => {
-            let open_braces = content.matches('{').count();
-            let close_braces = content.matches('}').count();
-            let brace_note = if open_braces != close_braces {
-                format!(
-                    "\n[AUTO-DIAGNOSTIC WARNING in {}: Brace count mismatch ('{{': {}, '}}': {}) — verify block closure]",
-                    raw_path, open_braces, close_braces
-                )
-            } else {
-                format!(" [Syntax Check: {} Braces Balanced]", ext.to_uppercase())
-            };
-            if let Some(ts_dir) = find_project_manifest_dir(&path, "tsconfig.json") {
-                let mut cmd = Command::new("tsc");
-                cmd.args(["--noEmit", "--pretty", "false"])
-                    .current_dir(&ts_dir);
-                if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 10) {
-                    if !timed_out {
-                        if code == 0 {
-                            return format!("{} [Compiler Check: tsc OK]", brace_note);
-                        } else {
-                            let diag = first_n_diagnostic_lines(&out, &err, 15);
-                            if !diag.is_empty() {
-                                return format!(
-                                    "{}\n[AUTO-DIAGNOSTIC COMPILER ERROR in {}]:\n{}",
-                                    brace_note, raw_path, diag
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            brace_note
-        }
-        "go" | "swift" => {
+        "rs" | "ts" | "tsx" | "go" | "swift" => {
             let open_braces = content.matches('{').count();
             let close_braces = content.matches('}').count();
             if open_braces != close_braces {
