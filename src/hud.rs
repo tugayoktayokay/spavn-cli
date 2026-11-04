@@ -1228,6 +1228,14 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                 tr_en("/compact (Sıkıştır)", "/compact (Compact Context)"),
             ),
             ("/undo", tr_en("/undo (Geri Al)", "/undo (Undo Last Edit)")),
+            (
+                "/diff",
+                tr_en("/diff (Git Değişiklikleri)", "/diff (Git Diff Inspector)"),
+            ),
+            (
+                "/commit",
+                tr_en("/commit (Akıllı Git Commit)", "/commit (Smart Git Commit)"),
+            ),
             ("/todo", tr_en("/todo (Görev Takibi)", "/todo (Live Tasks)")),
             (
                 "/reload",
@@ -1259,6 +1267,8 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                     || (q == "/c" && *k == "/compact")
                     || (q == "/u" && *k == "/undo")
                     || (q == "/r" && *k == "/reload")
+                    || (q == "/cm" && *k == "/commit")
+                    || (q == "/d" && *k == "/diff")
             })
             .map(|(k, l)| (k.to_string(), l.to_string()))
             .collect();
@@ -1267,15 +1277,41 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
         let tail = &input_buf[at_idx..];
         if !tail.contains(' ') {
             let q = tail.trim_start_matches('@').to_lowercase();
+            let mut out = Vec::new();
+            // 1. Project file suggestions
+            if let Ok(git_out) = std::process::Command::new("git")
+                .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+                .output()
+            {
+                if git_out.status.success() {
+                    let text = String::from_utf8_lossy(&git_out.stdout);
+                    for line in text.lines().take(400) {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            let lower = trimmed.to_lowercase();
+                            if q.is_empty() || lower.contains(&q) {
+                                let token = format!("@{}", trimmed);
+                                out.push((token.clone(), token));
+                                if out.len() >= 12 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // 2. Discovered skills
             let skills = crate::skills::discover_skills();
-            return skills
-                .into_iter()
-                .filter(|s| s.name.to_lowercase().starts_with(&q))
-                .map(|s| {
+            for s in skills {
+                if q.is_empty() || s.name.to_lowercase().contains(&q) {
                     let token = format!("@{}", s.name);
-                    (token.clone(), token)
-                })
-                .collect();
+                    out.push((token.clone(), format!("{} (Skill)", token)));
+                    if out.len() >= 15 {
+                        break;
+                    }
+                }
+            }
+            return out;
         }
     }
     Vec::new()
@@ -1658,8 +1694,14 @@ fn render_inline_dock(
         let mut h_items = vec![
             format_context_usage_badge(),
             format!("{}{}{}", DIM, tr_en("/: Menü", "/: Menu"), RESET),
-            format!("{}/model{}", DIM, RESET),
-            format!("{}/login{}", DIM, RESET),
+            format!(
+                "{}{}{}",
+                DIM,
+                tr_en("@: Dosya/Skill", "@: File/Skill"),
+                RESET
+            ),
+            format!("{}/diff{}", DIM, RESET),
+            format!("{}/commit{}", DIM, RESET),
             format!(
                 "{}{}{}",
                 DIM,
@@ -1705,7 +1747,14 @@ fn render_inline_dock(
     let bottom_count = bottom_lines.len().max(1);
     let bottom_joined = bottom_lines.join("\n");
 
-    let up_to_start = (*prev_top_w).max(1);
+    let total_rendered_height = top_count + input_line_count + bottom_count;
+    let up_to_start = if *prev_top_w == 0 {
+        // First render of this input loop: allocate lines smoothly
+        print!("{}", "\n".repeat(total_rendered_height.saturating_sub(1)));
+        total_rendered_height.saturating_sub(1)
+    } else {
+        *prev_top_w
+    };
     let cursor_col = (5 + cursor_col_offset).min(full_w);
     let lines_below_cursor = bottom_count + input_line_count.saturating_sub(1 + cursor_row);
     print!(
@@ -1718,7 +1767,7 @@ fn render_inline_dock(
         cursor_col
     );
     let _ = io::stdout().flush();
-    *prev_top_w = top_count + cursor_row;
+    *prev_top_w = total_rendered_height.saturating_sub(lines_below_cursor);
     *prev_cursor_col = cursor_col;
 }
 
@@ -1863,7 +1912,7 @@ pub fn read_bottom_dock_input(
     unsafe {
         tcsetattr(0, TCSANOW, &raw);
     }
-    print!("\x1b[?2004h\n\n\n\n\x1b[2A\r");
+    print!("\x1b[?2004h");
     let _ = io::stdout().flush();
 
     let mut chars: Vec<char> = initial_prefill.unwrap_or("").chars().collect();

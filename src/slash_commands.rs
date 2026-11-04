@@ -602,6 +602,208 @@ pub fn dispatch_slash_command(
         return SlashOutcome::Handled;
     }
 
+    if input == "/diff" || input == "/d" || input.starts_with("/diff ") {
+        let path_filter = input.strip_prefix("/diff").unwrap_or("").trim();
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["diff", "--color=always"]);
+        if !path_filter.is_empty() {
+            cmd.arg("--").arg(path_filter);
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if text.trim().is_empty() {
+                    println!(
+                        "\n{}✓ {}{}",
+                        GREEN,
+                        tr_en(
+                            "Çalışma ağacında kaydedilmemiş değişiklik yok.",
+                            "Working tree clean. No uncommitted diffs."
+                        ),
+                        RESET
+                    );
+                } else {
+                    println!(
+                        "\n{}╭─ 🔍 GIT DIFF ──────────────────────────────────────────{}",
+                        CYAN, RESET
+                    );
+                    for line in text.lines().take(120) {
+                        println!("{}│{} {}", CYAN, RESET, line);
+                    }
+                    let total_lines = text.lines().count();
+                    if total_lines > 120 {
+                        println!(
+                            "{}╰─ ... ({} {} - /diff <dosya> ile filtreleyebilirsiniz){}",
+                            CYAN,
+                            total_lines - 120,
+                            tr_en("satır daha var", "more lines"),
+                            RESET
+                        );
+                    } else {
+                        println!(
+                            "{}╰────────────────────────────────────────────────────────{}",
+                            CYAN, RESET
+                        );
+                    }
+                }
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                println!("\n{}✗ Git diff hatası: {}{}", RED, err.trim(), RESET);
+            }
+            Err(e) => {
+                println!("\n{}✗ Git komutu çalıştırılamadı: {}{}", RED, e, RESET);
+            }
+        }
+        return SlashOutcome::Handled;
+    }
+
+    if input == "/commit" || input == "/cm" || input.starts_with("/commit ") {
+        let custom_msg = input
+            .strip_prefix("/commit")
+            .or_else(|| input.strip_prefix("/cm"))
+            .unwrap_or("")
+            .trim();
+        if !custom_msg.is_empty() {
+            let res = std::process::Command::new("git")
+                .args(["commit", "-am", custom_msg])
+                .output();
+            match res {
+                Ok(out) if out.status.success() => {
+                    println!(
+                        "\n{}✓ {}: \"{}\"{}",
+                        GREEN,
+                        tr_en("Commit oluşturuldu", "Committed successfully"),
+                        custom_msg,
+                        RESET
+                    );
+                }
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    println!("\n{}✗ Git commit hatası: {}{}", RED, err.trim(), RESET);
+                }
+                Err(e) => println!("\n{}✗ Git hatası: {}{}", RED, e, RESET),
+            }
+            return SlashOutcome::Handled;
+        }
+
+        // Generate smart commit message from git status & diff
+        let _diff_out = std::process::Command::new("git")
+            .args(["diff", "--staged"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        let stat_out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+
+        if stat_out.trim().is_empty() {
+            println!(
+                "\n{}✓ {}{}",
+                GREEN,
+                tr_en(
+                    "Commit edilecek bir değişiklik yok.",
+                    "Nothing to commit, working tree clean."
+                ),
+                RESET
+            );
+            return SlashOutcome::Handled;
+        }
+
+        let changed_files: Vec<&str> = stat_out
+            .lines()
+            .map(|l| l.get(3..).unwrap_or(l).trim())
+            .filter(|f| !f.is_empty())
+            .collect();
+
+        // Heuristic Conventional Commit message generator
+        let msg = if changed_files.iter().any(|f| f.contains("test")) {
+            format!(
+                "test: update test suites ({})",
+                changed_files.first().copied().unwrap_or("project")
+            )
+        } else if changed_files.iter().any(|f| f.ends_with(".md")) {
+            "docs: update documentation and project rules".to_string()
+        } else if changed_files
+            .iter()
+            .any(|f| f.contains("hud") || f.contains("ui"))
+        {
+            format!(
+                "feat(hud): refine dock layout and visual elements ({})",
+                changed_files.first().copied().unwrap_or("tui")
+            )
+        } else if changed_files
+            .iter()
+            .any(|f| f.contains("tool") || f.contains("guard"))
+        {
+            format!(
+                "fix(tools): harden file and system execution ({})",
+                changed_files.first().copied().unwrap_or("tools")
+            )
+        } else {
+            format!(
+                "feat: update {}",
+                changed_files.first().copied().unwrap_or("project")
+            )
+        };
+
+        println!(
+            "\n{}╭─ 📦 {} ────────────────────────────────────{}",
+            CYAN,
+            tr_en("AKILLI GIT COMMIT", "SMART GIT COMMIT"),
+            RESET
+        );
+        println!(
+            "{}│{}  {}Değişen Dosyalar:{} ({} dosya)",
+            CYAN,
+            RESET,
+            BOLD,
+            RESET,
+            changed_files.len()
+        );
+        for f in changed_files.iter().take(8) {
+            println!("{}│{}    • {}", CYAN, RESET, f);
+        }
+        println!(
+            "{}│{}  {}Önerilen Commit:{} \"{}{}{}\"",
+            CYAN, RESET, BOLD, RESET, GREEN, msg, RESET
+        );
+        println!(
+            "{}╰─ {} [git add -A && git commit]...{}",
+            CYAN,
+            tr_en("Çalıştırılıyor", "Executing"),
+            RESET
+        );
+
+        let _ = std::process::Command::new("git")
+            .arg("add")
+            .arg("-A")
+            .status();
+        let commit_res = std::process::Command::new("git")
+            .args(["commit", "-m", &msg])
+            .output();
+        match commit_res {
+            Ok(out) if out.status.success() => {
+                println!(
+                    "{}✓ {}{}\n",
+                    GREEN,
+                    tr_en("Commit başarıyla oluşturuldu.", "Committed successfully."),
+                    RESET
+                );
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                println!("{}✗ Commit başarısız: {}{}\n", RED, err.trim(), RESET);
+            }
+            Err(e) => println!("{}✗ Git hatası: {}{}\n", RED, e, RESET),
+        }
+        return SlashOutcome::Handled;
+    }
+
     if input == "/undo" || input == "/u" {
         match ctx.pop_undo() {
             Some(msg) => println!("\n{}{}{}", GREEN, msg, RESET),
