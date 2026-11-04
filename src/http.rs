@@ -7,8 +7,8 @@ use std::time::Duration;
 pub fn agent_stream() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_recv_response(Some(Duration::from_secs(300)))
-        .timeout_per_read(Some(Duration::from_secs(90)))
+        .timeout_recv_response(Some(Duration::from_secs(360)))
+        .timeout_per_read(Some(Duration::from_secs(180)))
         .http_status_as_error(false)
         .build();
     config.into()
