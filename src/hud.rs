@@ -258,6 +258,8 @@ struct SpinnerScreenState {
     thinking_box_open: bool,
     thinking_chars: usize,
     typing_buf: Vec<char>,
+    typing_cursor: usize,
+    typing_sel_anchor: Option<usize>,
     is_typing: bool,
     steer_mode: Option<bool>,
 }
@@ -275,6 +277,8 @@ static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
         thinking_box_open: false,
         thinking_chars: 0,
         typing_buf: Vec::new(),
+        typing_cursor: 0,
+        typing_sel_anchor: None,
         is_typing: false,
         steer_mode: None,
     });
@@ -333,18 +337,21 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
     let mut mid_lines: Vec<String> = Vec::new();
     if has_typed {
         let wrap_cols = max_w.saturating_sub(7).max(12);
-        let (wrapped, _, _) = wrap_input_lines_with_cursor(
-            &state.typing_buf,
-            state.typing_buf.len(),
-            None,
-            wrap_cols,
-        );
+        let c_pos = state.typing_cursor.min(state.typing_buf.len());
+        let cur_sel = state.typing_sel_anchor.and_then(|a| {
+            let a_clamped = a.min(state.typing_buf.len());
+            let s = a_clamped.min(c_pos);
+            let e = a_clamped.max(c_pos);
+            (s < e).then_some((s, e))
+        });
+        let (wrapped, cursor_row, _) =
+            wrap_input_lines_with_cursor(&state.typing_buf, c_pos, cur_sel, wrap_cols);
         let total_w = wrapped.len();
         let win_start = total_w.saturating_sub(4);
         let visible_slice = &wrapped[win_start..];
         for (i, line) in visible_slice.iter().enumerate() {
-            let is_last = i + 1 == visible_slice.len();
-            let cursor_block = if is_last {
+            let abs_row = win_start + i;
+            let cursor_block = if abs_row == cursor_row {
                 format!("{}█{}", CYAN, RESET)
             } else {
                 String::new()
@@ -1979,15 +1986,30 @@ pub fn read_bottom_dock_input(
                     continue;
                 }
                 if idx + 1 < n && (kbuf[idx] == b'[' || kbuf[idx] == b'O') {
-                    // Check for modified CSI sequence like `\x1b[1;2D` (Shift+Left), `\x1b[1;3D` (Alt+Left), `\x1b[1;4D` (Shift+Alt+Left)
+                    // Check for modified CSI sequence like `\x1b[1;2D` (Shift+Left), `\x1b[2D` (rxvt/iTerm), `\x1b[1;3D` (Alt+Left)
                     let csi_slice = &kbuf[idx + 1..n];
-                    if csi_slice.starts_with(b"1;") && csi_slice.len() >= 4 {
-                        let mod_byte = csi_slice[2];
-                        let final_b = csi_slice[3];
+                    let parsed_mod_csi: Option<(usize, u8, u8)> =
+                        if csi_slice.starts_with(b"1;") && csi_slice.len() >= 4 {
+                            Some((5, csi_slice[2], csi_slice[3]))
+                        } else if csi_slice.len() >= 2
+                            && matches!(csi_slice[0], b'2'..=b'9')
+                            && matches!(csi_slice[1], b'A' | b'B' | b'C' | b'D' | b'H' | b'F')
+                        {
+                            Some((3, csi_slice[0], csi_slice[1]))
+                        } else if kbuf[idx] == b'['
+                            && !csi_slice.is_empty()
+                            && matches!(csi_slice[0], b'a' | b'b' | b'c' | b'd')
+                        {
+                            // rxvt Shift+Arrows: \x1b[a, \x1b[b, \x1b[c, \x1b[d
+                            Some((2, b'2', csi_slice[0].to_ascii_uppercase()))
+                        } else {
+                            None
+                        };
+                    if let Some((advance, mod_byte, final_b)) = parsed_mod_csi {
                         if matches!(mod_byte, b'2'..=b'9')
                             && matches!(final_b, b'A' | b'B' | b'C' | b'D' | b'H' | b'F')
                         {
-                            idx += 5; // '[' + "1;X" + final_b
+                            idx += advance;
                             let mod_val = mod_byte - b'0';
                             let has_shift = ((mod_val - 1) & 1) != 0;
                             let has_alt_or_ctrl = ((mod_val - 1) & 6) != 0;
@@ -2076,8 +2098,9 @@ pub fn read_bottom_dock_input(
                             let _ = PromptEvent::CycleAccess;
                         }
                         b'A' => {
-                            sel_anchor = None;
-                            if !cur_suggestions.is_empty() {
+                            if sel_anchor.is_some() {
+                                sel_anchor = None;
+                            } else if !cur_suggestions.is_empty() {
                                 let cur = suggestion_idx.unwrap_or(0);
                                 let prev = if cur == 0 {
                                     cur_suggestions.len() - 1
@@ -2100,8 +2123,9 @@ pub fn read_bottom_dock_input(
                             }
                         }
                         b'B' => {
-                            sel_anchor = None;
-                            if !cur_suggestions.is_empty() {
+                            if sel_anchor.is_some() {
+                                sel_anchor = None;
+                            } else if !cur_suggestions.is_empty() {
                                 let cur = suggestion_idx.unwrap_or(0);
                                 let next = (cur + 1) % cur_suggestions.len();
                                 suggestion_idx = Some(next);
@@ -2556,17 +2580,29 @@ impl LiveSpinner {
                     if n_read > 0 {
                         let n = n_read as usize;
                         if let Ok(mut state) = SPINNER_SCREEN.lock() {
+                            state.typing_cursor = state.typing_cursor.min(state.typing_buf.len());
                             if n == 1 && kbuf[0] == 27 {
-                                if state.is_typing || !state.typing_buf.is_empty() {
+                                if state.typing_sel_anchor.is_some() {
+                                    state.typing_sel_anchor = None;
+                                } else if state.is_typing || !state.typing_buf.is_empty() {
                                     state.typing_buf.clear();
+                                    state.typing_cursor = 0;
+                                    state.typing_sel_anchor = None;
                                     state.is_typing = false;
                                 } else {
                                     crate::trigger_interrupt();
                                     should_break = true;
                                 }
                             } else if kbuf[..n].contains(&3) {
-                                crate::trigger_interrupt();
-                                should_break = true;
+                                if !state.typing_buf.is_empty() {
+                                    state.typing_buf.clear();
+                                    state.typing_cursor = 0;
+                                    state.typing_sel_anchor = None;
+                                    state.is_typing = false;
+                                } else {
+                                    crate::trigger_interrupt();
+                                    should_break = true;
+                                }
                             } else {
                                 let mut bi = 0usize;
                                 while bi < n {
@@ -2581,14 +2617,32 @@ impl LiveSpinner {
                                         }
                                         if bi + 1 < n && (kbuf[bi + 1] == 127 || kbuf[bi + 1] == 8)
                                         {
-                                            while state.typing_buf.last() == Some(&' ') {
-                                                state.typing_buf.pop();
-                                            }
-                                            while let Some(&c) = state.typing_buf.last() {
-                                                if c == ' ' {
-                                                    break;
+                                            if let Some(a) = state.typing_sel_anchor.take() {
+                                                let s = a
+                                                    .min(state.typing_cursor)
+                                                    .min(state.typing_buf.len());
+                                                let e = a
+                                                    .max(state.typing_cursor)
+                                                    .min(state.typing_buf.len());
+                                                if s < e {
+                                                    state.typing_buf.drain(s..e);
+                                                    state.typing_cursor = s;
                                                 }
-                                                state.typing_buf.pop();
+                                            } else {
+                                                let mut c = state.typing_cursor;
+                                                while c > 0
+                                                    && state.typing_buf[c - 1].is_whitespace()
+                                                {
+                                                    state.typing_buf.remove(c - 1);
+                                                    c -= 1;
+                                                }
+                                                while c > 0
+                                                    && !state.typing_buf[c - 1].is_whitespace()
+                                                {
+                                                    state.typing_buf.remove(c - 1);
+                                                    c -= 1;
+                                                }
+                                                state.typing_cursor = c;
                                             }
                                             if state.typing_buf.is_empty() {
                                                 state.is_typing = false;
@@ -2596,33 +2650,241 @@ impl LiveSpinner {
                                             bi += 2;
                                             continue;
                                         }
+                                        if bi + 1 < n
+                                            && (kbuf[bi + 1] == b'b' || kbuf[bi + 1] == b'B')
+                                        {
+                                            let is_shift = kbuf[bi + 1] == b'B';
+                                            if is_shift {
+                                                if state.typing_sel_anchor.is_none() {
+                                                    state.typing_sel_anchor =
+                                                        Some(state.typing_cursor);
+                                                }
+                                            } else {
+                                                state.typing_sel_anchor = None;
+                                            }
+                                            let mut c = state.typing_cursor;
+                                            while c > 0 && state.typing_buf[c - 1].is_whitespace() {
+                                                c -= 1;
+                                            }
+                                            while c > 0 && !state.typing_buf[c - 1].is_whitespace()
+                                            {
+                                                c -= 1;
+                                            }
+                                            state.typing_cursor = c;
+                                            if state.typing_sel_anchor == Some(state.typing_cursor)
+                                            {
+                                                state.typing_sel_anchor = None;
+                                            }
+                                            bi += 2;
+                                            continue;
+                                        }
+                                        if bi + 1 < n
+                                            && (kbuf[bi + 1] == b'f' || kbuf[bi + 1] == b'F')
+                                        {
+                                            let is_shift = kbuf[bi + 1] == b'F';
+                                            if is_shift {
+                                                if state.typing_sel_anchor.is_none() {
+                                                    state.typing_sel_anchor =
+                                                        Some(state.typing_cursor);
+                                                }
+                                            } else {
+                                                state.typing_sel_anchor = None;
+                                            }
+                                            let mut c = state.typing_cursor;
+                                            while c < state.typing_buf.len()
+                                                && state.typing_buf[c].is_whitespace()
+                                            {
+                                                c += 1;
+                                            }
+                                            while c < state.typing_buf.len()
+                                                && !state.typing_buf[c].is_whitespace()
+                                            {
+                                                c += 1;
+                                            }
+                                            state.typing_cursor = c;
+                                            if state.typing_sel_anchor == Some(state.typing_cursor)
+                                            {
+                                                state.typing_sel_anchor = None;
+                                            }
+                                            bi += 2;
+                                            continue;
+                                        }
                                         bi += 1;
                                         if bi < n && (kbuf[bi] == b'[' || kbuf[bi] == b'O') {
                                             bi += 1;
-                                            if bi < n
-                                                && kbuf[bi] == b'A'
-                                                && state.typing_buf.is_empty()
-                                            {
-                                                // Up-Arrow while input is empty: pull last queued/steered message back for editing!
-                                                if let Some((was_steer, popped)) =
-                                                    crate::pop_last_pending_message()
+                                            let csi_rem = &kbuf[bi..n];
+                                            if csi_rem.starts_with(b"1;") && csi_rem.len() >= 4 {
+                                                let mod_byte = csi_rem[2];
+                                                let final_b = csi_rem[3];
+                                                if matches!(mod_byte, b'2'..=b'9')
+                                                    && matches!(
+                                                        final_b,
+                                                        b'A' | b'B' | b'C' | b'D' | b'H' | b'F'
+                                                    )
                                                 {
-                                                    state.steer_mode = Some(was_steer);
-                                                    state.typing_buf = popped.chars().collect();
-                                                    state.is_typing = !state.typing_buf.is_empty();
+                                                    bi += 4;
+                                                    let mod_val = mod_byte - b'0';
+                                                    let has_shift = ((mod_val - 1) & 1) != 0;
+                                                    let has_alt_or_ctrl = ((mod_val - 1) & 6) != 0;
+                                                    if has_shift {
+                                                        if state.typing_sel_anchor.is_none() {
+                                                            state.typing_sel_anchor =
+                                                                Some(state.typing_cursor);
+                                                        }
+                                                    } else {
+                                                        state.typing_sel_anchor = None;
+                                                    }
+                                                    match final_b {
+                                                        b'D' => {
+                                                            if has_alt_or_ctrl {
+                                                                let mut c = state.typing_cursor;
+                                                                while c > 0
+                                                                    && state.typing_buf[c - 1]
+                                                                        .is_whitespace()
+                                                                {
+                                                                    c -= 1;
+                                                                }
+                                                                while c > 0
+                                                                    && !state.typing_buf[c - 1]
+                                                                        .is_whitespace()
+                                                                {
+                                                                    c -= 1;
+                                                                }
+                                                                state.typing_cursor = c;
+                                                            } else {
+                                                                state.typing_cursor = state
+                                                                    .typing_cursor
+                                                                    .saturating_sub(1);
+                                                            }
+                                                        }
+                                                        b'C' => {
+                                                            if has_alt_or_ctrl {
+                                                                let mut c = state.typing_cursor;
+                                                                while c < state.typing_buf.len()
+                                                                    && state.typing_buf[c]
+                                                                        .is_whitespace()
+                                                                {
+                                                                    c += 1;
+                                                                }
+                                                                while c < state.typing_buf.len()
+                                                                    && !state.typing_buf[c]
+                                                                        .is_whitespace()
+                                                                {
+                                                                    c += 1;
+                                                                }
+                                                                state.typing_cursor = c;
+                                                            } else if state.typing_cursor
+                                                                < state.typing_buf.len()
+                                                            {
+                                                                state.typing_cursor += 1;
+                                                            }
+                                                        }
+                                                        b'H' | b'A' => state.typing_cursor = 0,
+                                                        b'F' | b'B' => {
+                                                            state.typing_cursor =
+                                                                state.typing_buf.len()
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                    if state.typing_sel_anchor
+                                                        == Some(state.typing_cursor)
+                                                    {
+                                                        state.typing_sel_anchor = None;
+                                                    }
+                                                    continue;
                                                 }
-                                                bi += 1;
-                                                continue;
                                             }
-                                            if bi + 1 < n
-                                                && kbuf[bi] == b'3'
-                                                && kbuf[bi + 1] == b'~'
-                                                && state.typing_buf.is_empty()
-                                            {
-                                                // Delete key while input is empty: cancel last queued/steered message
-                                                let _ = crate::pop_last_pending_message();
-                                                bi += 2;
-                                                continue;
+                                            if bi < n {
+                                                match kbuf[bi] {
+                                                    b'A' if state.typing_buf.is_empty() => {
+                                                        if let Some((was_steer, popped)) =
+                                                            crate::pop_last_pending_message()
+                                                        {
+                                                            state.steer_mode = Some(was_steer);
+                                                            state.typing_buf =
+                                                                popped.chars().collect();
+                                                            state.typing_cursor =
+                                                                state.typing_buf.len();
+                                                            state.typing_sel_anchor = None;
+                                                            state.is_typing =
+                                                                !state.typing_buf.is_empty();
+                                                        }
+                                                        bi += 1;
+                                                        continue;
+                                                    }
+                                                    b'C' => {
+                                                        if let Some(a) =
+                                                            state.typing_sel_anchor.take()
+                                                        {
+                                                            state.typing_cursor = a
+                                                                .max(state.typing_cursor)
+                                                                .min(state.typing_buf.len());
+                                                        } else if state.typing_cursor
+                                                            < state.typing_buf.len()
+                                                        {
+                                                            state.typing_cursor += 1;
+                                                        }
+                                                        bi += 1;
+                                                        continue;
+                                                    }
+                                                    b'D' => {
+                                                        if let Some(a) =
+                                                            state.typing_sel_anchor.take()
+                                                        {
+                                                            state.typing_cursor =
+                                                                a.min(state.typing_cursor);
+                                                        } else {
+                                                            state.typing_cursor = state
+                                                                .typing_cursor
+                                                                .saturating_sub(1);
+                                                        }
+                                                        bi += 1;
+                                                        continue;
+                                                    }
+                                                    b'H' => {
+                                                        state.typing_sel_anchor = None;
+                                                        state.typing_cursor = 0;
+                                                        bi += 1;
+                                                        continue;
+                                                    }
+                                                    b'F' => {
+                                                        state.typing_sel_anchor = None;
+                                                        state.typing_cursor =
+                                                            state.typing_buf.len();
+                                                        bi += 1;
+                                                        continue;
+                                                    }
+                                                    b'3' if bi + 1 < n && kbuf[bi + 1] == b'~' => {
+                                                        if state.typing_buf.is_empty() {
+                                                            let _ =
+                                                                crate::pop_last_pending_message();
+                                                        } else if let Some(a) =
+                                                            state.typing_sel_anchor.take()
+                                                        {
+                                                            let s = a
+                                                                .min(state.typing_cursor)
+                                                                .min(state.typing_buf.len());
+                                                            let e = a
+                                                                .max(state.typing_cursor)
+                                                                .min(state.typing_buf.len());
+                                                            if s < e {
+                                                                state.typing_buf.drain(s..e);
+                                                                state.typing_cursor = s;
+                                                            }
+                                                        } else if state.typing_cursor
+                                                            < state.typing_buf.len()
+                                                        {
+                                                            let c_idx = state.typing_cursor;
+                                                            state.typing_buf.remove(c_idx);
+                                                        }
+                                                        if state.typing_buf.is_empty() {
+                                                            state.is_typing = false;
+                                                        }
+                                                        bi += 2;
+                                                        continue;
+                                                    }
+                                                    _ => {}
+                                                }
                                             }
                                             while bi < n && !(b'@'..=b'~').contains(&kbuf[bi]) {
                                                 bi += 1;
@@ -2630,8 +2892,12 @@ impl LiveSpinner {
                                             if bi < n {
                                                 bi += 1;
                                             }
+                                        } else if state.typing_sel_anchor.is_some() {
+                                            state.typing_sel_anchor = None;
                                         } else if state.is_typing || !state.typing_buf.is_empty() {
                                             state.typing_buf.clear();
+                                            state.typing_cursor = 0;
+                                            state.typing_sel_anchor = None;
                                             state.is_typing = false;
                                         }
                                         continue;
@@ -2650,7 +2916,11 @@ impl LiveSpinner {
                                                     state.is_typing = true;
                                                     if state.typing_buf.last().copied() != Some(' ')
                                                     {
-                                                        state.typing_buf.push(' ');
+                                                        let c_pos = state
+                                                            .typing_cursor
+                                                            .min(state.typing_buf.len());
+                                                        state.typing_buf.insert(c_pos, ' ');
+                                                        state.typing_cursor = c_pos + 1;
                                                     }
                                                 }
                                                 bi += 1;
@@ -2659,6 +2929,8 @@ impl LiveSpinner {
                                             let msg: String = state.typing_buf.iter().collect();
                                             let trimmed = msg.trim().to_string();
                                             state.typing_buf.clear();
+                                            state.typing_cursor = 0;
+                                            state.typing_sel_anchor = None;
                                             state.is_typing = false;
                                             if !trimmed.is_empty() {
                                                 if trimmed.starts_with('/') {
@@ -2697,17 +2969,60 @@ impl LiveSpinner {
                                             }
                                             bi += 1;
                                         }
-                                        127 | 8 => {
-                                            let cur_len = state.typing_buf.len();
-                                            if let Some((start, end)) =
-                                                image_token_span_before_cursor(
-                                                    &state.typing_buf,
-                                                    cur_len,
-                                                )
+                                        1 => {
+                                            if !state.typing_buf.is_empty()
+                                                && state.typing_sel_anchor != Some(0)
                                             {
-                                                state.typing_buf.drain(start..end);
+                                                state.typing_sel_anchor = Some(0);
+                                                state.typing_cursor = state.typing_buf.len();
                                             } else {
-                                                state.typing_buf.pop();
+                                                state.typing_sel_anchor = None;
+                                                state.typing_cursor = 0;
+                                            }
+                                            bi += 1;
+                                        }
+                                        5 => {
+                                            state.typing_sel_anchor = None;
+                                            state.typing_cursor = state.typing_buf.len();
+                                            bi += 1;
+                                        }
+                                        11 => {
+                                            state.typing_sel_anchor = None;
+                                            let c_pos =
+                                                state.typing_cursor.min(state.typing_buf.len());
+                                            state.typing_buf.truncate(c_pos);
+                                            if state.typing_buf.is_empty() {
+                                                state.is_typing = false;
+                                            }
+                                            bi += 1;
+                                        }
+                                        127 | 8 => {
+                                            if let Some(a) = state.typing_sel_anchor.take() {
+                                                let s = a
+                                                    .min(state.typing_cursor)
+                                                    .min(state.typing_buf.len());
+                                                let e = a
+                                                    .max(state.typing_cursor)
+                                                    .min(state.typing_buf.len());
+                                                if s < e {
+                                                    state.typing_buf.drain(s..e);
+                                                    state.typing_cursor = s;
+                                                }
+                                            } else {
+                                                let c_pos =
+                                                    state.typing_cursor.min(state.typing_buf.len());
+                                                if let Some((start, end)) =
+                                                    image_token_span_before_cursor(
+                                                        &state.typing_buf,
+                                                        c_pos,
+                                                    )
+                                                {
+                                                    state.typing_buf.drain(start..end);
+                                                    state.typing_cursor = start;
+                                                } else if c_pos > 0 {
+                                                    state.typing_buf.remove(c_pos - 1);
+                                                    state.typing_cursor = c_pos - 1;
+                                                }
                                             }
                                             if state.typing_buf.is_empty() {
                                                 state.is_typing = false;
@@ -2719,6 +3034,8 @@ impl LiveSpinner {
                                                 let _ = crate::pop_last_pending_message();
                                             } else {
                                                 state.typing_buf.clear();
+                                                state.typing_cursor = 0;
+                                                state.typing_sel_anchor = None;
                                                 state.is_typing = false;
                                             }
                                             bi += 1;
@@ -2729,14 +3046,33 @@ impl LiveSpinner {
                                             bi += 1;
                                         }
                                         23 => {
-                                            while state.typing_buf.last() == Some(&' ') {
-                                                state.typing_buf.pop();
-                                            }
-                                            while let Some(&c) = state.typing_buf.last() {
-                                                if c == ' ' {
-                                                    break;
+                                            if let Some(a) = state.typing_sel_anchor.take() {
+                                                let s = a
+                                                    .min(state.typing_cursor)
+                                                    .min(state.typing_buf.len());
+                                                let e = a
+                                                    .max(state.typing_cursor)
+                                                    .min(state.typing_buf.len());
+                                                if s < e {
+                                                    state.typing_buf.drain(s..e);
+                                                    state.typing_cursor = s;
                                                 }
-                                                state.typing_buf.pop();
+                                            } else {
+                                                let mut c =
+                                                    state.typing_cursor.min(state.typing_buf.len());
+                                                while c > 0
+                                                    && state.typing_buf[c - 1].is_whitespace()
+                                                {
+                                                    state.typing_buf.remove(c - 1);
+                                                    c -= 1;
+                                                }
+                                                while c > 0
+                                                    && !state.typing_buf[c - 1].is_whitespace()
+                                                {
+                                                    state.typing_buf.remove(c - 1);
+                                                    c -= 1;
+                                                }
+                                                state.typing_cursor = c;
                                             }
                                             if state.typing_buf.is_empty() {
                                                 state.is_typing = false;
@@ -2765,9 +3101,25 @@ impl LiveSpinner {
                                                 }
                                             }
                                             if let Ok(s) = std::str::from_utf8(&utf8_bytes) {
+                                                if let Some(a) = state.typing_sel_anchor.take() {
+                                                    let st = a
+                                                        .min(state.typing_cursor)
+                                                        .min(state.typing_buf.len());
+                                                    let en = a
+                                                        .max(state.typing_cursor)
+                                                        .min(state.typing_buf.len());
+                                                    if st < en {
+                                                        state.typing_buf.drain(st..en);
+                                                        state.typing_cursor = st;
+                                                    }
+                                                }
                                                 for ch in s.chars() {
                                                     state.is_typing = true;
-                                                    state.typing_buf.push(ch);
+                                                    let c_pos = state
+                                                        .typing_cursor
+                                                        .min(state.typing_buf.len());
+                                                    state.typing_buf.insert(c_pos, ch);
+                                                    state.typing_cursor = c_pos + 1;
                                                 }
                                                 let cur_s: String =
                                                     state.typing_buf.iter().collect();
@@ -2779,6 +3131,9 @@ impl LiveSpinner {
                                                     if changed {
                                                         state.typing_buf =
                                                             collapsed.chars().collect();
+                                                        state.typing_cursor =
+                                                            state.typing_buf.len();
+                                                        state.typing_sel_anchor = None;
                                                     }
                                                 }
                                             }
