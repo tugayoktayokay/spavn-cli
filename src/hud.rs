@@ -344,26 +344,17 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
             let e = a_clamped.max(c_pos);
             (s < e).then_some((s, e))
         });
-        let (wrapped, cursor_row, _) =
+        let (wrapped, _, _) =
             wrap_input_lines_with_cursor(&state.typing_buf, c_pos, cur_sel, wrap_cols);
         let total_w = wrapped.len();
         let win_start = total_w.saturating_sub(4);
         let visible_slice = &wrapped[win_start..];
         for (i, line) in visible_slice.iter().enumerate() {
-            let abs_row = win_start + i;
-            let cursor_block = if abs_row == cursor_row {
-                format!("{}█{}", CYAN, RESET)
-            } else {
-                String::new()
-            };
             let styled = style_inline_image_tokens(line);
             let raw_row = if i == 0 {
-                format!(
-                    "{}│{} {}❯{} {}{}",
-                    CYAN, RESET, BOLD, RESET, styled, cursor_block
-                )
+                format!("{}│{} {}❯{} {}", CYAN, RESET, BOLD, RESET, styled)
             } else {
-                format!("{}│{}   {}{}", CYAN, RESET, styled, cursor_block)
+                format!("{}│{}   {}", CYAN, RESET, styled)
             };
             let (trunc_row, _) = truncate_ansi_to_width(&raw_row, max_w);
             mid_lines.push(trunc_row);
@@ -1381,7 +1372,19 @@ fn wrap_input_lines_with_cursor(
             cur_line.push_str(if want_sel { "\x1b[7m" } else { "\x1b[27m" });
             in_sel = want_sel;
         }
-        cur_line.push(ch);
+        if i == cursor_pos && !chars.is_empty() {
+            if in_sel {
+                cur_line.push_str("\x1b[27m");
+            }
+            cur_line.push_str("\x1b[46;30m");
+            cur_line.push(ch);
+            cur_line.push_str("\x1b[0m");
+            if in_sel {
+                cur_line.push_str("\x1b[7m");
+            }
+        } else {
+            cur_line.push(ch);
+        }
         cur_w += w;
     }
 
@@ -1391,6 +1394,9 @@ fn wrap_input_lines_with_cursor(
     if !cursor_recorded {
         cursor_row = lines.len();
         cursor_col_offset = cur_w;
+        if !chars.is_empty() {
+            cur_line.push_str(&format!("{}█{}", CYAN, RESET));
+        }
     }
     lines.push(cur_line);
     if lines.is_empty() {
@@ -1482,10 +1488,12 @@ fn render_inline_dock(
             let raw = if idx == 0 {
                 if input_chars.is_empty() && suggestions.is_empty() {
                     format!(
-                        "{}│{} {}❯{}   {}{}{}",
+                        "{}│{} {}❯{} {}█{} {}{}{}",
                         CYAN,
                         RESET,
                         BOLD,
+                        RESET,
+                        CYAN,
                         RESET,
                         DIM,
                         tr_en(
@@ -1592,7 +1600,7 @@ fn render_inline_dock(
     let cursor_col = (5 + cursor_col_offset).min(full_w);
     let lines_below_cursor = bottom_count + input_line_count.saturating_sub(1 + cursor_row);
     print!(
-        "\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[{}A\r\x1b[J{}\n{}\n{}\x1b[?7h\x1b[{}A\r\x1b[{}G\x1b[?25h\x1b[?2026l",
+        "\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[{}A\r\x1b[J{}\n{}\n{}\x1b[?7h\x1b[{}A\r\x1b[{}G\x1b[?2026l",
         up_to_start,
         top_joined,
         input_joined,
