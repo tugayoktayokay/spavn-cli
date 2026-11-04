@@ -108,6 +108,21 @@ pub fn pop_last_pending_message() -> Option<(bool, String)> {
     None
 }
 
+pub fn list_pending_messages() -> Vec<(bool, String)> {
+    let mut out = Vec::new();
+    if let Ok(sq) = STEER_QUEUE.lock() {
+        for m in sq.iter() {
+            out.push((true, m.clone()));
+        }
+    }
+    if let Ok(pq) = PROMPT_QUEUE.lock() {
+        for m in pq.iter() {
+            out.push((false, m.clone()));
+        }
+    }
+    out
+}
+
 pub fn list_queued_messages() -> Vec<String> {
     PROMPT_QUEUE
         .lock()

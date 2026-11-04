@@ -335,6 +335,64 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
     let (top_line, _) = truncate_ansi_to_width(&top_raw, max_w);
     let has_typed = state.is_typing || !state.typing_buf.is_empty();
     let mut mid_lines: Vec<String> = Vec::new();
+    let pending_list = crate::list_pending_messages();
+    if !pending_list.is_empty() {
+        let total_p = pending_list.len();
+        let show_slice = &pending_list[total_p.saturating_sub(2)..];
+        for (idx_in_slice, (is_steer, pending_txt)) in show_slice.iter().enumerate() {
+            let abs_idx = total_p.saturating_sub(show_slice.len()) + idx_in_slice + 1;
+            let short_p: String = pending_txt
+                .chars()
+                .take(max_w.saturating_sub(42).max(16))
+                .collect();
+            let badge = if *is_steer {
+                format!(
+                    "{}⚡ #{}: {}{}",
+                    YELLOW,
+                    abs_idx,
+                    tr_en("Müdahale", "Steer"),
+                    RESET
+                )
+            } else {
+                format!(
+                    "{}📥 #{}: {}{}",
+                    GREEN,
+                    abs_idx,
+                    tr_en("Sırada", "Queued"),
+                    RESET
+                )
+            };
+            let is_last_pending = abs_idx == total_p;
+            let action_tag = if is_last_pending && !has_typed {
+                format!(
+                    " {}[↑: {} · Ctrl+X: {}]{}",
+                    DIM,
+                    tr_en("Düzenle", "Edit"),
+                    tr_en("İptal", "Cancel"),
+                    RESET
+                )
+            } else if is_last_pending {
+                format!(" {}[Ctrl+X: {}]{}", DIM, tr_en("İptal", "Cancel"), RESET)
+            } else {
+                String::new()
+            };
+            let raw_row = format!(
+                "{}│{}  {} {}·{} {}{}{}{}",
+                CYAN,
+                RESET,
+                badge,
+                DIM,
+                RESET,
+                BOLD,
+                style_inline_image_tokens(&short_p),
+                RESET,
+                action_tag
+            );
+            let (trunc_row, _) = truncate_ansi_to_width(&raw_row, max_w);
+            mid_lines.push(trunc_row);
+        }
+    }
+
     if has_typed {
         let wrap_cols = max_w.saturating_sub(7).max(12);
         let c_pos = state.typing_cursor.min(state.typing_buf.len());
@@ -359,36 +417,7 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
             let (trunc_row, _) = truncate_ansi_to_width(&raw_row, max_w);
             mid_lines.push(trunc_row);
         }
-    } else if let Some((is_steer, pending_txt)) = crate::peek_last_pending_message() {
-        let short_p: String = pending_txt
-            .chars()
-            .take(max_w.saturating_sub(36).max(16))
-            .collect();
-        let badge = if is_steer {
-            format!("{}⚡ {}{}", YELLOW, tr_en("Müdahale", "Steer"), RESET)
-        } else {
-            format!("{}📥 {}{}", GREEN, tr_en("Kuyruk", "Queued"), RESET)
-        };
-        let raw_row = format!(
-            "{}│{} {}❯{} {} {}·{} {}{}{} {}[↑: {} · Ctrl+X: {}]{}",
-            CYAN,
-            RESET,
-            BOLD,
-            RESET,
-            badge,
-            DIM,
-            RESET,
-            BOLD,
-            short_p,
-            RESET,
-            DIM,
-            tr_en("Düzenle", "Edit"),
-            tr_en("İptal", "Cancel"),
-            RESET
-        );
-        let (trunc_row, _) = truncate_ansi_to_width(&raw_row, max_w);
-        mid_lines.push(trunc_row);
-    } else {
+    } else if pending_list.is_empty() {
         let raw_row = format!(
             "{}│{} {}❯{} {}{}{}",
             CYAN,
@@ -1494,6 +1523,56 @@ fn render_inline_dock(
     if let Some(recap) = recap_line {
         if input_chars.is_empty() && suggestions.is_empty() {
             top_lines.push(recap.to_string());
+        }
+    }
+    let pending_idle = crate::list_pending_messages();
+    if !pending_idle.is_empty() {
+        let total_p = pending_idle.len();
+        for (idx_p, (is_steer, pending_txt)) in pending_idle
+            .iter()
+            .enumerate()
+            .skip(total_p.saturating_sub(2))
+        {
+            let short_p: String = pending_txt
+                .chars()
+                .take(full_w.saturating_sub(42).max(16))
+                .collect();
+            let badge = if *is_steer {
+                format!(
+                    "{}⚡ #{}: {}{}",
+                    YELLOW,
+                    idx_p + 1,
+                    tr_en("Müdahale", "Steer"),
+                    RESET
+                )
+            } else {
+                format!(
+                    "{}📥 #{}: {}{}",
+                    GREEN,
+                    idx_p + 1,
+                    tr_en("Sırada", "Queued"),
+                    RESET
+                )
+            };
+            let hint = if idx_p + 1 == total_p && input_chars.is_empty() {
+                format!(" {}[↑: {}]{}", DIM, tr_en("Düzenle/Al", "Edit/Pop"), RESET)
+            } else {
+                String::new()
+            };
+            let row = format!(
+                "{}│{}  {} {}·{} {}{}{}{}",
+                CYAN,
+                RESET,
+                badge,
+                DIM,
+                RESET,
+                BOLD,
+                style_inline_image_tokens(&short_p),
+                RESET,
+                hint
+            );
+            let (trunc_row, _) = truncate_ansi_to_width(&row, full_w);
+            top_lines.push(trunc_row);
         }
     }
     let top_count = top_lines.len().max(1);
