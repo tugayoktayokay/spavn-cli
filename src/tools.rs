@@ -190,6 +190,21 @@ impl ToolContext {
 }
 
 pub fn tool_definitions() -> Value {
+    let cfg = crate::config::load_user_config();
+    let mut mcp_names: Vec<String> = cfg.mcp_servers.keys().cloned().collect();
+    mcp_names.sort();
+    let mcp_hint = if mcp_names.is_empty() {
+        "Configure MCP servers in `~/.spavn/config.json` under `mcpServers`.".to_string()
+    } else {
+        format!(
+            "Configured MCP servers in `~/.spavn/config.json`: `{}`.",
+            mcp_names.join("`, `")
+        )
+    };
+    let lsp_desc = format!(
+        "Fast symbol navigation (`op='definition'`, `'references'`, `'symbols'`) and generic MCP client (`op='mcp'`, `server`, `tool`, `arguments`). Omit `tool` to list tools on a server. {}",
+        mcp_hint
+    );
     json!([
         {
             "type": "function",
@@ -362,14 +377,14 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "lsp",
-                "description": "Fast symbol navigation (`op='definition'`, `'references'`, `'symbols'`) and MCP client (`op='mcp'`, `server`, `tool`, `arguments`). Omit `tool` to list tools on a server. Configured MCP servers include `sovereign` (tools: `sovereign_inspect_all`, `sovereign_terms`, `sovereign_read`, `sovereign_send`, `sovereign_interrupt`, `sovereign_spawn`, `sovereign_chrome`, `sovereign_fleet`, `sovereign_gui`, `sovereign_sys`, `sovereign_context` — controls macOS/M2/M3/server terminals, Chrome, GUI windows, OCR & CUA), `open-computer-use` (tools: `capture_display`, `get_app_state`, `list_apps`, `list_windows`, `click`, `type_text`, `press_key`, `scroll`, `drag`), `rea`, `noospire-memory`, and `research-router`.",
+                "description": lsp_desc,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": { "type": "string", "enum": ["definition", "references", "symbols", "mcp"], "description": "Operation type" },
                         "symbol": { "type": "string", "description": "Symbol/identifier name for definition or references" },
                         "path": { "type": "string", "description": "File or directory path for symbols/search" },
-                        "server": { "type": "string", "description": "MCP server name (e.g. 'sovereign', 'open-computer-use', 'rea', 'noospire-memory', 'research-router')" },
+                        "server": { "type": "string", "description": "MCP server name configured in ~/.spavn/config.json mcpServers" },
                         "tool": { "type": "string", "description": "MCP tool name to invoke (omit to list available tools on the server)" },
                         "arguments": { "type": "object", "description": "JSON arguments for the MCP tool" }
                     },
@@ -3007,6 +3022,47 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
             raw_tool_name.to_string()
         };
         let mcp_args = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let is_mutating_mcp = !tool_name.is_empty()
+            && !matches!(
+                tool_name.as_str(),
+                "sovereign_inspect_all"
+                    | "sovereign_terms"
+                    | "sovereign_read"
+                    | "sovereign_fleet"
+                    | "sovereign_sys"
+                    | "sovereign_context"
+                    | "capture_display"
+                    | "get_app_state"
+                    | "list_apps"
+                    | "list_windows"
+            )
+            && (server_name == "sovereign"
+                || server_name == "open-computer-use"
+                || tool_name.contains("send")
+                || tool_name.contains("spawn")
+                || tool_name.contains("click")
+                || tool_name.contains("type")
+                || tool_name.contains("press")
+                || tool_name.contains("write")
+                || tool_name.contains("delete")
+                || tool_name.contains("exec"));
+        if is_mutating_mcp {
+            if ctx.phase == crate::spavn_engine::AgentPhase::Plan {
+                return format!(
+                    "BLOCKED in PLAN phase: mutating MCP tool `{}:{}` is not allowed in read-only planning mode.",
+                    server_name, tool_name
+                );
+            }
+            if ctx.access == AccessMode::Safe {
+                let preview = format!("{} {}", tool_name, mcp_args);
+                if !prompt_user_approval(ctx, &format!("mcp:{}", server_name), &preview) {
+                    return format!(
+                        "Kullanıcı MCP çağrısını reddetti: {}:{}",
+                        server_name, tool_name
+                    );
+                }
+            }
+        }
         let cfg = crate::config::load_user_config();
         let Some(srv) = cfg.mcp_servers.get(server_name) else {
             let mut available: Vec<String> = cfg.mcp_servers.keys().cloned().collect();
