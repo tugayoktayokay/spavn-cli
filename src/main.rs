@@ -423,7 +423,7 @@ fn estimate_tokens(messages: &[ChatMessage]) -> usize {
 }
 
 pub(crate) fn perform_manual_compact(
-    _endpoint: &ModelEndpoint,
+    endpoint: &ModelEndpoint,
     messages: &mut Vec<ChatMessage>,
     focus: Option<&str>,
 ) {
@@ -439,10 +439,25 @@ pub(crate) fn perform_manual_compact(
     }
 
     let before_tok = estimate_tokens(messages);
+    let mut touched_tools: Vec<String> = Vec::new();
     for m in messages.iter_mut().skip(1) {
         if let Some(ref c) = m.content {
             if c.contains("<active_skill") {
                 m.content = Some(evict_old_skill_blocks(c));
+            }
+        }
+        if let Some(ref tcs) = m.tool_calls {
+            for tc in tcs {
+                let summary =
+                    summarize_tool_args(&tc.function.name, &tc.function.arguments, "local");
+                let item = if summary.is_empty() {
+                    tc.function.name.clone()
+                } else {
+                    format!("{}({})", tc.function.name, summary)
+                };
+                if !touched_tools.contains(&item) && touched_tools.len() < 24 {
+                    touched_tools.push(item);
+                }
             }
         }
         if m.role == "tool" {
@@ -465,25 +480,96 @@ pub(crate) fn perform_manual_compact(
         while tail_start > 1 && messages[tail_start].role == "tool" {
             tail_start -= 1;
         }
-        let mut digest_lines = Vec::new();
+        let mut transcript_lines = Vec::new();
         for m in &messages[1..tail_start] {
             if m.role == "user" || m.role == "assistant" {
                 if let Some(ref c) = m.content {
-                    let first_line = c.lines().next().unwrap_or("").trim();
-                    if !first_line.is_empty() {
-                        let snippet: String = first_line.chars().take(120).collect();
-                        digest_lines.push(format!("- [{}]: {}", m.role, snippet));
+                    let clean = hud::strip_internal_tags_for_display(c);
+                    let snippet: String = clean
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                        .chars()
+                        .take(260)
+                        .collect();
+                    if !snippet.is_empty() {
+                        transcript_lines.push(format!("- [{}]: {}", m.role, snippet));
                     }
                 }
             }
         }
         let focus_note = focus.map(|f| format!(" (Odak: {})", f)).unwrap_or_default();
+
+        // Try LLM-powered semantic compaction first (OMP-style structured handoff summary),
+        // with instant fallback to algorithmic digest if offline/interrupted.
+        let mut llm_summary: Option<String> = None;
+        if !transcript_lines.is_empty() {
+            let mut spin = LiveSpinner::start(tr_en(
+                "🗜️  Bağlam LLM ile anlamsal olarak özetleniyor",
+                "🗜️  Summarizing context semantically with LLM",
+            ));
+            let focus_instruction = focus
+                .map(|f| format!("\nFocus especially on: {}", f))
+                .unwrap_or_default();
+            let prompt_body = format!(
+                "Summarize the following coding session history into a dense, high-signal technical handoff (<300 words) preserving:\n\
+                 1. Goal & User Preferences\n\
+                 2. Files Modified & Key Architectural Decisions\n\
+                 3. Current State & Pending Next Steps{}\n\n\
+                 Touched tools/files: {}\n\n\
+                 Conversation Transcript:\n{}",
+                focus_instruction,
+                if touched_tools.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    touched_tools.join(", ")
+                },
+                transcript_lines.join("\n")
+            );
+            let compact_msgs = vec![
+                ChatMessage::system(
+                    "You are SPAVN's Context Compactor. Output ONLY the structured technical handoff summary in concise bullet points. No preamble.",
+                ),
+                ChatMessage::user(prompt_body),
+            ];
+            let empty_tools = serde_json::json!([]);
+            if let Ok(res) =
+                stream_chat_completion(endpoint, &compact_msgs, &empty_tools, |_| {}, |_| {})
+            {
+                let text = res
+                    .message
+                    .content
+                    .or(res.message.reasoning_content)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if !text.is_empty() {
+                    llm_summary = Some(text);
+                }
+            }
+            spin.stop();
+        }
+
         let mut new_msgs = vec![sys];
-        if !digest_lines.is_empty() {
+        if let Some(semantic_summary) = llm_summary {
             new_msgs.push(ChatMessage::user(format!(
-                "[SPAVN Auto-Compact Özet{}]:\n{}",
+                "[SPAVN Semantic Context Handoff{}]:\n{}",
+                focus_note, semantic_summary
+            )));
+        } else if !transcript_lines.is_empty() {
+            let tools_note = if touched_tools.is_empty() {
+                String::new()
+            } else {
+                format!("\n- [tools/files]: {}", touched_tools.join(", "))
+            };
+            new_msgs.push(ChatMessage::user(format!(
+                "[SPAVN Auto-Compact Özet{}]:\n{}{}",
                 focus_note,
-                digest_lines.join("\n")
+                transcript_lines.join("\n"),
+                tools_note
             )));
         }
         new_msgs.extend_from_slice(&messages[tail_start..]);
