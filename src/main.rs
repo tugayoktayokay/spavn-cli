@@ -1716,6 +1716,13 @@ fn main() {
                 i += 1;
                 continue;
             }
+            "-p" | "--prompt" => {
+                if i + 1 < args.len() {
+                    prompt_parts.push(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+            }
             "-t" | "--think" => {
                 show_thinking = !show_thinking;
                 i += 1;
