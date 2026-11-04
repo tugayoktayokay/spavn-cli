@@ -184,11 +184,15 @@ pub struct ModelEndpoint {
 
 impl ModelEndpoint {
     pub fn is_local(&self) -> bool {
-        self.is_local_flag
-            || self.base_url.contains(":8000")
-            || self.base_url.contains(":11434")
-            || self.base_url.contains(":1234")
-            || self.base_url.contains(".local")
+        if self.is_local_flag {
+            return true;
+        }
+        let lower = self.base_url.to_lowercase();
+        // Standard loopback IP/hostnames or mDNS local network (.local domain)
+        lower.contains("127.0.0.1")
+            || lower.contains("localhost")
+            || lower.contains("::1")
+            || lower.contains(".local")
     }
 
     /// True when the endpoint speaks the native Anthropic Messages API

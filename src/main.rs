@@ -1957,15 +1957,8 @@ fn main() {
         &session_name,
     );
 
-    let is_loopback = endpoint.base_url.contains("127.0.0.1")
-        || endpoint.base_url.contains("localhost")
-        || endpoint.base_url.contains(":8046")
-        || endpoint.base_url.contains(":8999")
-        || endpoint.base_url.contains(":18765")
-        || endpoint.base_url.contains(":18773");
     if !endpoint.is_local()
         && !endpoint.has_quota_pool
-        && !is_loopback
         && (endpoint.api_key.is_empty() || endpoint.api_key == "local")
     {
         println!(
