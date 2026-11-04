@@ -362,15 +362,15 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "lsp",
-                "description": "Fast symbol navigation (`op='definition'`, `'references'`, `'symbols'`) and generic MCP client (`op='mcp'`, `server`, `tool`, `arguments`).",
+                "description": "Fast symbol navigation (`op='definition'`, `'references'`, `'symbols'`) and MCP client (`op='mcp'`, `server`, `tool`, `arguments`). Omit `tool` to list tools on a server. Configured MCP servers include `sovereign` (tools: `sovereign_inspect_all`, `sovereign_terms`, `sovereign_read`, `sovereign_send`, `sovereign_interrupt`, `sovereign_spawn`, `sovereign_chrome`, `sovereign_fleet`, `sovereign_gui`, `sovereign_sys`, `sovereign_context` — controls macOS/M2/M3/server terminals, Chrome, GUI windows, OCR & CUA), `open-computer-use` (tools: `capture_display`, `get_app_state`, `list_apps`, `list_windows`, `click`, `type_text`, `press_key`, `scroll`, `drag`), `rea`, `noospire-memory`, and `research-router`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": { "type": "string", "enum": ["definition", "references", "symbols", "mcp"], "description": "Operation type" },
                         "symbol": { "type": "string", "description": "Symbol/identifier name for definition or references" },
                         "path": { "type": "string", "description": "File or directory path for symbols/search" },
-                        "server": { "type": "string", "description": "MCP server name in ~/.spavn/config.json mcpServers (when op='mcp')" },
-                        "tool": { "type": "string", "description": "MCP tool name to invoke (when op='mcp')" },
+                        "server": { "type": "string", "description": "MCP server name (e.g. 'sovereign', 'open-computer-use', 'rea', 'noospire-memory', 'research-router')" },
+                        "tool": { "type": "string", "description": "MCP tool name to invoke (omit to list available tools on the server)" },
                         "arguments": { "type": "object", "description": "JSON arguments for the MCP tool" }
                     },
                     "required": ["op"]
@@ -2801,21 +2801,114 @@ fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
     )
 }
 
+fn format_mcp_jsonrpc_response(server_name: &str, tool_name: &str, raw_json: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(raw_json) else {
+        return raw_json.chars().take(12_000).collect();
+    };
+    if let Some(err) = v.get("error") {
+        return format!("MCP error ({}/{}): {}", server_name, tool_name, err);
+    }
+    let Some(res) = v.get("result") else {
+        return raw_json.chars().take(12_000).collect();
+    };
+    if let Some(tools_arr) = res.get("tools").and_then(|t| t.as_array()) {
+        let mut lines = vec![format!(
+            "MCP server `{}` tools ({}):",
+            server_name,
+            tools_arr.len()
+        )];
+        for t in tools_arr {
+            let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+            let desc: String = t
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .chars()
+                .take(180)
+                .collect();
+            lines.push(format!("- `{}`: {}", name, desc));
+        }
+        return lines.join("\n");
+    }
+    if let Some(content_arr) = res.get("content").and_then(|c| c.as_array()) {
+        let mut out_parts = Vec::new();
+        for (idx, item) in content_arr.iter().enumerate() {
+            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match item_type {
+                "text" => {
+                    if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
+                        out_parts.push(txt.to_string());
+                    }
+                }
+                "image" => {
+                    if let Some(b64) = item.get("data").and_then(|d| d.as_str()) {
+                        let raw_mime = item
+                            .get("mimeType")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("image/png");
+                        let mime: &'static str = match raw_mime {
+                            "image/jpeg" | "image/jpg" => "image/jpeg",
+                            "image/webp" => "image/webp",
+                            "image/gif" => "image/gif",
+                            _ => "image/png",
+                        };
+                        let approx_bytes = (b64.len() * 3) / 4;
+                        let kb = approx_bytes as f64 / 1024.0;
+                        let fname = format!("mcp-{}-{}-{}.png", server_name, tool_name, idx);
+                        let vpath = format!("/tmp/{}", fname);
+                        let drag_img = crate::router::DraggedImage {
+                            raw_span: vpath.clone(),
+                            path: vpath.clone(),
+                            filename: fname,
+                            mime,
+                            size_bytes: approx_bytes,
+                            base64: b64.to_string(),
+                        };
+                        crate::hud::render_inline_image_preview(&drag_img);
+                        crate::router::register_read_image(&vpath, drag_img);
+                        out_parts.push(format!(
+                            "[SPAVN Vision Image Loaded: {} ({}, {:.1} KB) — multimodal image attached to your visual context]",
+                            vpath, mime, kb
+                        ));
+                    }
+                }
+                _ => {
+                    out_parts.push(item.to_string());
+                }
+            }
+        }
+        if !out_parts.is_empty() {
+            let joined = out_parts.join("\n");
+            return joined.chars().take(16_000).collect();
+        }
+    }
+    res.to_string().chars().take(12_000).collect()
+}
+
 fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
     let op = get_str_alias(args, &["op", "action", "mode"]).to_ascii_lowercase();
     if op == "mcp" || !get_str_alias(args, &["server", "mcp_server"]).is_empty() {
         let server_name = get_str_alias(args, &["server", "mcp_server"]);
-        let tool_name = get_str_alias(args, &["tool", "name", "method"]);
+        let raw_tool_name = get_str_alias(args, &["tool", "name", "method"]);
+        let tool_name = if server_name == "sovereign"
+            && !raw_tool_name.is_empty()
+            && !raw_tool_name.starts_with("sovereign_")
+        {
+            format!("sovereign_{}", raw_tool_name)
+        } else {
+            raw_tool_name.to_string()
+        };
         let mcp_args = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
         let cfg = crate::config::load_user_config();
         let Some(srv) = cfg.mcp_servers.get(server_name) else {
-            let available: Vec<String> = cfg.mcp_servers.keys().cloned().collect();
+            let mut available: Vec<String> = cfg.mcp_servers.keys().cloned().collect();
+            available.sort();
             return format!(
                 "MCP server '{}' not found in ~/.spavn/config.json `mcpServers`. Configured servers: {:?}",
                 server_name, available
             );
         };
-        if let Some(ref url) = srv.url {
+        if let Some(url) = &srv.url {
             let req_body = json!({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -2830,21 +2923,33 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                 url,
                 &req_body.to_string(),
                 &[("Accept", "application/json, text/event-stream")],
-                20,
+                30,
             ) {
-                Ok((_, body)) => body.chars().take(8000).collect(),
+                Ok((_, body)) => format_mcp_jsonrpc_response(server_name, &tool_name, &body),
                 Err(e) => format!("MCP HTTP error ({}): {}", server_name, e),
             };
         }
-        if let Some(ref cmd_bin) = srv.command {
-            let mut cmd = Command::new(cmd_bin);
-            cmd.args(&srv.args)
+        if let Some(cmd_bin) = &srv.command {
+            let expanded_bin = crate::config::expand_user_path(cmd_bin);
+            let expanded_args: Vec<String> = srv
+                .args
+                .iter()
+                .map(|a| {
+                    if a.starts_with("~/") {
+                        crate::config::expand_user_path(a).display().to_string()
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            let mut cmd = Command::new(&expanded_bin);
+            cmd.args(&expanded_args)
                 .envs(&srv.env)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
             let Ok(mut child) = cmd.spawn() else {
-                return format!("MCP error: failed to spawn `{}`", cmd_bin);
+                return format!("MCP error: failed to spawn `{}`", expanded_bin.display());
             };
             let init_msg = json!({
                 "jsonrpc": "2.0",
@@ -2897,13 +3002,13 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                     }
                 });
             }
-            let received = rx.recv_timeout(std::time::Duration::from_secs(15)).ok();
+            let received = rx.recv_timeout(std::time::Duration::from_secs(45)).ok();
             let _ = child.kill();
             let _ = child.wait();
             if let Some(json_line) = received {
-                return json_line.chars().take(8000).collect();
+                return format_mcp_jsonrpc_response(server_name, &tool_name, &json_line);
             }
-            return "(MCP server returned no response within 15s)".to_string();
+            return "(MCP server returned no response within 45s)".to_string();
         }
         return format!(
             "MCP server '{}' has neither `command` nor `url`.",
