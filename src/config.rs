@@ -55,6 +55,10 @@ pub struct ProviderGroupConfig {
     pub api_key_env: String,
     #[serde(default)]
     pub is_local: bool,
+    /// Wire protocol for this provider. `"anthropic"` selects the native
+    /// Anthropic Messages API for custom proxies that are not on anthropic.com.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<usize>,
     pub models: Vec<ModelConfigEntry>,
@@ -382,6 +386,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://api.openai.com/v1".to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(200_000),
             models: vec![
                 ModelConfigEntry {
@@ -416,6 +421,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://api.anthropic.com/v1".to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(200_000),
             models: vec![
                 ModelConfigEntry {
@@ -458,6 +464,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             api_key_env: "GEMINI_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(1_000_000),
             models: vec![
                 ModelConfigEntry {
@@ -484,6 +491,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             api_key_env: "OPENROUTER_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(200_000),
             models: vec![ModelConfigEntry {
                 key: "openrouter/auto".to_string(),
@@ -500,6 +508,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://api.deepseek.com/v1".to_string(),
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(128_000),
             models: vec![
                 ModelConfigEntry {
@@ -526,6 +535,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://api.minimax.io/v1".to_string(),
             api_key_env: "MINIMAX_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(200_000),
             models: vec![
                 ModelConfigEntry {
@@ -552,6 +562,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
             api_key_env: "GLM_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(128_000),
             models: vec![
                 ModelConfigEntry {
@@ -578,6 +589,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://api.groq.com/openai/v1".to_string(),
             api_key_env: "GROQ_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(128_000),
             models: vec![ModelConfigEntry {
                 key: "llama-3.3-70b-versatile".to_string(),
@@ -594,6 +606,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://api.x.ai/v1".to_string(),
             api_key_env: "XAI_API_KEY".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(256_000),
             models: vec![ModelConfigEntry {
                 key: "grok-4".to_string(),
@@ -610,6 +623,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "https://models.inference.ai.azure.com".to_string(),
             api_key_env: "GITHUB_TOKEN".to_string(),
             is_local: false,
+            protocol: None,
             context_window: Some(128_000),
             models: vec![
                 ModelConfigEntry {
@@ -636,6 +650,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             base_url: "http://127.0.0.1:11434/v1".to_string(),
             api_key_env: String::new(),
             is_local: true,
+            protocol: None,
             context_window: Some(32_768),
             models: vec![ModelConfigEntry {
                 key: "ollama:qwen2.5-coder".to_string(),

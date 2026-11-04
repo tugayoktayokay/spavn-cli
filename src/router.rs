@@ -197,15 +197,20 @@ impl ModelEndpoint {
     /// `SPAVN_FORCE_ANTHROPIC` env var overrides for custom Anthropic-protocol
     /// proxies whose host is not anthropic.com.
     pub fn is_anthropic(&self) -> bool {
-        std::env::var("SPAVN_FORCE_ANTHROPIC")
+        if std::env::var("SPAVN_FORCE_ANTHROPIC")
             .ok()
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false)
-            || self
-                .base_url
-                .trim_end_matches('/')
-                .to_lowercase()
-                .contains("anthropic.com")
+        {
+            return true;
+        }
+        let base = self.base_url.trim_end_matches('/');
+        if base.to_lowercase().contains("anthropic.com") {
+            return true;
+        }
+        load_user_config().providers.iter().any(|p| {
+            p.protocol.as_deref() == Some("anthropic") && p.base_url.trim_end_matches('/') == base
+        })
     }
 
     pub fn is_smart_pool_proxy(&self) -> bool {

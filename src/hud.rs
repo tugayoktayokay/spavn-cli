@@ -4856,6 +4856,7 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 String::new()
             },
             is_local: api_key_opt.is_none(),
+            protocol: None,
             context_window: None,
             models: vec![ModelConfigEntry {
                 key: entry_key.clone(),
