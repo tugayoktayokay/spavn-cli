@@ -356,7 +356,7 @@ fn compact_messages_for_model(
     let prune_old_tools = if is_local {
         raw_tok >= 16_000
     } else {
-        raw_tok >= (max_ctx_tokens * 50) / 100
+        raw_tok >= 48_000.min((max_ctx_tokens * 40) / 100)
     };
     let len = messages.len();
     let last_user_idx = messages
@@ -426,17 +426,43 @@ fn compact_messages_for_model(
                     }
                 }
             }
-            if idx > 0 && idx < cutoff && m.role == "tool" {
-                if let Some(ref content) = m.content {
-                    if content.len() > 600 {
-                        let head = safe_utf8_prefix(content, 260);
-                        let tail = safe_utf8_suffix(content, 160);
-                        cloned.content = Some(format!(
-                            "{}\n...[SPAVN Context Compactor: {} bytes pruned from older turn]...\n{}",
-                            head,
-                            content.len().saturating_sub(420),
-                            tail
-                        ));
+            if idx > 0 && idx < cutoff {
+                if m.role == "tool" {
+                    if let Some(content) = &m.content {
+                        if content.len() > 600 {
+                            let head = safe_utf8_prefix(content, 260);
+                            let tail = safe_utf8_suffix(content, 160);
+                            cloned.content = Some(format!(
+                                "{}\n...[SPAVN Context Compactor: {} bytes pruned from older turn]...\n{}",
+                                head,
+                                content.len().saturating_sub(420),
+                                tail
+                            ));
+                        }
+                    }
+                } else if m.role == "assistant" {
+                    if let Some(tcs) = &mut cloned.tool_calls {
+                        for tc in tcs.iter_mut() {
+                            if tc.function.arguments.len() > 800 {
+                                let orig_len = tc.function.arguments.len();
+                                let path_hint = serde_json::from_str::<serde_json::Value>(
+                                    &tc.function.arguments,
+                                )
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("path")
+                                        .or_else(|| v.get("command"))
+                                        .and_then(|s| s.as_str())
+                                        .map(|s| safe_utf8_prefix(s, 120).to_string())
+                                })
+                                .unwrap_or_default();
+                                tc.function.arguments = serde_json::json!({
+                                    "path": path_hint,
+                                    "_compacted_bytes": orig_len
+                                })
+                                .to_string();
+                            }
+                        }
                     }
                 }
             }
@@ -762,7 +788,8 @@ fn run_agent_turn(
         let mut view_messages =
             compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
         let mut view_tok = hud::estimate_messages_tokens(&view_messages);
-        if view_tok >= (max_ctx_tokens * 80) / 100 && messages.len() > 6 {
+        let compact_threshold = ((max_ctx_tokens * 80) / 100).min(120_000);
+        if view_tok >= compact_threshold && messages.len() > 6 {
             let raw_before_tok = hud::estimate_messages_tokens(messages);
             perform_manual_compact(&step_endpoint, messages, None);
             rewrite_session(session_file, messages);

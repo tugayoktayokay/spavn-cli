@@ -696,8 +696,9 @@ fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
         }
         out_vals.push(v);
 
-        if m.role == "tool" && idx + 6 >= total_len {
-            if let Some(ref txt) = m.content {
+        let in_active_turn = last_user_idx.map(|u| idx >= u).unwrap_or(true);
+        if m.role == "tool" && in_active_turn && idx + 6 >= total_len {
+            if let Some(txt) = &m.content {
                 if txt.starts_with("[SPAVN Vision Image Loaded:") {
                     let imgs = extract_dragged_images(txt);
                     if !imgs.is_empty() {
