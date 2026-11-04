@@ -415,10 +415,7 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
         mid_lines.push(trunc_row);
     }
     let esc_hint = if has_typed {
-        tr_en(
-            "Tab: Mod · Esc/Ctrl+U: Metni Sil",
-            "Tab: Mode · Esc/Ctrl+U: Clear Text",
-        )
+        tr_en("Tab: Mod · Esc: Temizle", "Tab: Mode · Esc: Clear")
     } else if s_cnt > 0 || q_cnt > 0 {
         tr_en(
             "↑: Kuyruktakini Düzenle · Ctrl+X: Kuyruğu İptal Et · Esc: Durdur",
@@ -1561,14 +1558,8 @@ fn render_inline_dock(
                         "{}{}{}",
                         YELLOW,
                         tr_en(
-                            &format!(
-                                "Seçili: {} krk (Backspace: Sil · ←/→: Seçimi Kaldır)",
-                                e - s
-                            ),
-                            &format!(
-                                "Selected: {} chars (Backspace: Delete · ←/→: Unselect)",
-                                e - s
-                            )
+                            &format!("Seçili: {} krk (Backspace: Sil)", e - s),
+                            &format!("Selected: {} chars (Backspace: Delete)", e - s)
                         ),
                         RESET
                     ));
@@ -1578,8 +1569,8 @@ fn render_inline_dock(
                     "{}{}{}",
                     YELLOW,
                     tr_en(
-                        "⌃A: Tümünü Seç · Shift+←/→: Seç · Esc: Tümünü Sil",
-                        "⌃A: Select All · Shift+←/→: Select · Esc: Clear All"
+                        "Shift+←/→: Seç · Esc: Temizle",
+                        "Shift+←/→: Select · Esc: Clear"
                     ),
                     RESET
                 ));
@@ -2338,14 +2329,8 @@ pub fn read_bottom_dock_input(
                     return PromptEvent::Submit(submitted);
                 }
                 1 => {
-                    // Ctrl+A: if not already selecting all, select all! Press again to jump to start.
-                    if !chars.is_empty() && sel_anchor != Some(0) {
-                        sel_anchor = Some(0);
-                        cursor_pos = chars.len();
-                    } else {
-                        sel_anchor = None;
-                        cursor_pos = 0;
-                    }
+                    sel_anchor = None;
+                    cursor_pos = 0;
                 }
                 5 => {
                     sel_anchor = None;
@@ -2976,15 +2961,8 @@ impl LiveSpinner {
                                             bi += 1;
                                         }
                                         1 => {
-                                            if !state.typing_buf.is_empty()
-                                                && state.typing_sel_anchor != Some(0)
-                                            {
-                                                state.typing_sel_anchor = Some(0);
-                                                state.typing_cursor = state.typing_buf.len();
-                                            } else {
-                                                state.typing_sel_anchor = None;
-                                                state.typing_cursor = 0;
-                                            }
+                                            state.typing_sel_anchor = None;
+                                            state.typing_cursor = 0;
                                             bi += 1;
                                         }
                                         5 => {
