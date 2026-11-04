@@ -1509,7 +1509,7 @@ fn render_inline_dock(
             full_w,
         )
     } else {
-        let h_items = vec![
+        let mut h_items = vec![
             format_context_usage_badge(),
             format!("{}{}{}", DIM, tr_en("/: Menü", "/: Menu"), RESET),
             format!("{}/model{}", DIM, RESET),
@@ -1522,6 +1522,14 @@ fn render_inline_dock(
             ),
             format!("{}{}{}", DIM, tr_en("\\: Faz", "\\: Phase"), RESET),
         ];
+        if !input_chars.is_empty() {
+            h_items.push(format!(
+                "{}{}{}",
+                YELLOW,
+                tr_en("Esc / Ctrl+U: Tümünü Sil", "Esc / Ctrl+U: Clear All"),
+                RESET
+            ));
+        }
         flex_wrap_items(
             &bot_prefix_first,
             &bot_prefix_cont,
@@ -1840,6 +1848,53 @@ pub fn read_bottom_dock_input(
                     idx += 5;
                     continue;
                 }
+                // Option+Backspace (macOS sends \x1b\x7f or \x1b\x08): delete word or image token backward
+                if idx < n && (kbuf[idx] == 127 || kbuf[idx] == 8) {
+                    idx += 1;
+                    if let Some((start, end)) = image_token_span_before_cursor(&chars, cursor_pos) {
+                        chars.drain(start..end);
+                        cursor_pos = start;
+                    } else {
+                        while cursor_pos > 0 && chars[cursor_pos - 1].is_whitespace() {
+                            chars.remove(cursor_pos - 1);
+                            cursor_pos -= 1;
+                        }
+                        while cursor_pos > 0 && !chars[cursor_pos - 1].is_whitespace() {
+                            chars.remove(cursor_pos - 1);
+                            cursor_pos -= 1;
+                        }
+                    }
+                    continue;
+                }
+                // Option+Left (\x1bb) / Option+Right (\x1bf): word jump
+                if idx < n && kbuf[idx] == b'b' {
+                    idx += 1;
+                    if let Some((start, _)) = image_token_span_before_cursor(&chars, cursor_pos) {
+                        cursor_pos = start;
+                    } else {
+                        while cursor_pos > 0 && chars[cursor_pos - 1].is_whitespace() {
+                            cursor_pos -= 1;
+                        }
+                        while cursor_pos > 0 && !chars[cursor_pos - 1].is_whitespace() {
+                            cursor_pos -= 1;
+                        }
+                    }
+                    continue;
+                }
+                if idx < n && kbuf[idx] == b'f' {
+                    idx += 1;
+                    if let Some((_, end)) = image_token_span_at_cursor(&chars, cursor_pos) {
+                        cursor_pos = end;
+                    } else {
+                        while cursor_pos < chars.len() && chars[cursor_pos].is_whitespace() {
+                            cursor_pos += 1;
+                        }
+                        while cursor_pos < chars.len() && !chars[cursor_pos].is_whitespace() {
+                            cursor_pos += 1;
+                        }
+                    }
+                    continue;
+                }
                 if idx + 1 < n && (kbuf[idx] == b'[' || kbuf[idx] == b'O') {
                     let csi_code = kbuf[idx + 1];
                     idx += 2;
@@ -2070,14 +2125,24 @@ pub fn read_bottom_dock_input(
                     }
                 }
                 23 => {
-                    while cursor_pos > 0 && chars[cursor_pos - 1].is_whitespace() {
-                        chars.remove(cursor_pos - 1);
-                        cursor_pos -= 1;
+                    if let Some((start, end)) = image_token_span_before_cursor(&chars, cursor_pos) {
+                        chars.drain(start..end);
+                        cursor_pos = start;
+                    } else {
+                        while cursor_pos > 0 && chars[cursor_pos - 1].is_whitespace() {
+                            chars.remove(cursor_pos - 1);
+                            cursor_pos -= 1;
+                        }
+                        while cursor_pos > 0 && !chars[cursor_pos - 1].is_whitespace() {
+                            chars.remove(cursor_pos - 1);
+                            cursor_pos -= 1;
+                        }
                     }
-                    while cursor_pos > 0 && !chars[cursor_pos - 1].is_whitespace() {
-                        chars.remove(cursor_pos - 1);
-                        cursor_pos -= 1;
-                    }
+                }
+                11 => {
+                    // Ctrl+K: delete from cursor to end of input
+                    chars.truncate(cursor_pos);
+                    suggestion_idx = None;
                 }
                 127 | 8 => {
                     if let Some((start, end)) = image_token_span_before_cursor(&chars, cursor_pos) {
