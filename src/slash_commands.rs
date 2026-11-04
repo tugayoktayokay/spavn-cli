@@ -91,7 +91,15 @@ pub fn dispatch_slash_command(
             "\n{}🔄 [SPAVN Canlı Reload]: Binary, sistem çekirdeği ve {} yetenek (skill) oturum korunarak yenileniyor...{}",
             GREEN, skill_count, RESET
         );
-        let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spavn"));
+        let exe_path = {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let home_bin = PathBuf::from(home).join(".local/bin/spavn");
+            if home_bin.exists() {
+                home_bin
+            } else {
+                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spavn"))
+            }
+        };
         let access_str = match ctx.access {
             AccessMode::Safe => "safe",
             AccessMode::Auto => "auto",
