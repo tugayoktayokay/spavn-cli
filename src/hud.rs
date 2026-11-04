@@ -406,17 +406,38 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
         mid_lines.push(trunc_row);
     }
     let esc_hint = if has_typed {
-        tr_en("Tab: Mod · Esc: Temizle", "Tab: Mode · Esc: Clear")
+        let c_pos = state.typing_cursor.min(state.typing_buf.len());
+        let sel_len = state.typing_sel_anchor.and_then(|a| {
+            let a_clamped = a.min(state.typing_buf.len());
+            let s = a_clamped.min(c_pos);
+            let e = a_clamped.max(c_pos);
+            (s < e).then_some(e - s)
+        });
+        if let Some(len) = sel_len {
+            if is_en() {
+                format!("Selected: {} chars (Backspace: Delete)", len)
+            } else {
+                format!("Seçili: {} krk (Backspace: Sil)", len)
+            }
+        } else {
+            tr_en(
+                "Tab: Mod · Shift+←/→: Seç · Esc: Temizle",
+                "Tab: Mode · Shift+←/→: Select · Esc: Clear",
+            )
+            .to_string()
+        }
     } else if s_cnt > 0 || q_cnt > 0 {
         tr_en(
             "↑: Kuyruktakini Düzenle · Ctrl+X: Kuyruğu İptal Et · Esc: Durdur",
             "↑: Edit Queued · Ctrl+X: Cancel Queued · Esc: Stop",
         )
+        .to_string()
     } else {
         tr_en(
             "Tab: Mod Değiştir · Esc: İptal",
             "Tab: Toggle Mode · Esc: Cancel",
         )
+        .to_string()
     };
     let bot_raw = format!(
         "{}╰─{} {} {}·{} {}{} ({}) · {}{}",
@@ -2627,6 +2648,14 @@ impl LiveSpinner {
                                                     state.typing_buf.drain(s..e);
                                                     state.typing_cursor = s;
                                                 }
+                                            } else if let Some((start, end)) =
+                                                image_token_span_before_cursor(
+                                                    &state.typing_buf,
+                                                    state.typing_cursor,
+                                                )
+                                            {
+                                                state.typing_buf.drain(start..end);
+                                                state.typing_cursor = start;
                                             } else {
                                                 let mut c = state.typing_cursor;
                                                 while c > 0
@@ -2661,15 +2690,25 @@ impl LiveSpinner {
                                             } else {
                                                 state.typing_sel_anchor = None;
                                             }
-                                            let mut c = state.typing_cursor;
-                                            while c > 0 && state.typing_buf[c - 1].is_whitespace() {
-                                                c -= 1;
+                                            if let Some((start, _)) = image_token_span_before_cursor(
+                                                &state.typing_buf,
+                                                state.typing_cursor,
+                                            ) {
+                                                state.typing_cursor = start;
+                                            } else {
+                                                let mut c = state.typing_cursor;
+                                                while c > 0
+                                                    && state.typing_buf[c - 1].is_whitespace()
+                                                {
+                                                    c -= 1;
+                                                }
+                                                while c > 0
+                                                    && !state.typing_buf[c - 1].is_whitespace()
+                                                {
+                                                    c -= 1;
+                                                }
+                                                state.typing_cursor = c;
                                             }
-                                            while c > 0 && !state.typing_buf[c - 1].is_whitespace()
-                                            {
-                                                c -= 1;
-                                            }
-                                            state.typing_cursor = c;
                                             if state.typing_sel_anchor == Some(state.typing_cursor)
                                             {
                                                 state.typing_sel_anchor = None;
@@ -2689,18 +2728,25 @@ impl LiveSpinner {
                                             } else {
                                                 state.typing_sel_anchor = None;
                                             }
-                                            let mut c = state.typing_cursor;
-                                            while c < state.typing_buf.len()
-                                                && state.typing_buf[c].is_whitespace()
-                                            {
-                                                c += 1;
+                                            if let Some((_, end)) = image_token_span_at_cursor(
+                                                &state.typing_buf,
+                                                state.typing_cursor,
+                                            ) {
+                                                state.typing_cursor = end;
+                                            } else {
+                                                let mut c = state.typing_cursor;
+                                                while c < state.typing_buf.len()
+                                                    && state.typing_buf[c].is_whitespace()
+                                                {
+                                                    c += 1;
+                                                }
+                                                while c < state.typing_buf.len()
+                                                    && !state.typing_buf[c].is_whitespace()
+                                                {
+                                                    c += 1;
+                                                }
+                                                state.typing_cursor = c;
                                             }
-                                            while c < state.typing_buf.len()
-                                                && !state.typing_buf[c].is_whitespace()
-                                            {
-                                                c += 1;
-                                            }
-                                            state.typing_cursor = c;
                                             if state.typing_sel_anchor == Some(state.typing_cursor)
                                             {
                                                 state.typing_sel_anchor = None;
@@ -2710,18 +2756,38 @@ impl LiveSpinner {
                                         }
                                         bi += 1;
                                         if bi < n && (kbuf[bi] == b'[' || kbuf[bi] == b'O') {
+                                            let bracket_ch = kbuf[bi];
                                             bi += 1;
                                             let csi_rem = &kbuf[bi..n];
-                                            if csi_rem.starts_with(b"1;") && csi_rem.len() >= 4 {
-                                                let mod_byte = csi_rem[2];
-                                                let final_b = csi_rem[3];
+                                            let parsed_mod_csi: Option<(usize, u8, u8)> = if csi_rem
+                                                .starts_with(b"1;")
+                                                && csi_rem.len() >= 4
+                                            {
+                                                Some((4, csi_rem[2], csi_rem[3]))
+                                            } else if csi_rem.len() >= 2
+                                                && matches!(csi_rem[0], b'2'..=b'9')
+                                                && matches!(
+                                                    csi_rem[1],
+                                                    b'A' | b'B' | b'C' | b'D' | b'H' | b'F'
+                                                )
+                                            {
+                                                Some((2, csi_rem[0], csi_rem[1]))
+                                            } else if bracket_ch == b'['
+                                                && !csi_rem.is_empty()
+                                                && matches!(csi_rem[0], b'a' | b'b' | b'c' | b'd')
+                                            {
+                                                Some((1, b'2', csi_rem[0].to_ascii_uppercase()))
+                                            } else {
+                                                None
+                                            };
+                                            if let Some((adv, mod_byte, final_b)) = parsed_mod_csi {
                                                 if matches!(mod_byte, b'2'..=b'9')
                                                     && matches!(
                                                         final_b,
                                                         b'A' | b'B' | b'C' | b'D' | b'H' | b'F'
                                                     )
                                                 {
-                                                    bi += 4;
+                                                    bi += adv;
                                                     let mod_val = mod_byte - b'0';
                                                     let has_shift = ((mod_val - 1) & 1) != 0;
                                                     let has_alt_or_ctrl = ((mod_val - 1) & 6) != 0;
@@ -2735,7 +2801,14 @@ impl LiveSpinner {
                                                     }
                                                     match final_b {
                                                         b'D' => {
-                                                            if has_alt_or_ctrl {
+                                                            if let Some((start, _)) =
+                                                                image_token_span_before_cursor(
+                                                                    &state.typing_buf,
+                                                                    state.typing_cursor,
+                                                                )
+                                                            {
+                                                                state.typing_cursor = start;
+                                                            } else if has_alt_or_ctrl {
                                                                 let mut c = state.typing_cursor;
                                                                 while c > 0
                                                                     && state.typing_buf[c - 1]
@@ -2757,7 +2830,14 @@ impl LiveSpinner {
                                                             }
                                                         }
                                                         b'C' => {
-                                                            if has_alt_or_ctrl {
+                                                            if let Some((_, end)) =
+                                                                image_token_span_at_cursor(
+                                                                    &state.typing_buf,
+                                                                    state.typing_cursor,
+                                                                )
+                                                            {
+                                                                state.typing_cursor = end;
+                                                            } else if has_alt_or_ctrl {
                                                                 let mut c = state.typing_cursor;
                                                                 while c < state.typing_buf.len()
                                                                     && state.typing_buf[c]
@@ -2818,6 +2898,13 @@ impl LiveSpinner {
                                                             state.typing_cursor = a
                                                                 .max(state.typing_cursor)
                                                                 .min(state.typing_buf.len());
+                                                        } else if let Some((_, end)) =
+                                                            image_token_span_at_cursor(
+                                                                &state.typing_buf,
+                                                                state.typing_cursor,
+                                                            )
+                                                        {
+                                                            state.typing_cursor = end;
                                                         } else if state.typing_cursor
                                                             < state.typing_buf.len()
                                                         {
@@ -2832,6 +2919,13 @@ impl LiveSpinner {
                                                         {
                                                             state.typing_cursor =
                                                                 a.min(state.typing_cursor);
+                                                        } else if let Some((start, _)) =
+                                                            image_token_span_before_cursor(
+                                                                &state.typing_buf,
+                                                                state.typing_cursor,
+                                                            )
+                                                        {
+                                                            state.typing_cursor = start;
                                                         } else {
                                                             state.typing_cursor = state
                                                                 .typing_cursor
@@ -2870,6 +2964,13 @@ impl LiveSpinner {
                                                                 state.typing_buf.drain(s..e);
                                                                 state.typing_cursor = s;
                                                             }
+                                                        } else if let Some((start, end)) =
+                                                            image_token_span_at_cursor(
+                                                                &state.typing_buf,
+                                                                state.typing_cursor,
+                                                            )
+                                                        {
+                                                            state.typing_buf.drain(start..end);
                                                         } else if state.typing_cursor
                                                             < state.typing_buf.len()
                                                         {
