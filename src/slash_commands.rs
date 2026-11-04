@@ -93,8 +93,37 @@ pub fn dispatch_slash_command(
         );
         let exe_path = {
             let home = std::env::var("HOME").unwrap_or_default();
-            let home_bin = PathBuf::from(home).join(".local/bin/spavn");
-            if home_bin.exists() {
+            let home_bin = PathBuf::from(&home).join(".local/bin/spavn");
+            let release_bin = PathBuf::from(&home).join("apps/spavn-cli/target/release/spavn");
+            // If a newer release binary exists or if home_bin might have a dirty vnode signature cache on macOS,
+            // atomically replace home_bin (new inode via rename) and ad-hoc sign so execve() never gets SIGKILL.
+            let candidate = if release_bin.exists() {
+                let rel_mtime = std::fs::metadata(&release_bin)
+                    .and_then(|m| m.modified())
+                    .ok();
+                let home_mtime = std::fs::metadata(&home_bin).and_then(|m| m.modified()).ok();
+                if rel_mtime >= home_mtime {
+                    &release_bin
+                } else if home_bin.exists() {
+                    &home_bin
+                } else {
+                    &release_bin
+                }
+            } else {
+                &home_bin
+            };
+            if candidate.exists() {
+                let tmp_bin = PathBuf::from(&home)
+                    .join(format!(".local/bin/.spavn.tmp.{}", std::process::id()));
+                if std::fs::copy(candidate, &tmp_bin).is_ok() {
+                    let _ = std::process::Command::new("codesign")
+                        .args(["-s", "-", "-f"])
+                        .arg(&tmp_bin)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    let _ = std::fs::rename(&tmp_bin, &home_bin);
+                }
                 home_bin
             } else {
                 std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spavn"))
