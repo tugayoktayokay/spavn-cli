@@ -199,16 +199,20 @@ fn default_busy_mode() -> String {
 }
 
 fn default_language() -> String {
-    std::env::var("SPAVN_LANG")
-        .ok()
-        .map(|s| {
-            if s.to_lowercase().starts_with("en") {
-                "en".to_string()
-            } else {
-                "tr".to_string()
-            }
-        })
-        .unwrap_or_else(|| "tr".to_string())
+    if let Ok(s) = std::env::var("SPAVN_LANG") {
+        return if s.to_lowercase().starts_with("en") {
+            "en".to_string()
+        } else {
+            "tr".to_string()
+        };
+    }
+    if let Ok(locale) = std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")) {
+        let low = locale.to_lowercase();
+        if low.starts_with("en") && !spavn_dir().join("PROFILE.md").exists() {
+            return "en".to_string();
+        }
+    }
+    "tr".to_string()
 }
 
 pub fn home_dir() -> PathBuf {

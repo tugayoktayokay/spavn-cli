@@ -1642,6 +1642,25 @@ fn main() {
         &session_name,
     );
 
+    if !endpoint.is_local() && (endpoint.api_key.is_empty() || endpoint.api_key == "local") {
+        println!(
+            "\n{}👋 {}{}",
+            YELLOW,
+            tr_en(
+                "İlk kurulum: Henüz aktif bir API anahtarı veya yerel model yapılandırılmamış. Sağlayıcı kurulum sihirbazı açılıyor (/login)...",
+                "First-run setup: No active API key or local model configured yet. Opening provider setup wizard (/login)..."
+            ),
+            RESET
+        );
+        if let Some(new_model_key) = hud::interactive_provider_login(None) {
+            endpoint = resolve_endpoint(&new_model_key);
+            if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
+                *first = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+                rewrite_session(&session_file, &messages);
+            }
+        }
+    }
+
     let mut quota_badge = fetch_quick_quota_line();
     let mut cmd_history: Vec<String> = Vec::new();
     let mut active_role = AgentRoleKey::Auto;
