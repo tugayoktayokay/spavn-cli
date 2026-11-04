@@ -1561,8 +1561,14 @@ fn render_inline_dock(
                         "{}{}{}",
                         YELLOW,
                         tr_en(
-                            &format!("Seçili: {} krk (Backspace: Sil)", e - s),
-                            &format!("Selected: {} chars (Backspace: Delete)", e - s)
+                            &format!(
+                                "Seçili: {} krk (Backspace: Sil · ←/→: Seçimi Kaldır)",
+                                e - s
+                            ),
+                            &format!(
+                                "Selected: {} chars (Backspace: Delete · ←/→: Unselect)",
+                                e - s
+                            )
                         ),
                         RESET
                     ));
@@ -1572,8 +1578,8 @@ fn render_inline_dock(
                     "{}{}{}",
                     YELLOW,
                     tr_en(
-                        "Shift+←/→: Seç · Esc/Ctrl+U: Tümünü Sil",
-                        "Shift+←/→: Select · Esc/Ctrl+U: Clear All"
+                        "⌃A: Tümünü Seç · Shift+←/→: Seç · Esc: Tümünü Sil",
+                        "⌃A: Select All · Shift+←/→: Select · Esc: Clear All"
                     ),
                     RESET
                 ));
