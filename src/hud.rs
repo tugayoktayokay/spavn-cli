@@ -56,6 +56,7 @@ pub fn build_session_recap_line(
             if let Some(ref raw) = m.content {
                 if raw.starts_with("[SPAVN VERIFICATION GATE]")
                     || raw.starts_with("[SPAVN Auto-Compact")
+                    || raw.starts_with("[SPAVN Semantic Context Handoff")
                     || raw.starts_with("[LIVE USER STEERING")
                 {
                     continue;
@@ -1613,6 +1614,7 @@ pub fn redraw_full_viewport(
         if m.role == "user" {
             if raw_content.starts_with("[SPAVN VERIFICATION GATE]")
                 || raw_content.starts_with("[SPAVN Auto-Compact")
+                || raw_content.starts_with("[SPAVN Semantic Context Handoff")
                 || raw_content.starts_with("[LIVE USER STEERING")
             {
                 continue;
