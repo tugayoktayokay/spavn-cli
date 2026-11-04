@@ -335,6 +335,9 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
     let (top_line, _) = truncate_ansi_to_width(&top_raw, max_w);
     let has_typed = state.is_typing || !state.typing_buf.is_empty();
     let mut mid_lines: Vec<String> = Vec::new();
+    if let Some(task_bar) = crate::format_live_tasks_compact_bar(max_w) {
+        mid_lines.push(task_bar);
+    }
     let pending_list = crate::list_pending_messages();
     if !pending_list.is_empty() {
         let total_p = pending_list.len();
@@ -1225,6 +1228,7 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                 tr_en("/compact (Sıkıştır)", "/compact (Compact Context)"),
             ),
             ("/undo", tr_en("/undo (Geri Al)", "/undo (Undo Last Edit)")),
+            ("/todo", tr_en("/todo (Görev Takibi)", "/todo (Live Tasks)")),
             (
                 "/reload",
                 tr_en("/reload (Yenile)", "/reload (Live Reload)"),
@@ -1526,6 +1530,9 @@ fn render_inline_dock(
         if input_chars.is_empty() && suggestions.is_empty() {
             top_lines.push(recap.to_string());
         }
+    }
+    if let Some(task_bar) = crate::format_live_tasks_compact_bar(full_w) {
+        top_lines.push(task_bar);
     }
     let pending_idle = crate::list_pending_messages();
     if !pending_idle.is_empty() {
@@ -4136,15 +4143,7 @@ pub fn interactive_select_slash_command() -> Option<String> {
             )
             .to_string(),
         },
-        MenuItem {
-            key: "/undo".to_string(),
-            badge: format!("{}{}{}", YELLOW, tr_en("↩️  Geri Al", "↩️  Undo"), RESET),
-            desc: tr_en(
-                "Son dosya değişikliğini anında geri al",
-                "Revert the most recent file modification",
-            )
-            .to_string(),
-        },
+
         MenuItem {
             key: "/reload".to_string(),
             badge: format!(
@@ -5625,5 +5624,25 @@ mod recap_tests {
         chars.drain(span.0..span.1);
         let after: String = chars.into_iter().collect();
         assert_eq!(after, "merhaba  test");
+    }
+
+    #[test]
+    fn zero_cost_live_tasks_sync_and_advance() {
+        crate::clear_live_tasks();
+        let plan =
+            "Here is the plan:\n- [ ] Update config.rs\n- [ ] Refactor hud.rs\n- [ ] Run cargo test";
+        crate::sync_live_tasks_from_text(plan);
+        let tasks = crate::list_live_tasks();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].status, crate::LiveTaskStatus::InProgress);
+
+        crate::advance_live_tasks_on_tool("edit", "src/config.rs");
+        let tasks2 = crate::list_live_tasks();
+        assert_eq!(tasks2[0].status, crate::LiveTaskStatus::Done);
+        assert_eq!(tasks2[1].status, crate::LiveTaskStatus::InProgress);
+
+        let bar = crate::format_live_tasks_compact_bar(100).expect("should render task bar");
+        assert!(bar.contains("[1/3]"));
+        crate::clear_live_tasks();
     }
 }

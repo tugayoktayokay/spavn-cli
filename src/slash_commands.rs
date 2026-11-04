@@ -610,6 +610,105 @@ pub fn dispatch_slash_command(
         return SlashOutcome::Handled;
     }
 
+    if input == "/todo"
+        || input == "/tasks"
+        || input.starts_with("/todo ")
+        || input.starts_with("/tasks ")
+    {
+        let arg = input
+            .strip_prefix("/todo")
+            .or_else(|| input.strip_prefix("/tasks"))
+            .unwrap_or("")
+            .trim();
+        if matches!(arg, "clear" | "c" | "temizle" | "reset") {
+            crate::clear_live_tasks();
+            println!(
+                "\n{}✓ {}{}",
+                GREEN,
+                tr_en("Canlı görev listesi temizlendi.", "Live task list cleared."),
+                RESET
+            );
+            return SlashOutcome::Handled;
+        }
+        if let Some(rest) = arg
+            .strip_prefix("done ")
+            .or_else(|| arg.strip_prefix("check "))
+        {
+            if let Ok(idx) = rest.trim().parse::<usize>() {
+                if crate::toggle_live_task(idx) {
+                    println!(
+                        "\n{}✓ #{}: {}{}",
+                        GREEN,
+                        idx,
+                        tr_en("durumu güncellendi.", "status toggled."),
+                        RESET
+                    );
+                } else {
+                    println!(
+                        "\n{}#{}: {}{}",
+                        YELLOW,
+                        idx,
+                        tr_en("geçerli bir görev numarası değil.", "invalid task number."),
+                        RESET
+                    );
+                }
+                return SlashOutcome::Handled;
+            }
+        }
+        if let Some(rest) = arg.strip_prefix("add ") {
+            crate::add_live_task(rest.trim().to_string());
+        } else if !arg.is_empty() && !matches!(arg, "list" | "ls") {
+            crate::add_live_task(arg.to_string());
+        }
+        let items = crate::list_live_tasks();
+        if items.is_empty() {
+            println!(
+                "\n{}📋 {}{}",
+                DIM,
+                tr_en(
+                    "Aktif görev yok. Eklemek için `/todo <görev>` yazın veya 2+ adımlı bir iş başlatın.",
+                    "No active tasks. Run `/todo <task>` or start a multi-step task."
+                ),
+                RESET
+            );
+        } else {
+            let done_cnt = items
+                .iter()
+                .filter(|t| t.status == crate::LiveTaskStatus::Done)
+                .count();
+            println!(
+                "\n{}╭─ 📋 {} [{}/{}] (/todo done <n> · /todo clear){}",
+                CYAN,
+                tr_en("Canlı Görev Takibi", "Live Task Tracker"),
+                done_cnt,
+                items.len(),
+                RESET
+            );
+            for (i, item) in items.iter().enumerate() {
+                let (icon, color) = match item.status {
+                    crate::LiveTaskStatus::Done => ("✓", GREEN),
+                    crate::LiveTaskStatus::InProgress => ("▶", YELLOW),
+                    crate::LiveTaskStatus::Pending => ("○", DIM),
+                };
+                println!(
+                    "{}│{}  {}#{:<2} {} {}{}",
+                    CYAN,
+                    RESET,
+                    color,
+                    i + 1,
+                    icon,
+                    item.title,
+                    RESET
+                );
+            }
+            println!(
+                "{}╰──────────────────────────────────────────────────────────────{}",
+                CYAN, RESET
+            );
+        }
+        return SlashOutcome::Handled;
+    }
+
     if input == "/think" {
         *show_thinking = !*show_thinking;
         println!(
@@ -706,6 +805,8 @@ pub fn dispatch_slash_command(
     }
 
     if input == "/new" || input == "/n" {
+        crate::clear_live_tasks();
+        crate::clear_queued_messages();
         *session_file = new_session_path();
         *session_name = session_file
             .file_name()

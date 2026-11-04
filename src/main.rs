@@ -158,6 +158,212 @@ pub fn queued_message_count() -> usize {
     PROMPT_QUEUE.lock().map(|q| q.len()).unwrap_or(0)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveTaskStatus {
+    Pending,
+    InProgress,
+    Done,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveTaskItem {
+    pub title: String,
+    pub status: LiveTaskStatus,
+}
+
+static LIVE_TASKS: std::sync::LazyLock<Mutex<Vec<LiveTaskItem>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+pub fn list_live_tasks() -> Vec<LiveTaskItem> {
+    LIVE_TASKS.lock().map(|t| t.clone()).unwrap_or_default()
+}
+
+pub fn clear_live_tasks() {
+    if let Ok(mut t) = LIVE_TASKS.lock() {
+        t.clear();
+    }
+}
+
+pub fn add_live_task(title: String) {
+    let clean = title.trim().to_string();
+    if clean.is_empty() {
+        return;
+    }
+    if let Ok(mut t) = LIVE_TASKS.lock() {
+        t.push(LiveTaskItem {
+            title: clean,
+            status: LiveTaskStatus::Pending,
+        });
+    }
+}
+
+pub fn toggle_live_task(idx_1based: usize) -> bool {
+    if idx_1based == 0 {
+        return false;
+    }
+    if let Ok(mut t) = LIVE_TASKS.lock() {
+        if let Some(item) = t.get_mut(idx_1based - 1) {
+            item.status = match item.status {
+                LiveTaskStatus::Done => LiveTaskStatus::Pending,
+                _ => LiveTaskStatus::Done,
+            };
+            return true;
+        }
+    }
+    false
+}
+
+/// Zero-roundtrip task extractor: parses markdown checkboxes (`- [ ]`, `- [x]`) or
+/// updates active task progress based on assistant output and tool calls without extra LLM turns.
+pub fn sync_live_tasks_from_text(text: &str) {
+    let mut parsed = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let rest = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| {
+                let bytes = trimmed.as_bytes();
+                if bytes.len() >= 3
+                    && bytes[0].is_ascii_digit()
+                    && bytes[1] == b'.'
+                    && bytes[2] == b' '
+                {
+                    Some(&trimmed[3..])
+                } else {
+                    None
+                }
+            });
+        if let Some(r) = rest {
+            let r = r.trim_start();
+            if let Some(title) = r.strip_prefix("[ ] ").or_else(|| r.strip_prefix("[] ")) {
+                let clean = title.trim().trim_matches('*').trim_matches('`').trim();
+                if !clean.is_empty() && clean.len() <= 120 {
+                    parsed.push(LiveTaskItem {
+                        title: clean.to_string(),
+                        status: LiveTaskStatus::Pending,
+                    });
+                }
+            } else if let Some(title) = r
+                .strip_prefix("[x] ")
+                .or_else(|| r.strip_prefix("[X] "))
+                .or_else(|| r.strip_prefix("[✓] "))
+            {
+                let clean = title.trim().trim_matches('*').trim_matches('`').trim();
+                if !clean.is_empty() && clean.len() <= 120 {
+                    parsed.push(LiveTaskItem {
+                        title: clean.to_string(),
+                        status: LiveTaskStatus::Done,
+                    });
+                }
+            } else if let Some(title) = r.strip_prefix("[~] ").or_else(|| r.strip_prefix("[>] ")) {
+                let clean = title.trim().trim_matches('*').trim_matches('`').trim();
+                if !clean.is_empty() && clean.len() <= 120 {
+                    parsed.push(LiveTaskItem {
+                        title: clean.to_string(),
+                        status: LiveTaskStatus::InProgress,
+                    });
+                }
+            }
+        }
+    }
+    if parsed.len() >= 2 {
+        if !parsed
+            .iter()
+            .any(|i| i.status == LiveTaskStatus::InProgress)
+        {
+            if let Some(first_pending) = parsed
+                .iter_mut()
+                .find(|i| i.status == LiveTaskStatus::Pending)
+            {
+                first_pending.status = LiveTaskStatus::InProgress;
+            }
+        }
+        if let Ok(mut t) = LIVE_TASKS.lock() {
+            *t = parsed;
+        }
+    }
+}
+
+/// Automatically advances task progress when tools touch files mentioned in a task item
+/// or when all edits are verified. Zero LLM roundtrip cost.
+pub fn advance_live_tasks_on_tool(tool_name: &str, args_summary: &str) {
+    if let Ok(mut t) = LIVE_TASKS.lock() {
+        if t.is_empty() {
+            return;
+        }
+        let summary_lower = args_summary.to_lowercase();
+        let file_stem = std::path::Path::new(args_summary.trim())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let is_mutating = matches!(
+            tool_name,
+            "edit" | "edit_file" | "write" | "write_file" | "bash"
+        );
+        if is_mutating && !file_stem.is_empty() && file_stem.len() >= 3 {
+            let mut matched_idx = None;
+            for (idx, item) in t.iter().enumerate() {
+                if item.status != LiveTaskStatus::Done
+                    && (item.title.to_lowercase().contains(&file_stem)
+                        || (!summary_lower.is_empty()
+                            && item.title.to_lowercase().contains(&summary_lower)))
+                {
+                    matched_idx = Some(idx);
+                    break;
+                }
+            }
+            if let Some(idx) = matched_idx {
+                t[idx].status = LiveTaskStatus::Done;
+            }
+        }
+        if !t.iter().any(|i| i.status == LiveTaskStatus::InProgress) {
+            if let Some(next_p) = t.iter_mut().find(|i| i.status == LiveTaskStatus::Pending) {
+                next_p.status = LiveTaskStatus::InProgress;
+            }
+        }
+    }
+}
+
+pub fn format_live_tasks_compact_bar(max_w: usize) -> Option<String> {
+    let tasks = list_live_tasks();
+    if tasks.is_empty() {
+        return None;
+    }
+    let total = tasks.len();
+    let done = tasks
+        .iter()
+        .filter(|t| t.status == LiveTaskStatus::Done)
+        .count();
+    let mut parts = Vec::with_capacity(tasks.len().min(4));
+    for item in tasks.iter().take(4) {
+        let short_t: String = item.title.chars().take(26).collect();
+        let s_str = match item.status {
+            LiveTaskStatus::Done => format!("{}✓ {}{}", GREEN, short_t, RESET),
+            LiveTaskStatus::InProgress => format!("{}{}▶ {}{}", CYAN, BOLD, short_t, RESET),
+            LiveTaskStatus::Pending => format!("{}○ {}{}", DIM, short_t, RESET),
+        };
+        parts.push(s_str);
+    }
+    if total > 4 {
+        parts.push(format!("{}+{}{}", DIM, total - 4, RESET));
+    }
+    let bar_color = if done == total { GREEN } else { YELLOW };
+    let raw = format!(
+        "{}│{}  {}📋 [{}/{}]{} {}",
+        CYAN,
+        RESET,
+        bar_color,
+        done,
+        total,
+        RESET,
+        parts.join(&format!(" {}·{} ", DIM, RESET))
+    );
+    let (trunc, _) = hud::truncate_ansi_to_width(&raw, max_w);
+    Some(trunc)
+}
+
 #[cfg(unix)]
 extern "C" fn handle_sigint(_sig: i32) {
     INTERRUPTED.store(true, Ordering::SeqCst);
@@ -394,11 +600,7 @@ fn compact_messages_for_model(
     } else {
         String::new()
     };
-    let keep_reasoning_from = if is_local {
-        turn_anchor
-    } else {
-        last_user_idx
-    };
+    let keep_reasoning_from = if is_local { turn_anchor } else { last_user_idx };
     messages
         .iter()
         .enumerate()
@@ -537,12 +739,7 @@ pub(crate) fn perform_manual_compact(
     if messages.len() > 6 {
         let sys = messages[0].clone();
         let active_user_idx = messages.iter().rposition(|m| {
-            m.role == "user"
-                && !m
-                    .content
-                    .as_deref()
-                    .unwrap_or("")
-                    .starts_with("[SPAVN ")
+            m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
         });
         let active_user_prompt = active_user_idx
             .and_then(|idx| messages[idx].content.clone())
@@ -630,11 +827,31 @@ pub(crate) fn perform_manual_compact(
         }
 
         let mut new_msgs = vec![sys];
+        let active_tasks = list_live_tasks();
+        let tasks_handoff_suffix = if active_tasks.is_empty() {
+            String::new()
+        } else {
+            let lines: Vec<String> = active_tasks
+                .iter()
+                .map(|t| {
+                    let box_str = match t.status {
+                        LiveTaskStatus::Done => "[x]",
+                        LiveTaskStatus::InProgress => "[~]",
+                        LiveTaskStatus::Pending => "[ ]",
+                    };
+                    format!("- {} {}", box_str, t.title)
+                })
+                .collect();
+            format!("\n\n[Active Live Task Checklist]:\n{}", lines.join("\n"))
+        };
         let preserved_user_suffix = match (active_user_idx, active_user_prompt.as_deref()) {
             (Some(u_idx), Some(prompt)) if u_idx < tail_start => {
-                format!("\n\n[Active User Request — MUST complete all items]:\n{}", prompt)
+                format!(
+                    "\n\n[Active User Request — MUST complete all items]:\n{}{}",
+                    prompt, tasks_handoff_suffix
+                )
             }
-            _ => String::new(),
+            _ => tasks_handoff_suffix,
         };
         if let Some(semantic_summary) = llm_summary {
             new_msgs.push(ChatMessage::user(format!(
@@ -1027,6 +1244,9 @@ fn run_agent_turn(
         spinner.stop();
 
         let assistant_msg = result.message;
+        if let Some(ref c_text) = assistant_msg.content {
+            sync_live_tasks_from_text(c_text);
+        }
         append_message(session_file, &assistant_msg);
         messages.push(assistant_msg.clone());
         let est_after = hud::estimate_messages_tokens(messages);
@@ -1072,13 +1292,14 @@ fn run_agent_turn(
                     repeat_count = 0;
                 }
 
+                let summary_for_task =
+                    summarize_tool_args(&tool_name, &tc.function.arguments, &ctx.default_host);
                 let (mut tool_output, tool_ms) = if quiet {
                     let t0 = std::time::Instant::now();
                     let out = execute_tool(ctx, &tool_name, &tc.function.arguments);
                     (out, t0.elapsed().as_millis())
                 } else {
-                    let summary =
-                        summarize_tool_args(&tool_name, &tc.function.arguments, &ctx.default_host);
+                    let summary = summary_for_task.clone();
                     println!(
                         "{}╭─ ⚡ {}{} {}{}{}",
                         YELLOW, BOLD, tool_name, RESET, DIM, summary
@@ -1137,6 +1358,15 @@ fn run_agent_turn(
                     ));
                 }
 
+                let is_err_tool = tool_output.starts_with("Edit error:")
+                    || tool_output.starts_with("Read error")
+                    || tool_output.starts_with("Write error")
+                    || tool_output.starts_with("BLOCKED")
+                    || tool_output.starts_with("Execution error:");
+                if !is_err_tool {
+                    advance_live_tasks_on_tool(&tool_name, &summary_for_task);
+                }
+
                 if !quiet {
                     let preview_line = tool_output
                         .lines()
@@ -1145,11 +1375,7 @@ fn run_agent_turn(
                         .chars()
                         .take(80)
                         .collect::<String>();
-                    let is_err = tool_output.starts_with("Edit error:")
-                        || tool_output.starts_with("Read error")
-                        || tool_output.starts_with("Write error")
-                        || tool_output.starts_with("BLOCKED")
-                        || tool_output.starts_with("Execution error:");
+                    let is_err = is_err_tool;
                     let status_mark = if is_err {
                         format!("{}✗{}", RED, YELLOW)
                     } else {
@@ -2056,7 +2282,9 @@ mod premature_stop_tests {
                 "x".repeat(6000),
             ));
         }
-        msgs.push(ChatMessage::user("second task: audit commit and fix test".to_string()));
+        msgs.push(ChatMessage::user(
+            "second task: audit commit and fix test".to_string(),
+        ));
         for step in 0..5 {
             msgs.push(make_assistant(
                 format!("active step {step}"),
