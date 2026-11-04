@@ -126,7 +126,7 @@ pub fn discover_local_models(
             }
         }
     }
-    let Ok((_, body)) = crate::http::get_text(discovery_url, &[], 2) else {
+    let Ok((_, body)) = crate::http::get_text(discovery_url, &[], 5) else {
         return Vec::new();
     };
     let Ok(val) = serde_json::from_str::<Value>(&body) else {

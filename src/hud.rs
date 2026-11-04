@@ -3402,6 +3402,9 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
 
     // 3. Built-in BYOK Catalog Providers (OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, MiniMax, GLM, Groq, xAI, Ollama)
     for byok_group in builtin_byok_catalog() {
+        if byok_group.id == "ollama" && local_idx_in_providers.is_some() {
+            continue;
+        }
         let has_key = byok_group.is_local || resolve_api_key(&byok_group.api_key_env).is_some();
         let key_status = if has_key {
             format!("{}🔑 Hazır{}", GREEN, RESET)
@@ -3874,6 +3877,7 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             low
         }
     } else {
+        let cfg = load_user_config();
         let mut items: Vec<MenuItem> = vec![MenuItem {
             key: "local-server".to_string(),
             badge: format!(
@@ -3888,32 +3892,37 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             )
             .to_string(),
         }];
-        items.extend(catalog.iter().map(|g| {
-            let has_key = g.is_local || resolve_api_key(&g.api_key_env).is_some();
-            let badge = if g.is_local {
-                format!(
-                    "{}{}{}",
-                    GREEN,
-                    tr_en("🟢 Yerel (Hazır)", "🟢 Local (Ready)"),
-                    RESET
-                )
-            } else if has_key {
-                format!("{}{}{}", GREEN, tr_en("🟢 Bağlı", "🟢 Connected"), RESET)
-            } else {
-                format!(
-                    "{}{}{}",
-                    YELLOW,
-                    tr_en("🔗 Bağlan / Giriş", "🔗 Connect / Login"),
-                    RESET
-                )
-            };
-            let clean_title = g.title.replace(" (BYOK)", "");
-            MenuItem {
-                key: g.id.clone(),
-                badge,
-                desc: format!("{} · {}", clean_title, g.base_url),
-            }
-        }));
+        items.extend(
+            catalog
+                .iter()
+                .filter(|g| g.id != "ollama" || cfg.local_discovery_url.is_none())
+                .map(|g| {
+                    let has_key = g.is_local || resolve_api_key(&g.api_key_env).is_some();
+                    let badge = if g.is_local {
+                        format!(
+                            "{}{}{}",
+                            GREEN,
+                            tr_en("🟢 Yerel (Hazır)", "🟢 Local (Ready)"),
+                            RESET
+                        )
+                    } else if has_key {
+                        format!("{}{}{}", GREEN, tr_en("🟢 Bağlı", "🟢 Connected"), RESET)
+                    } else {
+                        format!(
+                            "{}{}{}",
+                            YELLOW,
+                            tr_en("🔗 Bağlan / Giriş", "🔗 Connect / Login"),
+                            RESET
+                        )
+                    };
+                    let clean_title = g.title.replace(" (BYOK)", "");
+                    MenuItem {
+                        key: g.id.clone(),
+                        badge,
+                        desc: format!("{} · {}", clean_title, g.base_url),
+                    }
+                }),
+        );
 
         items.push(MenuItem {
             key: "custom-provider".to_string(),
@@ -3941,42 +3950,7 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
     };
 
     if chosen == "local-server" {
-        let mut cfg = load_user_config();
-        let cur_base = cfg
-            .local_base_url
-            .clone()
-            .unwrap_or_else(|| "http://127.0.0.1:8000/v1".to_string());
-        println!(
-            "\n{}╭─ 🟢 {} ───────────────────────────────{}",
-            CYAN,
-            tr_en(
-                "YEREL MODEL SUNUCUSU BAĞLANTISI",
-                "LOCAL MODEL SERVER CONNECTION"
-            ),
-            RESET
-        );
-        let entered_base = prompt_inline_line(&format!(
-            "│ {} [{}]",
-            tr_en(
-                "Yerel Sunucu Base URL (Enter = mevcut adresi kullan)",
-                "Local Server Base URL (Enter = keep current)"
-            ),
-            cur_base
-        ))
-        .unwrap_or(cur_base);
-        let clean_base = entered_base.trim().trim_end_matches('/').to_string();
-        let disc_url = format!("{}/models", clean_base);
-        cfg.local_base_url = Some(clean_base.clone());
-        cfg.local_discovery_url = Some(disc_url.clone());
-        let _ = save_user_config(&cfg);
-        println!(
-            "{}╰─ ✅ {}: {}{}{}",
-            CYAN,
-            tr_en("Yerel sunucu bağlandı", "Local server connected"),
-            GREEN,
-            clean_base,
-            RESET
-        );
+        let cfg = load_user_config();
         return interactive_select_model(&cfg.default_model, true);
     }
 
