@@ -659,12 +659,45 @@ fn default_hosts() -> Vec<RemoteHostConfig> {
     }]
 }
 
+fn merge_fallback_mcp_servers(target: &mut HashMap<String, McpServerConfig>) {
+    let home = home_dir();
+    for fallback_path in [
+        home.join(".omp").join("agent").join("mcp.json"),
+        home.join(".claude.json"),
+    ] {
+        let Ok(raw) = fs::read_to_string(&fallback_path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let servers_obj = val
+            .get("mcpServers")
+            .and_then(|v| v.as_object())
+            .or_else(|| val.as_object());
+        let Some(map) = servers_obj else {
+            continue;
+        };
+        for (k, v) in map {
+            if target.contains_key(k) {
+                continue;
+            }
+            if let Ok(srv) = serde_json::from_value::<McpServerConfig>(v.clone()) {
+                if srv.command.is_some() || srv.url.is_some() {
+                    target.insert(k.clone(), srv);
+                }
+            }
+        }
+    }
+}
+
 pub fn load_user_config() -> SpavnUserConfig {
     let cfg_path = spavn_dir().join("config.json");
     if let Ok(raw) = fs::read_to_string(&cfg_path) {
         set_owner_only_mode(&cfg_path, 0o600);
-        if let Ok(parsed) = serde_json::from_str::<SpavnUserConfig>(&raw) {
+        if let Ok(mut parsed) = serde_json::from_str::<SpavnUserConfig>(&raw) {
             set_lang_en(parsed.language.eq_ignore_ascii_case("en"));
+            merge_fallback_mcp_servers(&mut parsed.mcp_servers);
             return parsed;
         }
     }
@@ -685,7 +718,11 @@ pub fn load_user_config() -> SpavnUserConfig {
         allowed_paths: Vec::new(),
         providers: Vec::new(),
         hosts: default_hosts(),
-        mcp_servers: HashMap::new(),
+        mcp_servers: {
+            let mut m = HashMap::new();
+            merge_fallback_mcp_servers(&mut m);
+            m
+        },
     }
 }
 
