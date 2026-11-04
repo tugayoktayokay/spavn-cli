@@ -117,12 +117,12 @@ impl ToolContext {
             )),
             PathRisk::Ask {
                 reason,
-                even_sovereign,
+                even_sovereign: _,
             } => {
-                if !even_sovereign && self.access == AccessMode::Sovereign {
+                if self.access == AccessMode::Sovereign {
                     return Ok(());
                 }
-                if !even_sovereign && write && self.access == AccessMode::Safe {
+                if write && self.access == AccessMode::Safe {
                     return Ok(());
                 }
                 if prompt_user_approval(self, &format!("{} — {}", reason, verb), raw_path) {
