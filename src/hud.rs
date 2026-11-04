@@ -333,8 +333,12 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
     let mut mid_lines: Vec<String> = Vec::new();
     if has_typed {
         let wrap_cols = max_w.saturating_sub(7).max(12);
-        let (wrapped, _, _) =
-            wrap_input_lines_with_cursor(&state.typing_buf, state.typing_buf.len(), wrap_cols);
+        let (wrapped, _, _) = wrap_input_lines_with_cursor(
+            &state.typing_buf,
+            state.typing_buf.len(),
+            None,
+            wrap_cols,
+        );
         let total_w = wrapped.len();
         let win_start = total_w.saturating_sub(4);
         let visible_slice = &wrapped[win_start..];
@@ -1326,6 +1330,7 @@ fn style_inline_image_tokens(line: &str) -> String {
 fn wrap_input_lines_with_cursor(
     chars: &[char],
     cursor_pos: usize,
+    sel_range: Option<(usize, usize)>,
     max_line_cols: usize,
 ) -> (Vec<String>, usize, usize) {
     let cap = max_line_cols.max(8);
@@ -1335,6 +1340,7 @@ fn wrap_input_lines_with_cursor(
     let mut cursor_row = 0usize;
     let mut cursor_col_offset = 0usize;
     let mut cursor_recorded = false;
+    let mut in_sel = false;
 
     for (i, &ch) in chars.iter().enumerate() {
         if i == cursor_pos {
@@ -1342,13 +1348,24 @@ fn wrap_input_lines_with_cursor(
             cursor_col_offset = cur_w;
             cursor_recorded = true;
         }
+        let want_sel = sel_range
+            .map(|(s, e)| s < e && i >= s && i < e)
+            .unwrap_or(false);
         if ch == '\n' {
+            if in_sel {
+                cur_line.push_str("\x1b[27m");
+                in_sel = false;
+            }
             lines.push(std::mem::take(&mut cur_line));
             cur_w = 0;
             continue;
         }
         let w = char_display_width(ch).max(1);
         if cur_w + w > cap && !cur_line.is_empty() {
+            if in_sel {
+                cur_line.push_str("\x1b[27m");
+                in_sel = false;
+            }
             lines.push(std::mem::take(&mut cur_line));
             cur_w = 0;
             if i == cursor_pos {
@@ -1356,10 +1373,17 @@ fn wrap_input_lines_with_cursor(
                 cursor_col_offset = 0;
             }
         }
+        if want_sel != in_sel {
+            cur_line.push_str(if want_sel { "\x1b[7m" } else { "\x1b[27m" });
+            in_sel = want_sel;
+        }
         cur_line.push(ch);
         cur_w += w;
     }
 
+    if in_sel {
+        cur_line.push_str("\x1b[27m");
+    }
     if !cursor_recorded {
         cursor_row = lines.len();
         cursor_col_offset = cur_w;
@@ -1380,6 +1404,7 @@ fn render_inline_dock(
     quota_badge: &str,
     input_chars: &[char],
     cursor_pos: usize,
+    sel_range: Option<(usize, usize)>,
     suggestions: &[(String, String)],
     selected_idx: Option<usize>,
     queued_count: usize,
@@ -1445,7 +1470,7 @@ fn render_inline_dock(
 
     let max_input_cols = full_w.saturating_sub(5).max(8);
     let (wrapped_input_lines, cursor_row, cursor_col_offset) =
-        wrap_input_lines_with_cursor(input_chars, cursor_pos, max_input_cols);
+        wrap_input_lines_with_cursor(input_chars, cursor_pos, sel_range, max_input_cols);
     let formatted_input_lines: Vec<String> = wrapped_input_lines
         .iter()
         .enumerate()
@@ -1523,12 +1548,29 @@ fn render_inline_dock(
             format!("{}{}{}", DIM, tr_en("\\: Faz", "\\: Phase"), RESET),
         ];
         if !input_chars.is_empty() {
-            h_items.push(format!(
-                "{}{}{}",
-                YELLOW,
-                tr_en("Esc / Ctrl+U: Tümünü Sil", "Esc / Ctrl+U: Clear All"),
-                RESET
-            ));
+            if let Some((s, e)) = sel_range {
+                if s < e {
+                    h_items.push(format!(
+                        "{}{}{}",
+                        YELLOW,
+                        tr_en(
+                            &format!("Seçili: {} krk (Backspace: Sil)", e - s),
+                            &format!("Selected: {} chars (Backspace: Delete)", e - s)
+                        ),
+                        RESET
+                    ));
+                }
+            } else {
+                h_items.push(format!(
+                    "{}{}{}",
+                    YELLOW,
+                    tr_en(
+                        "Shift+←/→: Seç · Esc/Ctrl+U: Tümünü Sil",
+                        "Shift+←/→: Select · Esc/Ctrl+U: Clear All"
+                    ),
+                    RESET
+                ));
+            }
         }
         flex_wrap_items(
             &bot_prefix_first,
@@ -1705,6 +1747,7 @@ pub fn read_bottom_dock_input(
 
     let mut chars: Vec<char> = initial_prefill.unwrap_or("").chars().collect();
     let mut cursor_pos: usize = chars.len();
+    let mut sel_anchor: Option<usize> = None;
     let mut hist_idx = history.len();
     let mut suggestion_idx: Option<usize> = None;
     let mut kbuf = [0u8; 4096];
@@ -1783,6 +1826,12 @@ pub fn read_bottom_dock_input(
                 None
             };
 
+            let cur_sel = sel_anchor.and_then(|a| {
+                let s = a.min(cursor_pos);
+                let e = a.max(cursor_pos);
+                (s < e).then_some((s, e))
+            });
+
             render_inline_dock(
                 endpoint,
                 *access,
@@ -1791,6 +1840,7 @@ pub fn read_bottom_dock_input(
                 quota_badge,
                 &chars,
                 cursor_pos,
+                cur_sel,
                 &suggestions,
                 suggestion_idx,
                 crate::queued_message_count(),
@@ -1823,7 +1873,9 @@ pub fn read_bottom_dock_input(
         };
 
         if n == 1 && kbuf[0] == 27 {
-            if !chars.is_empty() {
+            if sel_anchor.is_some() {
+                sel_anchor = None;
+            } else if !chars.is_empty() {
                 chars.clear();
                 cursor_pos = 0;
                 suggestion_idx = None;
@@ -1848,9 +1900,18 @@ pub fn read_bottom_dock_input(
                     idx += 5;
                     continue;
                 }
-                // Option+Backspace (macOS sends \x1b\x7f or \x1b\x08): delete word or image token backward
+                // Option+Backspace (macOS sends \x1b\x7f or \x1b\x08): delete selection or word backward
                 if idx < n && (kbuf[idx] == 127 || kbuf[idx] == 8) {
                     idx += 1;
+                    if let Some(a) = sel_anchor.take() {
+                        let s = a.min(cursor_pos);
+                        let e = a.max(cursor_pos);
+                        if s < e {
+                            chars.drain(s..e);
+                            cursor_pos = s;
+                            continue;
+                        }
+                    }
                     if let Some((start, end)) = image_token_span_before_cursor(&chars, cursor_pos) {
                         chars.drain(start..end);
                         cursor_pos = start;
@@ -1866,9 +1927,17 @@ pub fn read_bottom_dock_input(
                     }
                     continue;
                 }
-                // Option+Left (\x1bb) / Option+Right (\x1bf): word jump
-                if idx < n && kbuf[idx] == b'b' {
+                // Option+Left (\x1bb) / Option+Right (\x1bf): word jump; Shift+Option+Left (\x1bB) / Right (\x1bF): word select
+                if idx < n && (kbuf[idx] == b'b' || kbuf[idx] == b'B') {
+                    let is_shift = kbuf[idx] == b'B';
                     idx += 1;
+                    if is_shift {
+                        if sel_anchor.is_none() {
+                            sel_anchor = Some(cursor_pos);
+                        }
+                    } else {
+                        sel_anchor = None;
+                    }
                     if let Some((start, _)) = image_token_span_before_cursor(&chars, cursor_pos) {
                         cursor_pos = start;
                     } else {
@@ -1879,10 +1948,21 @@ pub fn read_bottom_dock_input(
                             cursor_pos -= 1;
                         }
                     }
+                    if sel_anchor == Some(cursor_pos) {
+                        sel_anchor = None;
+                    }
                     continue;
                 }
-                if idx < n && kbuf[idx] == b'f' {
+                if idx < n && (kbuf[idx] == b'f' || kbuf[idx] == b'F') {
+                    let is_shift = kbuf[idx] == b'F';
                     idx += 1;
+                    if is_shift {
+                        if sel_anchor.is_none() {
+                            sel_anchor = Some(cursor_pos);
+                        }
+                    } else {
+                        sel_anchor = None;
+                    }
                     if let Some((_, end)) = image_token_span_at_cursor(&chars, cursor_pos) {
                         cursor_pos = end;
                     } else {
@@ -1893,9 +1973,99 @@ pub fn read_bottom_dock_input(
                             cursor_pos += 1;
                         }
                     }
+                    if sel_anchor == Some(cursor_pos) {
+                        sel_anchor = None;
+                    }
                     continue;
                 }
                 if idx + 1 < n && (kbuf[idx] == b'[' || kbuf[idx] == b'O') {
+                    // Check for modified CSI sequence like `\x1b[1;2D` (Shift+Left), `\x1b[1;3D` (Alt+Left), `\x1b[1;4D` (Shift+Alt+Left)
+                    let csi_slice = &kbuf[idx + 1..n];
+                    if csi_slice.starts_with(b"1;") && csi_slice.len() >= 4 {
+                        let mod_byte = csi_slice[2];
+                        let final_b = csi_slice[3];
+                        if matches!(mod_byte, b'2'..=b'9')
+                            && matches!(final_b, b'A' | b'B' | b'C' | b'D' | b'H' | b'F')
+                        {
+                            idx += 5; // '[' + "1;X" + final_b
+                            let mod_val = mod_byte - b'0';
+                            let has_shift = ((mod_val - 1) & 1) != 0;
+                            let has_alt_or_ctrl = ((mod_val - 1) & 6) != 0;
+                            if has_shift {
+                                if sel_anchor.is_none() {
+                                    sel_anchor = Some(cursor_pos);
+                                }
+                            } else {
+                                sel_anchor = None;
+                            }
+                            match final_b {
+                                b'D' => {
+                                    if has_alt_or_ctrl {
+                                        if let Some((start, _)) =
+                                            image_token_span_before_cursor(&chars, cursor_pos)
+                                        {
+                                            cursor_pos = start;
+                                        } else {
+                                            while cursor_pos > 0
+                                                && chars[cursor_pos - 1].is_whitespace()
+                                            {
+                                                cursor_pos -= 1;
+                                            }
+                                            while cursor_pos > 0
+                                                && !chars[cursor_pos - 1].is_whitespace()
+                                            {
+                                                cursor_pos -= 1;
+                                            }
+                                        }
+                                    } else if let Some((start, _)) =
+                                        image_token_span_before_cursor(&chars, cursor_pos)
+                                    {
+                                        cursor_pos = start;
+                                    } else {
+                                        cursor_pos = cursor_pos.saturating_sub(1);
+                                    }
+                                }
+                                b'C' => {
+                                    if has_alt_or_ctrl {
+                                        if let Some((_, end)) =
+                                            image_token_span_at_cursor(&chars, cursor_pos)
+                                        {
+                                            cursor_pos = end;
+                                        } else {
+                                            while cursor_pos < chars.len()
+                                                && chars[cursor_pos].is_whitespace()
+                                            {
+                                                cursor_pos += 1;
+                                            }
+                                            while cursor_pos < chars.len()
+                                                && !chars[cursor_pos].is_whitespace()
+                                            {
+                                                cursor_pos += 1;
+                                            }
+                                        }
+                                    } else if let Some((_, end)) =
+                                        image_token_span_at_cursor(&chars, cursor_pos)
+                                    {
+                                        cursor_pos = end;
+                                    } else if cursor_pos < chars.len() {
+                                        cursor_pos += 1;
+                                    }
+                                }
+                                b'H' | b'A' => {
+                                    cursor_pos = 0;
+                                }
+                                b'F' | b'B' => {
+                                    cursor_pos = chars.len();
+                                }
+                                _ => {}
+                            }
+                            if sel_anchor == Some(cursor_pos) {
+                                sel_anchor = None;
+                            }
+                            continue;
+                        }
+                    }
+
                     let csi_code = kbuf[idx + 1];
                     idx += 2;
                     let cur_buf_s: String = chars.iter().collect();
@@ -1906,6 +2076,7 @@ pub fn read_bottom_dock_input(
                             let _ = PromptEvent::CycleAccess;
                         }
                         b'A' => {
+                            sel_anchor = None;
                             if !cur_suggestions.is_empty() {
                                 let cur = suggestion_idx.unwrap_or(0);
                                 let prev = if cur == 0 {
@@ -1929,6 +2100,7 @@ pub fn read_bottom_dock_input(
                             }
                         }
                         b'B' => {
+                            sel_anchor = None;
                             if !cur_suggestions.is_empty() {
                                 let cur = suggestion_idx.unwrap_or(0);
                                 let next = (cur + 1) % cur_suggestions.len();
@@ -1944,14 +2116,20 @@ pub fn read_bottom_dock_input(
                             }
                         }
                         b'C' => {
-                            if let Some((_, end)) = image_token_span_at_cursor(&chars, cursor_pos) {
+                            if let Some(a) = sel_anchor.take() {
+                                cursor_pos = a.max(cursor_pos);
+                            } else if let Some((_, end)) =
+                                image_token_span_at_cursor(&chars, cursor_pos)
+                            {
                                 cursor_pos = end;
                             } else if cursor_pos < chars.len() {
                                 cursor_pos += 1;
                             }
                         }
                         b'D' => {
-                            if let Some((start, _)) =
+                            if let Some(a) = sel_anchor.take() {
+                                cursor_pos = a.min(cursor_pos);
+                            } else if let Some((start, _)) =
                                 image_token_span_before_cursor(&chars, cursor_pos)
                             {
                                 cursor_pos = start;
@@ -1960,14 +2138,25 @@ pub fn read_bottom_dock_input(
                             }
                         }
                         b'H' => {
+                            sel_anchor = None;
                             cursor_pos = 0;
                         }
                         b'F' => {
+                            sel_anchor = None;
                             cursor_pos = chars.len();
                         }
                         b'3' => {
                             if idx < n && kbuf[idx] == b'~' {
                                 idx += 1;
+                            }
+                            if let Some(a) = sel_anchor.take() {
+                                let s = a.min(cursor_pos);
+                                let e = a.max(cursor_pos);
+                                if s < e {
+                                    chars.drain(s..e);
+                                    cursor_pos = s;
+                                    continue;
+                                }
                             }
                             if let Some((start, end)) =
                                 image_token_span_at_cursor(&chars, cursor_pos)
@@ -1981,12 +2170,14 @@ pub fn read_bottom_dock_input(
                             if idx < n && kbuf[idx] == b'~' {
                                 idx += 1;
                             }
+                            sel_anchor = None;
                             cursor_pos = 0;
                         }
                         b'4' | b'8' => {
                             if idx < n && kbuf[idx] == b'~' {
                                 idx += 1;
                             }
+                            sel_anchor = None;
                             cursor_pos = chars.len();
                         }
                         _ => {
@@ -2116,15 +2307,40 @@ pub fn read_bottom_dock_input(
                     }
                     return PromptEvent::Submit(submitted);
                 }
-                1 => cursor_pos = 0,
-                5 => cursor_pos = chars.len(),
-                2 => cursor_pos = cursor_pos.saturating_sub(1),
+                1 => {
+                    // Ctrl+A: if not already selecting all, select all! Press again to jump to start.
+                    if !chars.is_empty() && sel_anchor != Some(0) {
+                        sel_anchor = Some(0);
+                        cursor_pos = chars.len();
+                    } else {
+                        sel_anchor = None;
+                        cursor_pos = 0;
+                    }
+                }
+                5 => {
+                    sel_anchor = None;
+                    cursor_pos = chars.len();
+                }
+                2 => {
+                    sel_anchor = None;
+                    cursor_pos = cursor_pos.saturating_sub(1);
+                }
                 6 => {
+                    sel_anchor = None;
                     if cursor_pos < chars.len() {
                         cursor_pos += 1;
                     }
                 }
                 23 => {
+                    if let Some(a) = sel_anchor.take() {
+                        let s = a.min(cursor_pos);
+                        let e = a.max(cursor_pos);
+                        if s < e {
+                            chars.drain(s..e);
+                            cursor_pos = s;
+                            continue;
+                        }
+                    }
                     if let Some((start, end)) = image_token_span_before_cursor(&chars, cursor_pos) {
                         chars.drain(start..end);
                         cursor_pos = start;
@@ -2141,10 +2357,20 @@ pub fn read_bottom_dock_input(
                 }
                 11 => {
                     // Ctrl+K: delete from cursor to end of input
+                    sel_anchor = None;
                     chars.truncate(cursor_pos);
                     suggestion_idx = None;
                 }
                 127 | 8 => {
+                    if let Some(a) = sel_anchor.take() {
+                        let s = a.min(cursor_pos);
+                        let e = a.max(cursor_pos);
+                        if s < e {
+                            chars.drain(s..e);
+                            cursor_pos = s;
+                            continue;
+                        }
+                    }
                     if let Some((start, end)) = image_token_span_before_cursor(&chars, cursor_pos) {
                         chars.drain(start..end);
                         cursor_pos = start;
@@ -2154,6 +2380,7 @@ pub fn read_bottom_dock_input(
                     }
                 }
                 21 => {
+                    sel_anchor = None;
                     chars.clear();
                     cursor_pos = 0;
                     suggestion_idx = None;
@@ -2211,6 +2438,14 @@ pub fn read_bottom_dock_input(
                         }
                     }
                     if let Ok(s) = String::from_utf8(utf8_bytes) {
+                        if let Some(a) = sel_anchor.take() {
+                            let st = a.min(cursor_pos);
+                            let en = a.max(cursor_pos);
+                            if st < en {
+                                chars.drain(st..en);
+                                cursor_pos = st;
+                            }
+                        }
                         for ch in s.chars() {
                             chars.insert(cursor_pos, ch);
                             cursor_pos += 1;
