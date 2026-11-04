@@ -250,7 +250,7 @@ struct SpinnerScreenState {
     paused: bool,
     label: String,
     started_at: Option<Instant>,
-    dock_lines: [String; 3],
+    dock_lines: Vec<String>,
     partial_line: String,
     partial_prefix: String,
     partial_shown: bool,
@@ -267,7 +267,7 @@ static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
         paused: false,
         label: String::new(),
         started_at: None,
-        dock_lines: [String::new(), String::new(), String::new()],
+        dock_lines: Vec::new(),
         partial_line: String::new(),
         partial_prefix: String::new(),
         partial_shown: false,
@@ -329,27 +329,33 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
     );
     let (top_line, _) = truncate_ansi_to_width(&top_raw, max_w);
     let has_typed = state.is_typing || !state.typing_buf.is_empty();
-    let mid_raw = if has_typed {
-        let avail_cols = max_w.saturating_sub(7).max(10);
-        let mut tail_chars: Vec<char> = Vec::new();
-        let mut used_w = 0usize;
-        let mut truncated_left = false;
-        for &ch in state.typing_buf.iter().rev() {
-            let cw = char_display_width(ch).max(1);
-            if used_w + cw > avail_cols {
-                truncated_left = true;
-                break;
-            }
-            used_w += cw;
-            tail_chars.push(ch);
+    let mut mid_lines: Vec<String> = Vec::new();
+    if has_typed {
+        let wrap_cols = max_w.saturating_sub(7).max(12);
+        let (wrapped, _, _) =
+            wrap_input_lines_with_cursor(&state.typing_buf, state.typing_buf.len(), wrap_cols);
+        let total_w = wrapped.len();
+        let win_start = total_w.saturating_sub(4);
+        let visible_slice = &wrapped[win_start..];
+        for (i, line) in visible_slice.iter().enumerate() {
+            let is_last = i + 1 == visible_slice.len();
+            let cursor_block = if is_last {
+                format!("{}█{}", CYAN, RESET)
+            } else {
+                String::new()
+            };
+            let styled = style_inline_image_tokens(line);
+            let raw_row = if i == 0 {
+                format!(
+                    "{}│{} {}❯{} {}{}",
+                    CYAN, RESET, BOLD, RESET, styled, cursor_block
+                )
+            } else {
+                format!("{}│{}   {}{}", CYAN, RESET, styled, cursor_block)
+            };
+            let (trunc_row, _) = truncate_ansi_to_width(&raw_row, max_w);
+            mid_lines.push(trunc_row);
         }
-        tail_chars.reverse();
-        let visible_typed: String = tail_chars.into_iter().collect();
-        let ellipsis = if truncated_left { "…" } else { "" };
-        format!(
-            "{}│{} {}❯{} {}{}{}{}█{}",
-            CYAN, RESET, BOLD, RESET, DIM, ellipsis, RESET, visible_typed, CYAN
-        ) + RESET
     } else if let Some((is_steer, pending_txt)) = crate::peek_last_pending_message() {
         let short_p: String = pending_txt
             .chars()
@@ -360,7 +366,7 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
         } else {
             format!("{}📥 {}{}", GREEN, tr_en("Kuyruk", "Queued"), RESET)
         };
-        format!(
+        let raw_row = format!(
             "{}│{} {}❯{} {} {}·{} {}{}{} {}[↑: {} · Ctrl+X: {}]{}",
             CYAN,
             RESET,
@@ -376,9 +382,11 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
             tr_en("Düzenle", "Edit"),
             tr_en("İptal", "Cancel"),
             RESET
-        )
+        );
+        let (trunc_row, _) = truncate_ansi_to_width(&raw_row, max_w);
+        mid_lines.push(trunc_row);
     } else {
-        format!(
+        let raw_row = format!(
             "{}│{} {}❯{} {}{}{}",
             CYAN,
             RESET,
@@ -390,9 +398,10 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
                 "Type a message (send immediately to steer or queue for next turn)..."
             ),
             RESET
-        )
-    };
-    let (mid_line, _) = truncate_ansi_to_width(&mid_raw, max_w);
+        );
+        let (trunc_row, _) = truncate_ansi_to_width(&raw_row, max_w);
+        mid_lines.push(trunc_row);
+    }
     let esc_hint = if has_typed {
         tr_en(
             "Tab: Mod · Esc/Ctrl+U: Metni Sil",
@@ -423,7 +432,11 @@ fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, 
         RESET
     );
     let (bot_line, _) = truncate_ansi_to_width(&bot_raw, max_w);
-    state.dock_lines = [top_line, mid_line, bot_line];
+    let mut all_dock = Vec::with_capacity(mid_lines.len() + 2);
+    all_dock.push(top_line);
+    all_dock.extend(mid_lines);
+    all_dock.push(bot_line);
+    state.dock_lines = all_dock;
 }
 
 fn in_incomplete_ansi(s: &str) -> bool {
@@ -494,19 +507,21 @@ fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
     }
 
     out.push_str("\x1b[?7l");
+    let dock_up = state.dock_lines.len().saturating_sub(1);
     let up_rows = if !state.partial_line.is_empty() {
         let (preview, _) = truncate_ansi_to_width(&state.partial_line, max_w);
         out.push_str(&preview);
         out.push_str("\x1b[0m\n");
         state.partial_shown = true;
-        3usize
+        dock_up + 1
     } else {
         state.partial_shown = false;
-        2usize
+        dock_up
     };
     out.push_str(&format!(
-        "{}\n{}\n{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
-        state.dock_lines[0], state.dock_lines[1], state.dock_lines[2], up_rows
+        "{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
+        state.dock_lines.join("\n"),
+        up_rows
     ));
     print!("{}", out);
     let _ = io::stdout().flush();
@@ -621,9 +636,11 @@ pub fn resume_active_spinner() {
             if state.active && state.paused {
                 state.paused = false;
                 state.partial_shown = false;
+                let dock_up = state.dock_lines.len().saturating_sub(1).max(1);
                 print!(
-                    "\x1b[?2004h\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J{}\n{}\n{}\x1b[2A\r\x1b[?7h\x1b[?2026l",
-                    state.dock_lines[0], state.dock_lines[1], state.dock_lines[2]
+                    "\x1b[?2004h\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
+                    state.dock_lines.join("\n"),
+                    dock_up
                 );
                 let _ = io::stdout().flush();
             }
@@ -2179,9 +2196,11 @@ impl LiveSpinner {
             }
             let (_, cols) = term_size();
             rebuild_spinner_dock_lines(&mut state, &status_hdr_init, cols);
+            let dock_up = state.dock_lines.len().saturating_sub(1).max(1);
             print!(
-                "\x1b[?2004h\x1b[?2026h\x1b[?25l\x1b[?7l{}\n{}\n{}\x1b[2A\r\x1b[?7h\x1b[?2026l",
-                state.dock_lines[0], state.dock_lines[1], state.dock_lines[2]
+                "\x1b[?2004h\x1b[?2026h\x1b[?25l\x1b[?7l{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
+                state.dock_lines.join("\n"),
+                dock_up
             );
             let _ = io::stdout().flush();
         }
@@ -2494,6 +2513,7 @@ impl LiveSpinner {
                 if let Ok(mut state) = SPINNER_SCREEN.lock() {
                     if state.active && !state.paused {
                         rebuild_spinner_dock_lines(&mut state, &status_hdr, cols);
+                        let dock_up = state.dock_lines.len().saturating_sub(1).max(1);
                         let mut out = String::from("\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J");
                         let up_rows = if !state.partial_line.is_empty() {
                             let (preview, _) = truncate_ansi_to_width(
@@ -2503,14 +2523,15 @@ impl LiveSpinner {
                             out.push_str(&preview);
                             out.push_str("\x1b[0m\n");
                             state.partial_shown = true;
-                            3usize
+                            dock_up + 1
                         } else {
                             state.partial_shown = false;
-                            2usize
+                            dock_up
                         };
                         out.push_str(&format!(
-                            "{}\n{}\n{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
-                            state.dock_lines[0], state.dock_lines[1], state.dock_lines[2], up_rows
+                            "{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
+                            state.dock_lines.join("\n"),
+                            up_rows
                         ));
                         print!("{}", out);
                         let _ = io::stdout().flush();
