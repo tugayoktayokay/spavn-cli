@@ -358,28 +358,47 @@ fn compact_messages_for_model(
     } else {
         raw_tok >= (max_ctx_tokens * 50) / 100
     };
-    let keep_recent = if is_local { 10 } else { 20 };
     let len = messages.len();
+    let last_user_idx = messages
+        .iter()
+        .rposition(|m| {
+            m.role == "user"
+                && !m
+                    .content
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("[SPAVN VERIFICATION GATE]")
+        })
+        .unwrap_or_else(|| {
+            messages
+                .iter()
+                .rposition(|m| m.role == "user")
+                .unwrap_or(len)
+        });
+    // Anchor pruning & reasoning eviction to `last_user_idx` (stepping only every 16 messages
+    // within marathon turns) so the prompt prefix stays 100% byte-identical across consecutive
+    // tool calls and `llama-server` KV-cache never re-evaluates the active turn prefix.
+    let turn_anchor = last_user_idx + ((len.saturating_sub(last_user_idx)) / 16) * 12;
     let cutoff = if prune_old_tools {
-        len.saturating_sub(keep_recent)
+        if is_local {
+            turn_anchor
+        } else {
+            len.saturating_sub(20).min(turn_anchor)
+        }
     } else {
         0
     };
-    let live_sigs = if prune_old_tools {
+    // Keep `messages[0]` static for local models so KV-cache from token 0 is never invalidated.
+    let live_sigs = if !is_local && prune_old_tools {
         tools::build_live_project_signatures(".")
     } else {
         String::new()
     };
-    let last_user_idx = messages
-        .iter()
-        .rposition(|m| m.role == "user")
-        .unwrap_or(len);
     let keep_reasoning_from = if is_local {
-        last_user_idx.min(len.saturating_sub(6))
+        turn_anchor
     } else {
         last_user_idx
     };
-
     messages
         .iter()
         .enumerate()
@@ -491,14 +510,31 @@ pub(crate) fn perform_manual_compact(
 
     if messages.len() > 6 {
         let sys = messages[0].clone();
+        let active_user_idx = messages.iter().rposition(|m| {
+            m.role == "user"
+                && !m
+                    .content
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("[SPAVN ")
+        });
+        let active_user_prompt = active_user_idx
+            .and_then(|idx| messages[idx].content.clone())
+            .map(|c| hud::strip_internal_tags_for_display(&c).trim().to_string())
+            .filter(|s| !s.is_empty());
         let mut tail_start = messages.len().saturating_sub(4);
+        if let Some(u_idx) = active_user_idx {
+            if messages.len().saturating_sub(u_idx) <= 8 {
+                tail_start = tail_start.min(u_idx);
+            }
+        }
         while tail_start > 1 && messages[tail_start].role == "tool" {
             tail_start -= 1;
         }
         let mut transcript_lines = Vec::new();
         for m in &messages[1..tail_start] {
             if m.role == "user" || m.role == "assistant" {
-                if let Some(ref c) = m.content {
+                if let Some(c) = &m.content {
                     let clean = hud::strip_internal_tags_for_display(c);
                     let snippet: String = clean
                         .lines()
@@ -517,7 +553,6 @@ pub(crate) fn perform_manual_compact(
             }
         }
         let focus_note = focus.map(|f| format!(" (Odak: {})", f)).unwrap_or_default();
-
         // Try LLM-powered semantic compaction first (OMP-style structured handoff summary),
         // with instant fallback to algorithmic digest if offline/interrupted.
         let mut llm_summary: Option<String> = None;
@@ -569,10 +604,16 @@ pub(crate) fn perform_manual_compact(
         }
 
         let mut new_msgs = vec![sys];
+        let preserved_user_suffix = match (active_user_idx, active_user_prompt.as_deref()) {
+            (Some(u_idx), Some(prompt)) if u_idx < tail_start => {
+                format!("\n\n[Active User Request — MUST complete all items]:\n{}", prompt)
+            }
+            _ => String::new(),
+        };
         if let Some(semantic_summary) = llm_summary {
             new_msgs.push(ChatMessage::user(format!(
-                "[SPAVN Semantic Context Handoff{}]:\n{}",
-                focus_note, semantic_summary
+                "[SPAVN Semantic Context Handoff{}]:\n{}{}",
+                focus_note, semantic_summary, preserved_user_suffix
             )));
         } else if !transcript_lines.is_empty() {
             let tools_note = if touched_tools.is_empty() {
@@ -581,10 +622,11 @@ pub(crate) fn perform_manual_compact(
                 format!("\n- [tools/files]: {}", touched_tools.join(", "))
             };
             new_msgs.push(ChatMessage::user(format!(
-                "[SPAVN Auto-Compact Özet{}]:\n{}{}",
+                "[SPAVN Auto-Compact Özet{}]:\n{}{}{}",
                 focus_note,
                 transcript_lines.join("\n"),
-                tools_note
+                tools_note,
+                preserved_user_suffix
             )));
         }
         new_msgs.extend_from_slice(&messages[tail_start..]);
@@ -717,11 +759,16 @@ fn run_agent_turn(
         };
 
         let max_ctx_tokens = step_endpoint.context_window_tokens();
-        let raw_before_tok = hud::estimate_messages_tokens(messages);
-        if raw_before_tok >= (max_ctx_tokens * 80) / 100 && messages.len() > 6 {
+        let mut view_messages =
+            compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
+        let mut view_tok = hud::estimate_messages_tokens(&view_messages);
+        if view_tok >= (max_ctx_tokens * 80) / 100 && messages.len() > 6 {
+            let raw_before_tok = hud::estimate_messages_tokens(messages);
             perform_manual_compact(&step_endpoint, messages, None);
             rewrite_session(session_file, messages);
-            let after_full_tok = hud::estimate_messages_tokens(messages);
+            view_messages =
+                compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
+            view_tok = hud::estimate_messages_tokens(&view_messages);
             if !quiet {
                 println!(
                     "{}╰─ ⚡ {}: {} → {}{}",
@@ -731,15 +778,11 @@ fn run_agent_turn(
                         "[SPAVN Auto-Continuing after context compaction]"
                     ),
                     hud::format_token_short(raw_before_tok),
-                    hud::format_token_short(after_full_tok),
+                    hud::format_token_short(view_tok),
                     RESET
                 );
             }
         }
-
-        let view_messages =
-            compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
-        let view_tok = hud::estimate_messages_tokens(&view_messages);
         hud::set_context_window_usage(view_tok, max_ctx_tokens);
         let mut spinner = if quiet {
             LiveSpinner::silent()
@@ -1960,5 +2003,66 @@ mod premature_stop_tests {
             Some((false, "ilk görev".to_string()))
         );
         assert_eq!(super::pop_last_pending_message(), None);
+    }
+
+    #[test]
+    fn local_compact_messages_preserves_kv_prefix_across_turn_steps() {
+        use crate::router::ChatMessage;
+        let mut msgs = vec![
+            ChatMessage::system("system prompt".to_string()),
+            ChatMessage::user("first task".to_string()),
+        ];
+        let make_assistant = |txt: String, reasoning: String| ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(txt),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            thought_signature: None,
+            reasoning_content: Some(reasoning),
+        };
+        for i in 0..8 {
+            msgs.push(make_assistant(format!("step {i}"), "r".repeat(4000)));
+            msgs.push(ChatMessage::tool_result(
+                format!("call_{i}"),
+                "read",
+                "x".repeat(6000),
+            ));
+        }
+        msgs.push(ChatMessage::user("second task: audit commit and fix test".to_string()));
+        for step in 0..5 {
+            msgs.push(make_assistant(
+                format!("active step {step}"),
+                format!("thinking {step}"),
+            ));
+            msgs.push(ChatMessage::tool_result(
+                format!("active_call_{step}"),
+                "read",
+                "y".repeat(1200),
+            ));
+        }
+        let view_a = super::compact_messages_for_model(&msgs, true, 131_072);
+        // Append one more assistant + tool step in the same turn
+        msgs.push(make_assistant(
+            "active step 5".to_string(),
+            "thinking 5".to_string(),
+        ));
+        msgs.push(ChatMessage::tool_result(
+            "active_call_5".to_string(),
+            "read",
+            "y".repeat(1200),
+        ));
+        let view_b = super::compact_messages_for_model(&msgs, true, 131_072);
+        assert_eq!(view_a.len() + 2, view_b.len());
+        for i in 0..view_a.len() {
+            assert_eq!(
+                view_a[i].content, view_b[i].content,
+                "KV prefix content mutated at message index {i}"
+            );
+            assert_eq!(
+                view_a[i].reasoning_content, view_b[i].reasoning_content,
+                "KV prefix reasoning_content mutated at message index {i}"
+            );
+        }
     }
 }
