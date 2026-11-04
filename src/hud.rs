@@ -1014,6 +1014,8 @@ impl Drop for TermiosGuard {
         unsafe {
             tcsetattr(0, TCSANOW, &self.0);
         }
+        print!("\x1b[?2004l\x1b[?7h\x1b[?25h");
+        let _ = io::stdout().flush();
     }
 }
 

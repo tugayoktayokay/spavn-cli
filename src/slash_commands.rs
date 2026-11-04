@@ -94,7 +94,13 @@ pub fn dispatch_slash_command(
         let exe_path = {
             let home = std::env::var("HOME").unwrap_or_default();
             let home_bin = PathBuf::from(&home).join(".local/bin/spavn");
-            let release_bin = PathBuf::from(&home).join("apps/spavn-cli/target/release/spavn");
+            let cwd_release_bin = PathBuf::from(cwd).join("target/release/spavn");
+            let dev_release_bin = PathBuf::from(&home).join("apps/spavn-cli/target/release/spavn");
+            let release_bin = if cwd_release_bin.exists() {
+                cwd_release_bin
+            } else {
+                dev_release_bin
+            };
             // If a newer release binary exists or if home_bin might have a dirty vnode signature cache on macOS,
             // atomically replace home_bin (new inode via rename) and ad-hoc sign so execve() never gets SIGKILL.
             let candidate = if release_bin.exists() {
@@ -112,17 +118,26 @@ pub fn dispatch_slash_command(
             } else {
                 &home_bin
             };
-            if candidate.exists() {
-                let tmp_bin = PathBuf::from(&home)
-                    .join(format!(".local/bin/.spavn.tmp.{}", std::process::id()));
-                if std::fs::copy(candidate, &tmp_bin).is_ok() {
-                    let _ = std::process::Command::new("codesign")
-                        .args(["-s", "-", "-f"])
-                        .arg(&tmp_bin)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    let _ = std::fs::rename(&tmp_bin, &home_bin);
+            if candidate.exists() && home_bin.parent().map(|p| p.exists()).unwrap_or(false) {
+                for dest_name in ["spavn", "spvn"] {
+                    let dest_bin = PathBuf::from(&home).join(format!(".local/bin/{}", dest_name));
+                    let tmp_bin = PathBuf::from(&home).join(format!(
+                        ".local/bin/.{}.tmp.{}",
+                        dest_name,
+                        std::process::id()
+                    ));
+                    if std::fs::copy(candidate, &tmp_bin).is_ok() {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = std::process::Command::new("codesign")
+                                .args(["-s", "-", "-f"])
+                                .arg(&tmp_bin)
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .status();
+                        }
+                        let _ = std::fs::rename(&tmp_bin, &dest_bin);
+                    }
                 }
                 home_bin
             } else {
