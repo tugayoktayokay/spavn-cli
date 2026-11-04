@@ -13,8 +13,8 @@ fn build_workspace_repo_map(cwd: &str, compact: bool) -> String {
     let mut map = String::new();
     let root = Path::new(cwd);
 
-    // 1. Git branch + short status
-    if root.join(".git").exists() {
+    // 1. Git branch + short status (only in full/cloud mode so local KV prefix stays 100% static across edits!)
+    if !compact && root.join(".git").exists() {
         if let Ok(branch_out) = Command::new("git")
             .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
             .output()

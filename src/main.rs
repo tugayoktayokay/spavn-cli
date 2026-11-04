@@ -214,12 +214,32 @@ const RESET: &str = "\x1b[0m";
 /// Local model context guard: max read-only file reads executed per agent turn.
 /// Beyond this budget the turn stops dispatching reads and asks the model to analyze
 /// what it already gathered, avoiding local KV-cache prefill stalls on huge parallel reads.
-const LOCAL_READ_BUDGET: usize = 3;
+const LOCAL_READ_BUDGET: usize = 5;
 
 fn is_read_tool_name(name: &str) -> bool {
     matches!(
         name.trim().to_lowercase().as_str(),
         "read" | "read_file" | "cat" | "view"
+    )
+}
+
+fn is_fast_inline_tool(name: &str) -> bool {
+    matches!(
+        name.trim().to_lowercase().as_str(),
+        "read"
+            | "read_file"
+            | "cat"
+            | "view"
+            | "edit"
+            | "edit_file"
+            | "replace"
+            | "patch"
+            | "write"
+            | "write_file"
+            | "search"
+            | "grep"
+            | "rg"
+            | "lsp"
     )
 }
 
@@ -823,10 +843,15 @@ fn run_agent_turn(
                         YELLOW, BOLD, tool_name, RESET, DIM, summary
                     );
                     let tool_started = std::time::Instant::now();
-                    let mut tool_spinner =
-                        LiveSpinner::start(&format!("⚡ {} çalıştırılıyor", tool_name));
-                    let out = execute_tool(ctx, &tool_name, &tc.function.arguments);
-                    tool_spinner.stop();
+                    let out = if is_fast_inline_tool(&tool_name) && ctx.default_host == "local" {
+                        execute_tool(ctx, &tool_name, &tc.function.arguments)
+                    } else {
+                        let mut tool_spinner =
+                            LiveSpinner::start(&format!("⚡ {} çalıştırılıyor", tool_name));
+                        let res = execute_tool(ctx, &tool_name, &tc.function.arguments);
+                        tool_spinner.stop();
+                        res
+                    };
                     (out, tool_started.elapsed().as_millis())
                 };
 
