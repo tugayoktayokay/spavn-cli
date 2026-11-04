@@ -646,7 +646,6 @@ fn compact_messages_for_model(
                     if let Some(tcs) = &mut cloned.tool_calls {
                         for tc in tcs.iter_mut() {
                             if tc.function.arguments.len() > 800 {
-                                let orig_len = tc.function.arguments.len();
                                 let path_hint = serde_json::from_str::<serde_json::Value>(
                                     &tc.function.arguments,
                                 )
@@ -658,10 +657,23 @@ fn compact_messages_for_model(
                                         .map(|s| safe_utf8_prefix(s, 120).to_string())
                                 })
                                 .unwrap_or_default();
-                                tc.function.arguments = serde_json::json!({
-                                    "path": path_hint,
-                                    "_compacted_bytes": orig_len
-                                })
+                                tc.function.arguments = match tc.function.name.as_str() {
+                                    "edit" => serde_json::json!({
+                                        "path": path_hint,
+                                        "old_text": "/* compacted */",
+                                        "new_text": "/* compacted */"
+                                    }),
+                                    "write" => serde_json::json!({
+                                        "path": path_hint,
+                                        "content": "/* compacted */"
+                                    }),
+                                    "bash" => serde_json::json!({
+                                        "command": path_hint
+                                    }),
+                                    _ => serde_json::json!({
+                                        "path": path_hint
+                                    }),
+                                }
                                 .to_string();
                             }
                         }

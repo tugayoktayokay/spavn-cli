@@ -1455,6 +1455,92 @@ pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Op
     None
 }
 
+fn count_code_braces(src: &str) -> (usize, usize) {
+    let mut open = 0usize;
+    let mut close = 0usize;
+    let bytes = src.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        let b = bytes[i];
+        // Line comment `// ...`
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment `/* ... */`
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        // Rust raw string literal `r#"..."#` or `r"..."`
+        if b == b'r' && i + 1 < len && (bytes[i + 1] == b'"' || bytes[i + 1] == b'#') {
+            let mut hashes = 0usize;
+            let mut j = i + 1;
+            while j < len && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < len && bytes[j] == b'"' {
+                j += 1;
+                while j < len {
+                    if bytes[j] == b'"'
+                        && j + hashes < len
+                        && bytes[j + 1..j + 1 + hashes].iter().all(|&x| x == b'#')
+                    {
+                        j += 1 + hashes;
+                        break;
+                    }
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+        // Double-quoted string `"..."`
+        if b == b'"' {
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // Character literal `'x'` or `'\x'`
+        if b == b'\'' {
+            if i + 2 < len && bytes[i + 1] != b'\\' && bytes[i + 2] == b'\'' {
+                i += 3;
+                continue;
+            }
+            if i + 3 < len && bytes[i + 1] == b'\\' && bytes[i + 3] == b'\'' {
+                i += 4;
+                continue;
+            }
+        }
+        if b == b'{' {
+            open += 1;
+        } else if b == b'}' {
+            close += 1;
+        }
+        i += 1;
+    }
+    (open, close)
+}
+
 fn run_instant_syntax_check(raw_path: &str, content: &str) -> String {
     if split_remote_prefix(raw_path).is_some() {
         return String::new();
@@ -1528,8 +1614,7 @@ fn run_instant_syntax_check(raw_path: &str, content: &str) -> String {
             }
         }
         "rs" | "ts" | "tsx" | "go" | "swift" => {
-            let open_braces = content.matches('{').count();
-            let close_braces = content.matches('}').count();
+            let (open_braces, close_braces) = count_code_braces(content);
             if open_braces != close_braces {
                 format!(
                     "\n[AUTO-DIAGNOSTIC WARNING in {}: Brace count mismatch ('{{': {}, '}}': {}) — verify block closure]",
@@ -1550,6 +1635,7 @@ fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
     }
     if let Some(edits_arr) = args.get("edits").and_then(|v| v.as_array()) {
         if !edits_arr.is_empty() {
+            let original_snapshot = read_target_file(raw_path).ok();
             let mut results = Vec::new();
             for (idx, item) in edits_arr.iter().enumerate() {
                 let sub_old = get_str_alias(
@@ -1571,7 +1657,20 @@ fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 });
                 let out = exec_edit_single(ctx, &single_arg);
                 if !out.starts_with("Successfully ") {
-                    return format!("Multi-edit failed at hunk #{}: {}", idx + 1, out);
+                    if idx > 0 {
+                        if let Some(ref orig) = original_snapshot {
+                            let _ = write_target_file(raw_path, orig);
+                            for _ in 0..idx {
+                                let _ = ctx.undo_stack.pop();
+                            }
+                        }
+                    }
+                    return format!(
+                        "Multi-edit failed at hunk #{} (atomic rollback restored {} to pre-edit state): {}",
+                        idx + 1,
+                        raw_path,
+                        out
+                    );
                 }
                 results.push(out);
             }
@@ -1637,8 +1736,17 @@ fn exec_edit_single(ctx: &mut ToolContext, args: &Value) -> String {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let mut effective_old = old_text.to_string();
-    let mut effective_new = new_text.to_string();
+    let use_crlf = content.contains("\r\n") && !old_text.contains("\r\n");
+    let mut effective_old = if use_crlf {
+        old_text.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        old_text.to_string()
+    };
+    let mut effective_new = if use_crlf {
+        new_text.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        new_text.to_string()
+    };
     if !content.contains(&effective_old) {
         if let Some(stripped_old) = strip_copied_line_numbers(&effective_old) {
             if content.contains(&stripped_old) {
