@@ -717,26 +717,28 @@ fn run_agent_turn(
                 if step_endpoint.is_local() {
                     if !quiet {
                         println!(
-                            "\n{}⚠️  {} ({}) -> {} {}{}",
-                            YELLOW,
-                            tr_en("Yerel model hatası", "Local model error"),
-                            err,
-                            cfg.fallback_cloud_model,
+                            "\n{}🔄 {} ({}) — {}{}",
+                            CYAN,
                             tr_en(
-                                "modeline otomatik geçiliyor...",
-                                "failing over automatically..."
+                                "Yerel model bağlantısı yenileniyor",
+                                "Reconnecting to local model"
                             ),
+                            step_endpoint.key,
+                            err,
                             RESET
                         );
                     }
-                    let fallback_ep = resolve_endpoint(&cfg.fallback_cloud_model);
-                    let mut fb_spinner = if quiet {
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    let mut retry_local_spinner = if quiet {
                         LiveSpinner::silent()
                     } else {
-                        LiveSpinner::start(tr_en("Düşünülüyor", "Thinking"))
+                        LiveSpinner::start(tr_en(
+                            "Yerel model yeniden deneniyor",
+                            "Retrying local model",
+                        ))
                     };
-                    let fb_res = stream_chat_completion(
-                        &fallback_ep,
+                    let local_retry_res = stream_chat_completion(
+                        &step_endpoint,
                         &view_messages,
                         &tools_spec,
                         |think_delta| {
@@ -758,7 +760,7 @@ fn run_agent_turn(
                             ));
                             if !content_started.get() {
                                 content_started.set(true);
-                                render_assistant_header(&fallback_ep.key);
+                                render_assistant_header(&step_endpoint.key);
                             }
                             md_renderer.borrow_mut().push(c);
                         },
@@ -769,8 +771,76 @@ fn run_agent_turn(
                     if !quiet {
                         hud::close_thinking_box_if_open();
                     }
-                    fb_spinner.stop();
-                    fb_res?
+                    retry_local_spinner.stop();
+
+                    match local_retry_res {
+                        Ok(ok_local) => ok_local,
+                        Err(local_err2) => {
+                            let fb_key = cfg.fallback_cloud_model.trim();
+                            if fb_key.is_empty()
+                                || fb_key.eq_ignore_ascii_case("none")
+                                || fb_key == step_endpoint.key
+                            {
+                                return Err(local_err2);
+                            }
+                            if !quiet {
+                                println!(
+                                    "\n{}⚠️  {} ({}) -> {} {}{}",
+                                    YELLOW,
+                                    tr_en("Yerel model yanıt vermedi", "Local model unreachable"),
+                                    local_err2,
+                                    fb_key,
+                                    tr_en(
+                                        "modeline otomatik geçiliyor...",
+                                        "failing over automatically..."
+                                    ),
+                                    RESET
+                                );
+                            }
+                            let fallback_ep = resolve_endpoint(fb_key);
+                            let mut fb_spinner = if quiet {
+                                LiveSpinner::silent()
+                            } else {
+                                LiveSpinner::start(tr_en("Düşünülüyor", "Thinking"))
+                            };
+                            let fb_res = stream_chat_completion(
+                                &fallback_ep,
+                                &view_messages,
+                                &tools_spec,
+                                |think_delta| {
+                                    if !quiet {
+                                        hud::stream_thinking_delta(think_delta, show_thinking);
+                                    }
+                                },
+                                |c| {
+                                    partial_content.borrow_mut().push_str(c);
+                                    if quiet {
+                                        return;
+                                    }
+                                    content_chars.set(content_chars.get() + c.chars().count());
+                                    hud::set_spinner_label(&format!(
+                                        "✍️ {} ({} {})",
+                                        tr_en("Yanıt yazılıyor", "Writing response"),
+                                        content_chars.get(),
+                                        tr_en("krk", "ch")
+                                    ));
+                                    if !content_started.get() {
+                                        content_started.set(true);
+                                        render_assistant_header(&fallback_ep.key);
+                                    }
+                                    md_renderer.borrow_mut().push(c);
+                                },
+                            );
+                            if content_started.get() {
+                                md_renderer.borrow_mut().finish();
+                            }
+                            if !quiet {
+                                hud::close_thinking_box_if_open();
+                            }
+                            fb_spinner.stop();
+                            fb_res?
+                        }
+                    }
                 } else {
                     return Err(err);
                 }
