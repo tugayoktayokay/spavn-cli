@@ -1,4 +1,4 @@
-use crate::config::{builtin_byok_catalog, load_user_config, resolve_api_key};
+use crate::config::{byok_catalog, load_user_config, resolve_api_key};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -415,7 +415,7 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
     }
 
     // 3. Check built-in BYOK catalog providers (OpenAI, Anthropic, Gemini, DeepSeek, MiniMax, GLM, Groq, xAI, OpenRouter, Ollama)
-    for group in builtin_byok_catalog() {
+    for group in byok_catalog(&cfg) {
         for m in &group.models {
             if m.key.eq_ignore_ascii_case(clean)
                 || m.model_id.eq_ignore_ascii_case(clean)

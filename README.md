@@ -607,6 +607,12 @@ non-local alias is never silently trusted.
 | `mcpServers[].args` / `env` | Extra argv and environment for a stdio server; `~` is expanded, `PATH`/`HOME` are inherited. |
 | `mcpServers[].url` | Streamable-HTTP server instead of a subprocess. |
 | `mcpServers[].readOnly` | Claims no side effects; without it, calls pass the mutation gate. |
+| `webSearchServer` / `webSearchTool` | Run `web` search through that `mcpServers` entry instead of any built-in endpoint. |
+| `webFetchTool` | Tool used for page fetch on `webSearchServer`; unset keeps the built-in fetch path. |
+| `webSearchUrl` | HTTP MCP endpoint for `web`. Empty string disables it; unset uses the hosted default. |
+| `webSearchHttpTool` / `webFetchHttpTool` | Tool names your endpoint serves, if they differ from the hosted defaults. |
+| `webSearchApiKeyHeader` / `webSearchApiKeyEnv` | Header and env var carrying the endpoint's key. |
+| `byokCatalog` | `false` serves the provider list purely from `providers`. |
 
 Profile and rules live beside it in `~/.spavn/PROFILE.md`; skills in `~/.spavn/skills/`.
 

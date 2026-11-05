@@ -182,6 +182,35 @@ pub struct SpavnUserConfig {
     pub language: String, // "tr" | "en"
     pub local_discovery_url: Option<String>,
     pub local_base_url: Option<String>,
+    /// MCP endpoint the `web` tool posts search calls to. `None` falls back to the hosted
+    /// default; an empty string disables it.
+    #[serde(default)]
+    pub web_search_url: Option<String>,
+    /// Name of an entry in `mcpServers` that serves web search. When set, `web` goes through
+    /// that server instead of the built-in HTTP endpoint, so no external host is baked in.
+    #[serde(default, rename = "webSearchServer")]
+    pub web_search_server: Option<String>,
+    /// Tool to call on `web_search_server` for search. Ignored unless `web_search_server` is set.
+    #[serde(default, rename = "webSearchTool")]
+    pub web_search_tool: Option<String>,
+    /// Tool to call on `web_search_server` for page fetch. Unset keeps the built-in fetch path.
+    #[serde(default, rename = "webFetchTool")]
+    pub web_fetch_tool: Option<String>,
+    /// Header the hosted web-search backend expects the API key in. Unset uses `x-api-key`.
+    #[serde(default, rename = "webSearchApiKeyHeader")]
+    pub web_search_api_key_header: Option<String>,
+    /// Env var holding the hosted web-search API key. Unset uses `EXA_API_KEY`.
+    #[serde(default, rename = "webSearchApiKeyEnv")]
+    pub web_search_api_key_env: Option<String>,
+    /// Tool names on `web_search_url`. Unset keeps the hosted backend's names.
+    #[serde(default, rename = "webSearchHttpTool")]
+    pub web_search_http_tool: Option<String>,
+    #[serde(default, rename = "webFetchHttpTool")]
+    pub web_fetch_http_tool: Option<String>,
+    /// Serve the built-in BYOK provider catalog alongside `providers`.
+    /// Set `false` to run the provider list entirely from config.
+    #[serde(default = "default_true")]
+    pub byok_catalog: bool,
     pub quota_quick_script: Option<String>,
     pub quota_full_script: Option<String>,
     pub memory_recall_bin: Option<String>,
@@ -200,6 +229,10 @@ pub struct SpavnUserConfig {
 
 fn default_model_key() -> String {
     std::env::var("SPAVN_MODEL").unwrap_or_else(|_| "sonnet".to_string())
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_busy_mode() -> String {
@@ -382,6 +415,16 @@ pub fn resolve_api_key(env_name: &str) -> Option<String> {
 }
 
 /// Built-in 12-Provider BYOK Catalog ported from `spavn/src/catalog.ts` & `spavn-editor`.
+///
+/// This is only the *default* list. `"byokCatalog": false` in `~/.spavn/config.json` hides it
+/// entirely, so a deployment can ship nothing but its own `providers`.
+pub fn byok_catalog(cfg: &SpavnUserConfig) -> Vec<ProviderGroupConfig> {
+    if !cfg.byok_catalog {
+        return Vec::new();
+    }
+    builtin_byok_catalog()
+}
+
 pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
     vec![
         ProviderGroupConfig {
@@ -780,6 +823,15 @@ pub fn load_user_config() -> SpavnUserConfig {
         language: lang,
         local_discovery_url: std::env::var("SPAVN_LOCAL_MODELS_URL").ok(),
         local_base_url: std::env::var("SPAVN_LOCAL_BASE_URL").ok(),
+        web_search_url: None,
+        web_search_server: None,
+        web_search_tool: None,
+        web_fetch_tool: None,
+        web_search_api_key_header: None,
+        web_search_api_key_env: None,
+        web_search_http_tool: None,
+        web_fetch_http_tool: None,
+        byok_catalog: true,
         quota_quick_script: None,
         quota_full_script: None,
         memory_recall_bin: None,

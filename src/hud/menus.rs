@@ -752,7 +752,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
     }
 
     // 3. Built-in BYOK Catalog Providers (OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, MiniMax, GLM, Groq, xAI, Ollama)
-    for byok_group in builtin_byok_catalog() {
+    for byok_group in byok_catalog(&cfg) {
         if byok_group.id == "ollama" && local_idx_in_providers.is_some() {
             continue;
         }
@@ -1243,7 +1243,7 @@ fn detect_cli_token_for_provider(provider_id: &str) -> Option<(String, &'static 
 /// portal launch, API key entry (saved in `~/.spavn/secrets.env` with 0600), local server discovery,
 /// OR custom OpenAI-compatible Base URL + Model + API Key!
 pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<String> {
-    let catalog = builtin_byok_catalog();
+    let catalog = byok_catalog(&load_user_config());
     let chosen = if let Some(pre) = preselected_provider
         .map(str::trim)
         .filter(|s| !s.is_empty())
