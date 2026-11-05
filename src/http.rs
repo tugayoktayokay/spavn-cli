@@ -6,9 +6,9 @@ use std::time::Duration;
 /// trips a total-body budget, while a dead connection still fails within 90s.
 pub fn agent_stream() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_recv_response(Some(Duration::from_secs(360)))
-        .timeout_per_read(Some(Duration::from_secs(180)))
+        .timeout_connect(Some(Duration::from_secs(8)))
+        .timeout_recv_response(Some(Duration::from_secs(90)))
+        .timeout_per_read(Some(Duration::from_secs(45)))
         .http_status_as_error(false)
         .build();
     config.into()

@@ -86,6 +86,9 @@
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* Form controls do not inherit type from the document, so their glyphs fall
+     back to the platform UI font and stop matching the surrounding text. */
+  button, input, textarea, select { font: inherit; color: inherit; }
   html, body { height: 100%; }
   body {
     font-family: var(--sans);
@@ -141,6 +144,7 @@
   }
   .session b { color: var(--fg); font-weight: 590; letter-spacing: -0.01em; }
   .session .sep { color: var(--fg-3); }
+  .session .sess-none { display: none; color: var(--fg-3); }
   .session .branch {
     font-family: var(--mono); font-size: 11.5px;
     color: var(--fg-2);
@@ -221,15 +225,8 @@
   }
   .rail .spacer { flex: 1; }
 
-  .mode {
-    writing-mode: vertical-rl;
-    font-family: var(--mono); font-size: 9.5px;
-    letter-spacing: .18em; text-transform: uppercase;
-    padding: 8px 4px; border-radius: var(--r-sm);
-    border: 1px solid var(--line); color: var(--fg-3);
-    background: var(--sunken);
-  }
-  .mode.safe { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 28%, transparent); background: var(--ok-w); }
+  /* The rail carries no mode badge: the composer chip already names the mode
+     and is always docked, so a second glyph here only competes with the mark. */
 
   /* ============================================================ Stream */
   .stream {
@@ -483,6 +480,14 @@
     border: none; cursor: pointer; font-size: 12px;
     box-shadow: var(--shadow-1);
   }
+  /* Interrupt is the deliberate action of a turn in flight, so it is drawn as an
+     outline: the accent fill stays reserved for the primary commit action. */
+  .send.stop {
+    background: var(--surface); color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+    box-shadow: none;
+  }
+  .send.stop:hover { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
 
   /* ============================================================ Right panel */
   .side {
@@ -509,6 +514,10 @@
     display: flex; flex-direction: column; gap: var(--s-5);
     scrollbar-width: thin;
   }
+  /* One tab's groups are in flow at a time; the rest stay in the DOM so a
+     keyboard user can still reach them once their tab is selected. */
+  .side-body > [data-tab-pane] { display: none; flex-direction: column; gap: var(--s-5); }
+  .side-body > [data-tab-pane].on { display: flex; }
   .side-body::-webkit-scrollbar { width: 8px; }
   .side-body::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 4px; border: 2px solid var(--surface); }
 
@@ -563,9 +572,225 @@
   .bar { height: 3px; border-radius: 2px; background: var(--line-2); overflow: hidden; margin: 2px 8px 0; }
   .bar i { display: block; height: 100%; background: var(--ok); border-radius: 2px; }
 
-  @media (max-width: 1080px) {
+  /* ============================================================
+     Focus
+     Focus is a keyboard contract: visible when a key moved it, silent when
+     the pointer did. One rule, so no control invents its own ring.
+     ============================================================ */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ============================================================
+     Thread states
+     Exactly one pane is in flow at a time, so each state is designed on its
+     own terms instead of being the happy path plus exceptions.
+     ============================================================ */
+  html[data-side="off"] .side { display: none; }
+  html[data-side="off"] .win { grid-template-columns: 56px minmax(0, 1fr); }
+
+  .thread > [data-state-pane] { display: none; flex-direction: column; gap: var(--s-5); }
+  /* The first-run pane owns the full height so its content sits in the optical
+     centre of the pane rather than clinging to the top edge. */
+  .thread > [data-state-pane="empty"] { flex: 1; }
+  .thread[data-state="conv"] > [data-state-pane="conv"],
+  .thread[data-state="empty"] > [data-state-pane="empty"],
+  .thread[data-state="error"] > [data-state-pane="error"],
+  .thread[data-state="streaming"] > [data-state-pane="streaming"] { display: flex; }
+
+  /* ------------------------------------------------------------ empty */
+  .empty {
+    margin: auto; width: 100%; max-width: 520px;
+    display: flex; flex-direction: column; align-items: center;
+    text-align: center; gap: var(--s-4);
+  }
+  .empty .glyph {
+    width: 42px; height: 42px; display: grid; place-items: center;
+    border-radius: var(--r-md); background: var(--elevated);
+    border: 1px solid var(--line-2); color: var(--fg);
+    font-size: 17px; font-weight: 600; letter-spacing: -0.02em;
+  }
+  .empty .hd { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: var(--fg); }
+  .empty .sub {
+    font-size: var(--prose); line-height: 1.55; color: var(--fg-2);
+    max-width: 44ch;
+  }
+  .starts {
+    display: flex; flex-direction: column; gap: 6px;
+    width: 100%; margin-top: var(--s-2);
+  }
+  .start {
+    display: flex; align-items: center; gap: var(--s-3);
+    width: 100%; padding: 10px 12px; text-align: left;
+    border: 1px solid var(--line); border-radius: var(--r-md);
+    background: var(--surface); color: var(--fg-2);
+    font: inherit; font-size: 13px; cursor: pointer;
+    transition: background .14s var(--ease), border-color .14s var(--ease), color .14s var(--ease);
+  }
+  .start:hover { background: var(--elevated); border-color: var(--line-2); color: var(--fg); }
+  .start .k {
+    margin-left: auto; font-family: var(--mono);
+    font-size: 10.5px; color: var(--fg-3);
+    opacity: 0; transition: opacity .14s var(--ease), transform .14s var(--ease);
+    transform: translateX(-3px);
+  }
+  .start:hover .k { opacity: 1; transform: translateX(0); }
+  .empty .foot { font-family: var(--mono); font-size: 10.5px; color: var(--fg-3); letter-spacing: .02em; }
+
+  /* ------------------------------------------------------------ error */
+  .alert {
+    border: 1px solid color-mix(in srgb, var(--bad) 42%, var(--line));
+    background: color-mix(in srgb, var(--bad) 7%, var(--surface));
+    border-radius: var(--r-md); overflow: hidden;
+  }
+  .alert-hd {
+    display: flex; align-items: center; gap: var(--s-2);
+    padding: 10px 12px; border-bottom: 1px solid color-mix(in srgb, var(--bad) 20%, transparent);
+  }
+  .alert-hd .ttl { font-size: 13px; font-weight: 600; color: var(--fg); }
+  .alert-bd { padding: 12px; }
+  .alert-bd .msg {
+    font-family: var(--mono); font-size: var(--mono-size);
+    line-height: 1.65; color: var(--fg-2); white-space: pre-wrap;
+  }
+  .alert-bd .msg b { color: var(--fg); font-weight: 600; }
+  .alert-ft { display: flex; gap: var(--s-2); padding: 0 12px 12px; }
+
+  /* ------------------------------------------------------------ streaming */
+  .caret {
+    display: inline-block; width: 2px; height: 1.05em; margin-left: 2px;
+    vertical-align: -0.15em; background: var(--accent);
+    animation: caret 1.05s steps(1) infinite;
+  }
+  @keyframes caret { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+
+  .card.live { border-color: color-mix(in srgb, var(--accent) 26%, var(--line)); }
+  .progress { height: 2px; background: var(--line); overflow: hidden; }
+  .progress i {
+    display: block; height: 100%; width: 34%;
+    background: var(--accent); animation: sweep 1.5s var(--ease) infinite;
+  }
+  @keyframes sweep {
+    0%   { transform: translateX(-110%); }
+    100% { transform: translateX(330%); }
+  }
+  .typing { display: inline-flex; gap: 3px; align-items: center; }
+  .typing i {
+    width: 4px; height: 4px; border-radius: 50%; background: var(--fg-3);
+    animation: typing 1.2s var(--ease) infinite;
+  }
+  .typing i:nth-child(2) { animation-delay: .16s; }
+  .typing i:nth-child(3) { animation-delay: .32s; }
+  @keyframes typing {
+    0%, 100% { opacity: .28; transform: translateY(0); }
+    40%      { opacity: 1;   transform: translateY(-2px); }
+  }
+
+  /* The send control becomes an interrupt while a turn is in flight. */
+  .stop { display: none; }
+  html[data-state="streaming"] .composer .send { display: none; }
+  html[data-state="streaming"] .composer .stop { display: inline-flex; }
+  html[data-state="streaming"] .hint-text .for-send { display: none; }
+  html[data-state="streaming"] .hint-text .for-stop { display: inline; }
+  .hint-text .for-stop { display: none; }
+
+  /* First run has no session name, branch or dirty count to report. */
+  html[data-state="empty"] .session .sess-name,
+  html[data-state="empty"] .session .branch,
+  html[data-state="empty"] .session .dirty { display: none; }
+  html[data-state="empty"] .session .sess-none { display: inline; }
+
+  /* First run has no context to report and nothing changed on disk. */
+  html[data-state="empty"] .ctxbar .meter-lbl,
+  html[data-state="empty"] .ctxbar .meter,
+  html[data-state="empty"] .session .dirty { display: none; }
+  .side-body .none {
+    display: none; padding: var(--s-4) 2px;
+    font-size: 12.5px; line-height: 1.6; color: var(--fg-3);
+  }
+  html[data-state="empty"] .side-body > .grp { display: none; }
+  html[data-state="empty"] .side-body > .none { display: block; }
+
+  /* ============================================================
+     Command palette
+     ============================================================ */
+  .scrim {
+    position: fixed; inset: 0; z-index: 50;
+    display: none; align-items: flex-start; justify-content: center;
+    padding-top: 13vh;
+    background: color-mix(in srgb, var(--sunken) 58%, transparent);
+    backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px);
+  }
+  .scrim[data-open="true"] { display: flex; }
+  .palette {
+    width: min(560px, calc(100vw - 32px));
+    background: var(--elevated); border: 1px solid var(--line-2);
+    border-radius: var(--r-lg); box-shadow: var(--shadow-3); overflow: hidden;
+  }
+  .palette .q {
+    display: flex; align-items: center; gap: var(--s-3);
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  }
+  .palette .q .lens { font-size: 14px; color: var(--fg-3); }
+  .palette .q input {
+    flex: 1; min-width: 0; background: none; border: 0; outline: none;
+    font: inherit; font-size: var(--prose); color: var(--fg);
+  }
+  .palette .q input::placeholder { color: var(--fg-3); }
+  .palette .list { max-height: 46vh; overflow-y: auto; padding: 6px; }
+  .palette .list::-webkit-scrollbar { width: 10px; }
+  .palette .list::-webkit-scrollbar-thumb {
+    background: var(--line-2); border-radius: 5px; border: 3px solid var(--elevated);
+  }
+  .grp-h {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--fg-3); padding: 8px 8px 4px;
+  }
+  .opt {
+    display: flex; align-items: center; gap: var(--s-3);
+    padding: 8px 10px; border-radius: var(--r-sm); cursor: pointer;
+    font-size: 13px; color: var(--fg-2);
+    border: 1px solid transparent;
+  }
+  .opt[aria-selected="true"] {
+    background: var(--accent-w);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .opt .lbl { color: var(--fg); }
+  .opt .sub { font-size: 11.5px; color: var(--fg-3); }
+  .opt .k { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--fg-3); }
+  .palette .ft {
+    display: flex; gap: var(--s-4); padding: 8px 12px;
+    border-top: 1px solid var(--line); background: var(--surface);
+    font-size: 11px; color: var(--fg-3);
+  }
+
+  /* ============================================================
+     Width tiers
+     The conversation gives up space last, so the side panel narrows before
+     it disappears, and the rail never collapses.
+     ============================================================ */
+  @media (max-width: 1180px) {
+    .win { grid-template-columns: 56px minmax(0, 1fr) 252px; }
+  }
+  @media (max-width: 1000px) {
     .win { grid-template-columns: 56px minmax(0, 1fr); }
     .side { display: none; }
+  }
+  @media (max-width: 760px) {
+    .win { grid-template-columns: minmax(0, 1fr); }
+    .rail { display: none; }
+    .thread { padding: var(--s-5) var(--s-4) var(--s-4); }
+    .composer { padding: var(--s-3) var(--s-4) var(--s-3); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: .001ms !important;
+    }
   }
 </style>
 </head>
@@ -578,7 +803,8 @@
     <div class="session">
       <b>spavn</b>
       <span class="sep">›</span>
-      <span>docs site on nginx</span>
+      <span class="sess-name">docs site on nginx</span>
+      <span class="sess-none">no session</span>
       <span class="branch">main</span>
       <span class="dirty">12 changed</span>
     </div>
@@ -599,7 +825,6 @@
     <button title="Tools">⌘</button>
     <button title="Memory">◈</button>
     <div class="spacer"></div>
-    <div class="mode safe">safe</div>
   </div>
 
   <!-- ============================================================ stream -->
@@ -612,7 +837,8 @@
       <div class="meter"><i></i></div>
     </div>
 
-    <div class="thread">
+    <div class="thread" data-state="conv">
+     <div data-state-pane="conv">
 
       <div class="turn user">
         docs sitesini yayına al, sonra deploy script'ini de yaz
@@ -676,7 +902,7 @@
           <div class="card-hd">
             <div class="ask">
               <span class="badge">approval</span>
-              <span class="q">Patch the landing page navigation?</span>
+              <span class="q">Write outside the workspace?</span>
             </div>
             <div class="grow"></div>
             <span class="time">waiting</span>
@@ -691,13 +917,123 @@
             <span class="reason">sudo</span>
           </div>
           <div class="verdict">
-            <span class="note">Approving allows <b>this command only</b></span>
-            <button class="btn ghost">Deny</button>
-            <button class="btn">Once <kbd>⏎</kbd></button>
-            <button class="btn primary">Allow for session <kbd>⇧⏎</kbd></button>
+            <span class="note">Same choices as the terminal gate</span>
+            <button class="btn ghost">No <kbd>N</kbd></button>
+            <button class="btn">Switch to Sovereign <kbd>s</kbd></button>
+            <button class="btn primary">Yes, run it <kbd>y</kbd></button>
           </div>
         </div>
       </div>
+
+     </div>
+
+     <!-- ------------------------------------------------ first run -->
+     <div data-state-pane="empty">
+      <div class="empty">
+        <div class="glyph">S</div>
+        <div class="hd">What should SPAVN work on?</div>
+        <div class="sub">Point it at a task and it reads, edits and runs — asking before anything leaves the workspace. Nothing is written without a gate.</div>
+        <div class="starts">
+          <button class="start"><span>Explain this repository</span><span class="k">→</span></button>
+          <button class="start"><span>Fix the failing test in src/tools.rs</span><span class="k">→</span></button>
+          <button class="start"><span>Write the missing deploy script</span><span class="k">→</span></button>
+        </div>
+        <div class="foot">no session yet · mode safe · nothing changed</div>
+      </div>
+     </div>
+
+     <!-- ------------------------------------------------ failed turn -->
+     <div data-state-pane="error">
+
+      <div class="turn user">
+        docs sitesini yayına al
+      </div>
+
+      <div class="turn">
+        <div class="card">
+          <div class="card-hd">
+            <span class="tool">bash</span>
+            <span class="tool-arg">rsync → telya-server</span>
+            <div class="grow"></div>
+            <span class="pill bad">exit 255</span>
+            <span class="time">8.4s</span>
+            <button class="chev">▾</button>
+          </div>
+          <div class="term">
+            <div class="ln hl"><span class="prompt">$</span><span class="out">rsync -az docs/index.html telya-server:/tmp/spavn-docs-index.html</span></div>
+            <div class="ln"><span class="prompt">!</span><span class="out">ssh: connect to host telya-server port 22: Operation timed out</span></div>
+            <div class="ln"><span class="prompt">!</span><span class="out">rsync error: unexplained error (code 255) at io.c(228)</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="turn">
+        <div class="alert">
+          <div class="alert-hd">
+            <span class="pill bad">failed</span>
+            <span class="ttl">Deploy stopped after 8.4s</span>
+            <div class="grow"></div>
+            <span class="time">attempt 1 of 1</span>
+          </div>
+          <div class="alert-bd">
+            <div class="msg">The host did not answer on port 22. Nothing was uploaded, so the live site is unchanged — <b>no partial deploy to clean up</b>.</div>
+          </div>
+          <div class="alert-ft">
+            <button class="btn primary">Retry</button>
+            <button class="btn">Show full log</button>
+            <button class="btn ghost">Fix the command</button>
+          </div>
+        </div>
+      </div>
+
+     </div>
+
+     <!-- ------------------------------------------------ mid-turn -->
+     <div data-state-pane="streaming">
+
+      <div class="turn user">
+        docs sitesini yayına al, sonra deploy script'ini de yaz
+      </div>
+
+      <div class="turn">
+        <div class="who">
+          <span class="name">spavn</span>
+          <span class="at">14:02</span>
+        </div>
+        <div class="prose">
+          <p>Nginx root'unda <code>/docs/</code> yok. Önce yükleyip sha256 ile doğruluyorum<span class="caret"></span></p>
+        </div>
+      </div>
+
+      <div class="turn">
+        <div class="card live">
+          <div class="card-hd">
+            <span class="tool">bash</span>
+            <span class="tool-arg">curl · sha256sum</span>
+            <div class="grow"></div>
+            <span class="pill run"><span class="typing"><i></i><i></i><i></i></span> running</span>
+            <span class="time">3.1s</span>
+          </div>
+          <div class="progress"><i></i></div>
+          <div class="term">
+            <div class="ln hl"><span class="prompt">$</span><span class="out">rsync -az docs/index.html telya-server:/tmp/spavn-docs-index.html</span></div>
+            <div class="ln"><span class="prompt">›</span><span class="out">curl -fsSL https://spavn.dev/docs/ | sha256sum</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="turn">
+        <div class="card">
+          <div class="card-hd">
+            <span class="tool">read</span>
+            <span class="tool-arg">queued</span>
+            <div class="grow"></div>
+            <span class="pill">queued</span>
+          </div>
+        </div>
+      </div>
+
+     </div>
 
     </div>
 
@@ -708,46 +1044,78 @@
           <span class="chip"><span class="dot"></span> safe</span>
           <span class="chip">sonnet-4.5</span>
           <div class="grow"></div>
-          <span class="hint-text"><kbd>⏎</kbd> send</span>
-          <button class="send" title="Send">↵</button>
+          <span class="hint-text"><span class="for-send"><kbd>⏎</kbd> send</span><span class="for-stop"><kbd>esc</kbd> interrupt</span></span>
+          <button class="send" title="Send" aria-label="Send">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+              <path d="M11.5 1.5 1.5 5.9l4 1.6 1.6 4 4.4-10Z" stroke="currentColor"
+                    stroke-width="1.4" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button class="send stop" title="Interrupt this turn" aria-label="Interrupt this turn">
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+              <rect x="3" y="3" width="8" height="8" rx="1.8" fill="currentColor"/>
+            </svg>
+          </button>
         </div>
+      </div>
+    </div>
+
+    <!-- ============================================================ palette -->
+    <div class="scrim" id="scrim" data-open="false" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div class="palette">
+        <div class="q">
+          <span class="lens" aria-hidden="true">⌕</span>
+          <input id="pq" type="text" placeholder="Run a command, or jump to a state…"
+                 autocomplete="off" spellcheck="false" aria-controls="plist" />
+          <kbd>esc</kbd>
+        </div>
+        <div class="list" id="plist" role="listbox"></div>
+        <div class="ft"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>⏎</kbd> run</span><span><kbd>⌘K</kbd> toggle</span></div>
       </div>
     </div>
   </div>
 
   <!-- ============================================================ side -->
   <div class="side">
-    <div class="side-tabs">
-      <button class="on">Changes</button>
-      <button>Plan</button>
-      <button>Tools</button>
+    <div class="side-tabs" role="tablist">
+      <button class="on" role="tab" aria-selected="true" data-tab="changes">Changes</button>
+      <button role="tab" aria-selected="false" data-tab="plan">Plan</button>
+      <button role="tab" aria-selected="false" data-tab="tools">Tools</button>
     </div>
     <div class="side-body">
 
-      <div class="grp">
-        <div class="side-h">Changed <span class="n">12</span></div>
+      <div data-tab-pane="changes" class="on">
+        <div class="none">Nothing changed yet.<br>File edits and command output land here as the turn runs.</div>
+
+        <div class="grp">
+          <div class="side-h">Changed <span class="n">12</span></div>
         <div class="file"><span class="nm">docs/index.html</span><span class="st a">+1</span></div>
         <div class="file"><span class="nm">packaging/site/deploy-docs.sh</span><span class="st a">+62</span></div>
         <div class="file"><span class="nm">README.md</span><span class="st m">+2 −2</span></div>
         <div class="file"><span class="nm">CHANGELOG.md</span><span class="st m">+4</span></div>
-        <div class="file"><span class="nm">src/hud/mod.rs</span><span class="st m">+1 −1</span></div>
+          <div class="file"><span class="nm">src/hud/mod.rs</span><span class="st m">+1 −1</span></div>
+        </div>
       </div>
 
-      <div class="grp">
-        <div class="side-h">Plan</div>
+      <div data-tab-pane="plan">
+        <div class="grp">
+          <div class="side-h">Plan</div>
         <div class="todo done"><span class="i">✓</span><span>Upload docs to nginx root</span></div>
         <div class="todo done"><span class="i">✓</span><span>Verify served bytes match local</span></div>
         <div class="todo now"><span class="i"></span><span>Link Docs from landing nav</span></div>
-        <div class="todo"><span class="i"></span><span>Write repeatable deploy script</span></div>
+          <div class="todo"><span class="i"></span><span>Write repeatable deploy script</span></div>
+        </div>
       </div>
 
-      <div class="grp">
-        <div class="side-h">Session</div>
+      <div data-tab-pane="tools">
+        <div class="grp">
+          <div class="side-h">Session</div>
         <div class="stat-row"><span>Tokens</span><span class="v">48.2k</span></div>
         <div class="bar"><i style="width:34%"></i></div>
         <div class="stat-row"><span>Tool calls</span><span class="v">7</span></div>
         <div class="stat-row"><span>Duration</span><span class="v">2m 14s</span></div>
-        <div class="stat-row"><span>Cost</span><span class="v">$0.42</span></div>
+          <div class="stat-row"><span>Cost</span><span class="v">$0.42</span></div>
+        </div>
       </div>
 
     </div>
@@ -758,24 +1126,245 @@
 <script>
   (function () {
     var root = document.documentElement;
-    var btn = document.getElementById("theme");
+    var themeBtn = document.getElementById("theme");
+    var thread = document.querySelector(".thread");
+    var scrim = document.getElementById("scrim");
+    var input = document.getElementById("pq");
+    var list = document.getElementById("plist");
 
-    function apply(theme) {
-      root.setAttribute("data-theme", theme);
-      btn.title = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
-      btn.setAttribute("aria-label", btn.title);
+    var STATES = ["conv", "empty", "error", "streaming"];
+    var NAMES = {
+      conv: "Conversation",
+      empty: "First run",
+      error: "Failed turn",
+      streaming: "Mid-turn"
+    };
+
+    // ---------------------------------------------------------------- hash
+    // The hash is the whole state: it survives a reload and can be pasted into
+    // a review thread, which is how a design decision gets argued about.
+    function readHash() {
+      var out = { theme: "dark", state: "conv", side: "on" };
+      var bits = (location.hash || "").replace(/^#/, "").split("&");
+      for (var i = 0; i < bits.length; i++) {
+        var kv = bits[i].split("=");
+        if (kv[0] === "light") out.theme = "light";
+        if (kv[0] === "theme" && kv[1]) out.theme = kv[1];
+        if (kv[0] === "state" && STATES.indexOf(kv[1]) !== -1) out.state = kv[1];
+        if (kv[0] === "side" && (kv[1] === "on" || kv[1] === "off")) out.side = kv[1];
+      }
+      return out;
     }
 
-    var initial = /light/.test(location.hash) ? "light" : "dark";
-    apply(initial);
+    function writeHash() {
+      var next = "#" + root.getAttribute("data-theme") +
+        "&state=" + thread.getAttribute("data-state") +
+        "&side=" + root.getAttribute("data-side");
+      if (location.hash !== next) history.replaceState(null, "", next);
+    }
 
-    btn.addEventListener("click", function () {
-      apply(root.getAttribute("data-theme") === "dark" ? "light" : "dark");
+    // ---------------------------------------------------------------- theme
+    function applyTheme(theme) {
+      root.setAttribute("data-theme", theme);
+      themeBtn.title = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
+      themeBtn.setAttribute("aria-label", themeBtn.title);
+    }
+
+    // ---------------------------------------------------------------- state
+    function applyState(state) {
+      if (STATES.indexOf(state) === -1) state = "conv";
+      thread.setAttribute("data-state", state);
+      root.setAttribute("data-state", state);
+      // Only a live or finished conversation is anchored to the newest event;
+      // the empty and error panes are read from the top.
+      if (state === "conv" || state === "streaming") thread.scrollTop = thread.scrollHeight;
+      else thread.scrollTop = 0;
+    }
+
+    var boot = readHash();
+    root.setAttribute("data-side", boot.side);
+    applyTheme(boot.theme);
+    applyState(boot.state);
+    writeHash();
+
+    themeBtn.addEventListener("click", function () {
+      applyTheme(root.getAttribute("data-theme") === "dark" ? "light" : "dark");
+      writeHash();
     });
 
-    // The newest event owns the bottom edge, the way a live stream behaves.
-    var thread = document.querySelector(".thread");
-    if (thread) thread.scrollTop = thread.scrollHeight;
+    // ---------------------------------------------------------------- palette
+    var ITEMS = [
+      { grp: "Session" },
+      { lbl: "New session", sub: "/new", k: "⌘N", run: function () { applyState("empty"); } },
+      { lbl: "Switch theme", sub: "dark / light", k: "⌘⇧L", run: toggleTheme },
+      { grp: "Commands" },
+      { lbl: "Change access mode", sub: "/access — safe · auto · sovereign", k: "", run: noop },
+      { lbl: "Switch model", sub: "/model", k: "", run: noop },
+      { lbl: "Compact the transcript", sub: "/compact", k: "", run: noop },
+      { lbl: "Undo the last edit", sub: "/undo", k: "", run: noop },
+      { lbl: "Session recap", sub: "/recap", k: "", run: noop },
+      { lbl: "Resume a session", sub: "/sessions", k: "", run: noop },
+      { grp: "Design states" },
+      { lbl: "Conversation", sub: NAMES.conv, k: "1", run: function () { applyState("conv"); } },
+      { lbl: "First run", sub: NAMES.empty, k: "2", run: function () { applyState("empty"); } },
+      { lbl: "Failed turn", sub: NAMES.error, k: "3", run: function () { applyState("error"); } },
+      { lbl: "Mid-turn", sub: NAMES.streaming, k: "4", run: function () { applyState("streaming"); } },
+      { grp: "View" },
+      { lbl: "Toggle side panel", sub: "changes · plan · tools", k: "⌘B", run: toggleSide },
+      { lbl: "Copy shell URL", sub: "state is in the hash", k: "", run: copyUrl }
+    ];
+
+    function noop() {}
+
+    var cursor = 0;
+    var shown = [];
+
+    function toggleTheme() {
+      applyTheme(root.getAttribute("data-theme") === "dark" ? "light" : "dark");
+      writeHash();
+    }
+
+    // ---------------------------------------------------------------- side tabs
+    function applyTab(name) {
+      [].slice.call(document.querySelectorAll(".side-tabs button")).forEach(function (b) {
+        var on = b.getAttribute("data-tab") === name;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      [].slice.call(document.querySelectorAll(".side-body > [data-tab-pane]")).forEach(function (p) {
+        p.classList.toggle("on", p.getAttribute("data-tab-pane") === name);
+      });
+    }
+
+    [].slice.call(document.querySelectorAll(".side-tabs button")).forEach(function (b) {
+      b.addEventListener("click", function () { applyTab(b.getAttribute("data-tab")); });
+    });
+
+    function toggleSide() {
+      if (!document.querySelector(".side")) return;
+      root.setAttribute("data-side", root.getAttribute("data-side") === "off" ? "on" : "off");
+      writeHash();
+    }
+
+    function copyUrl() {
+      if (navigator.clipboard) navigator.clipboard.writeText(location.href);
+    }
+
+    function render(q) {
+      var needle = (q || "").toLowerCase().trim();
+      list.innerHTML = "";
+      shown = [];
+      for (var i = 0; i < ITEMS.length; i++) {
+        var it = ITEMS[i];
+        if (it.grp) {
+          if (needle) continue;
+          var h = document.createElement("div");
+          h.className = "grp-h";
+          h.textContent = it.grp;
+          list.appendChild(h);
+          continue;
+        }
+        var hay = (it.lbl + " " + it.sub).toLowerCase();
+        if (needle && hay.indexOf(needle) === -1) continue;
+        var row = document.createElement("div");
+        row.className = "opt";
+        row.setAttribute("role", "option");
+        row.innerHTML = '<span class="lbl"></span><span class="sub"></span><span class="k"></span>';
+        row.querySelector(".lbl").textContent = it.lbl;
+        row.querySelector(".sub").textContent = it.sub;
+        row.querySelector(".k").textContent = it.k;
+        row.setAttribute("data-idx", shown.length);
+        list.appendChild(row);
+        shown.push({ el: row, item: it });
+      }
+      cursor = 0;
+      paint();
+    }
+
+    function paint() {
+      for (var i = 0; i < shown.length; i++) {
+        shown[i].el.setAttribute("aria-selected", i === cursor ? "true" : "false");
+      }
+      if (shown[cursor]) {
+        var el = shown[cursor].el;
+        if (el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+      }
+    }
+
+    function openPalette() {
+      scrim.setAttribute("data-open", "true");
+      input.value = "";
+      render("");
+      input.focus();
+    }
+
+    function closePalette() {
+      scrim.setAttribute("data-open", "false");
+    }
+
+    function isOpen() {
+      return scrim.getAttribute("data-open") === "true";
+    }
+
+    function runCursor() {
+      if (!shown[cursor]) return;
+      var fn = shown[cursor].item.run;
+      closePalette();
+      fn();
+      writeHash();
+    }
+
+    input.addEventListener("input", function () { render(input.value); });
+
+    list.addEventListener("click", function (e) {
+      var row = e.target.closest ? e.target.closest(".opt") : null;
+      if (!row) return;
+      cursor = Number(row.getAttribute("data-idx"));
+      runCursor();
+    });
+
+    document.addEventListener("keydown", function (e) {
+      var meta = e.metaKey || e.ctrlKey;
+
+      if (meta && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        if (isOpen()) { closePalette(); } else { openPalette(); }
+        return;
+      }
+
+      if (e.key === "Escape") {
+        if (isOpen()) { e.preventDefault(); closePalette(); return; }
+        // Esc interrupts a live turn, and only a live turn.
+        if (thread.getAttribute("data-state") === "streaming") {
+          applyState("conv"); writeHash();
+        }
+        return;
+      }
+
+      if (!isOpen()) return;
+
+      if (e.key === "ArrowDown") { e.preventDefault(); cursor = Math.min(cursor + 1, shown.length - 1); paint(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); cursor = Math.max(cursor - 1, 0); paint(); }
+      else if (e.key === "Enter") { e.preventDefault(); runCursor(); }
+    });
+
+    scrim.addEventListener("click", function (e) {
+      if (e.target === scrim) closePalette();
+    });
+
+    var hintBtn = document.querySelector(".kbd-hint");
+    if (hintBtn) hintBtn.addEventListener("click", openPalette);
+
+    var stopBtn = document.querySelector(".send.stop");
+    if (stopBtn) stopBtn.addEventListener("click", function () {
+      applyState("conv"); writeHash();
+    });
+
+    window.addEventListener("hashchange", function () {
+      var h = readHash();
+      applyTheme(h.theme);
+      applyState(h.state);
+    });
   })();
 </script>
 </body>

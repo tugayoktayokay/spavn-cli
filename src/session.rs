@@ -532,10 +532,11 @@ pub fn perform_manual_compact(
             }
         }
         let focus_note = focus.map(|f| format!(" (Odak: {})", f)).unwrap_or_default();
-        // Try LLM-powered semantic compaction first (OMP-style structured handoff summary),
-        // with instant fallback to algorithmic digest if offline/interrupted.
+        // Try LLM-powered semantic compaction on cloud endpoints (or when an explicit `/compact <focus>`
+        // is requested). On local models (`endpoint.is_local()`) during auto-compact, skip the LLM
+        // summarization round-trip so we never flush the local KV-cache or stall for 20-30s.
         let mut llm_summary: Option<String> = None;
-        if !transcript_lines.is_empty() {
+        if !transcript_lines.is_empty() && (!endpoint.is_local() || focus.is_some()) {
             let mut spin = LiveSpinner::start(tr_en(
                 "🗜️  Bağlam LLM ile anlamsal olarak özetleniyor",
                 "🗜️  Summarizing context semantically with LLM",
