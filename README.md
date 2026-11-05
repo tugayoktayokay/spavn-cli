@@ -9,7 +9,7 @@ No async runtime. No Electron. No plugin tree. Three direct dependencies, one `c
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/tugayoktayokay/spavn-cli?color=7c5cff)](https://github.com/tugayoktayokay/spavn-cli/releases)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-207%20passing-success.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-215%20passing-success.svg)](#development)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#install)
 [![Docs](https://img.shields.io/badge/docs-spavn.dev-black.svg)](https://spavn.dev)
 
@@ -42,7 +42,7 @@ $ spavn "refactor the spill module, then run the suite"
 | [⬇️ Install](#-install) | One-liner, Cargo, prebuilt, from source |
 | [🚀 First run](#-first-run) | Zero-config start, local models, BYOK |
 | [🧰 The tool surface](#-the-tool-surface) | 11 builtins + anything MCP |
-| [⌨️ Slash commands](#-slash-commands) | 36 entries, all aliases |
+| [⌨️ Slash commands](#-slash-commands) | 37 entries, all aliases |
 | [🔐 Permissions and path policy](#-permissions-and-path-policy) | 3 access modes, 6 gates |
 | [🧠 Context and memory](#-context-and-memory) | Profile, skills, pins, audit |
 | [🛠️ Configuration](#-configuration) | Every `config.json` key |
@@ -245,8 +245,7 @@ Streamable-HTTP servers use `url` instead of `command`. Stdio servers get a scru
 
 ## ⌨️ Slash commands
 
-36 entries, all with aliases. `/help` prints the same set in-TUI; `/` opens the menu.
-
+37 entries, all with aliases. `/help` prints the same set in-TUI; `/` opens the menu.
 <details open>
 <summary><b>📋 Full listing</b></summary>
 
@@ -274,6 +273,7 @@ Streamable-HTTP servers use `url` instead of `command`. Stdio servers get a scru
 | `/compact` | `/c` | Compact context |
 | `/clear` | — | Clear the transcript |
 | `/reload` | `/r`, `/reload bin`, `/rb` | Rebuild + re-exec, session preserved |
+| `/update` | `/upgrade`, `/upd` | Check for a newer release; prints the exact upgrade command |
 | `/exit` | `/quit`, `/x`, `:q`, `:wq`, `q!`, `exit`, `quit` | Leave |
 | `/stop` | `/cancel` | Interrupt a running turn |
 | `/diff` | `/d` | Working-tree diff |
@@ -371,6 +371,8 @@ flowchart TD
   "busy_input_mode": "queue",        // "steer" | "queue"
   "language": "tr",
   "byokCatalog": true,
+  "updateCheck": true,              // one background release check per interval
+  "updateCheckIntervalHours": 24,
   "providers": [
     { "id": "my-gw", "title": "My gateway", "base_url": "https://gw.example.test/v1",
       "api_key_env": "MY_GW_KEY", "models": [] }
@@ -395,6 +397,9 @@ flowchart TD
 | `busy_input_mode` | `steer` interrupts mid-turn; `queue` defers to the next turn. |
 | `language` | `tr` \| `en` UI language. |
 | `byokCatalog` | `true` (default) merges the built-in provider catalog alongside `providers`. `false` runs the list entirely from config. |
+| `updateCheck` | `true` (default) runs one background release check per `updateCheckIntervalHours`. |
+| `updateCheckIntervalHours` | Hours between checks, minimum `1`; default `24`. |
+| `updateCheckUrl` | Release endpoint answering with `tag_name`. Unset derives it from the packaged GitHub repo; empty disables the check. |
 
 </details>
 
@@ -466,6 +471,7 @@ flowchart TD
 | `SPAVN_INSTALL_DIR` | Installer target (default `$HOME/.local/bin`). |
 | `SPAVN_LOCAL_MODELS_URL`, `SPAVN_LOCAL_BASE_URL` | Override local discovery / local base URL. |
 | `SPAVN_WEB_SEARCH_URL` | HTTP MCP endpoint for `web`, when `webSearchUrl` is unset. |
+| `SPAVN_UPDATE_CHECK` | `0` / `false` / `off` disables the release check for this run. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY` | Provider credentials. |
 
 ---
@@ -572,7 +578,7 @@ Current status on `main`:
 | :--- | :--- |
 | `cargo check --all-targets` | ✅ ok |
 | `cargo clippy --all-targets` | ✅ 0 warnings |
-| `cargo test --lib` | ✅ 204 passed, 0 failed, 1 ignored |
+| `cargo test --lib` | ✅ 212 passed, 0 failed, 1 ignored |
 | `cargo test --bins` | ✅ 3 passed |
 
 The single ignored test (`real_open_computer_use_lists_tools`) needs a live MCP server from your own config; run it with `cargo test -- --ignored`.
