@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Directory patterns that ripgrep must never descend into. Shared by `search` and `glob` so a
 /// file-hunting call cannot accidentally walk a home directory into a multi-minute stall.
 ///
@@ -128,7 +127,12 @@ pub(crate) fn glob_pattern_matches(pattern: &str, rel_path: &str) -> bool {
 }
 
 /// Native zero-dependency Rust file globber used when `rg` is not installed on the host.
-pub(crate) fn native_glob_fallback(root: &Path, pattern: &str, limit: usize, hidden: bool) -> String {
+pub(crate) fn native_glob_fallback(
+    root: &Path,
+    pattern: &str,
+    limit: usize,
+    hidden: bool,
+) -> String {
     let mut matches: Vec<String> = Vec::new();
     let mut hit_limit = false;
     fn walk(
@@ -214,21 +218,60 @@ pub(crate) fn native_glob_fallback(root: &Path, pattern: &str, limit: usize, hid
     out
 }
 
-/// Native zero-dependency content search used when `rg` is not installed on the host.
-/// Supports literal substrings and `|` / `\|` alternations, caps per-file matches at 10,
-/// and skips binary/minified/ignored files.
-pub(crate) fn native_search_fallback(root: &Path, pattern: &str) -> String {
-    let normalized_pat = pattern.replace("\\|", "|");
-    let terms: Vec<&str> = normalized_pat
-        .split('|')
-        .map(str::trim)
+/// Simplifies common regex idioms (`\b`, `\s+`, `(fn|struct|...)\s+`) into literal search terms
+/// when falling back to the built-in zero-dependency Rust scanner.
+fn extract_native_search_terms(pattern: &str) -> Vec<String> {
+    let mut p = pattern.replace("\\|", "|").replace("\\b", "");
+    // Strip leading grouped keyword prefixes like `(fn|struct|...)\s+symbol` from `lsp` definition queries
+    if let Some(idx) = p.find(")\\s+") {
+        p = p[idx + 4..].to_string();
+    } else if let Some(idx) = p.find(") ") {
+        if p.starts_with('(') {
+            p = p[idx + 2..].to_string();
+        }
+    }
+    p = p.replace("\\s+", " ").replace("\\s*", "");
+    p.split('|')
+        .map(|s| {
+            s.trim()
+                .trim_start_matches('^')
+                .trim_end_matches('$')
+                .to_string()
+        })
         .filter(|s| !s.is_empty())
-        .collect();
+        .collect()
+}
+
+/// Native zero-dependency content search used when `rg` is not installed on the host.
+/// Supports literal substrings, `|` / `\|` alternations, optional filename `glob`, and
+/// `context` lines around matches, capping per-file matches at 10.
+pub(crate) fn native_search_fallback(
+    root: &Path,
+    pattern: &str,
+    file_glob: &str,
+    context_lines: usize,
+) -> String {
+    let terms = extract_native_search_terms(pattern);
     if terms.is_empty() {
         return "(no matches)".to_string();
     }
     let mut results: Vec<String> = Vec::new();
-    fn search_file(path: &Path, terms: &[&str], out: &mut Vec<String>) {
+    fn search_file(
+        path: &Path,
+        terms: &[String],
+        file_glob: &str,
+        ctx_n: usize,
+        out: &mut Vec<String>,
+    ) {
+        if !file_glob.is_empty() {
+            let fname = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !glob_pattern_matches(file_glob, &fname) {
+                return;
+            }
+        }
         let Ok(meta) = fs::metadata(path) else {
             return;
         };
@@ -238,15 +281,27 @@ pub(crate) fn native_search_fallback(root: &Path, pattern: &str) -> String {
         let Ok(content) = fs::read_to_string(path) else {
             return;
         };
+        let all_lines: Vec<&str> = content.lines().collect();
         let mut file_hits = 0usize;
         let disp = path.to_string_lossy();
-        for (idx, line) in content.lines().enumerate() {
+        for (idx, &line) in all_lines.iter().enumerate() {
             if line.len() > 500 {
                 continue;
             }
-            if terms.iter().any(|t| line.contains(t)) {
-                let clipped: String = line.chars().take(220).collect();
-                out.push(format!("{}:{}:{}", disp, idx + 1, clipped));
+            if terms.iter().any(|t| line.contains(t.as_str())) {
+                if ctx_n > 0 {
+                    let start = idx.saturating_sub(ctx_n);
+                    let end = (idx + ctx_n).min(all_lines.len().saturating_sub(1));
+                    for (c_idx, &c_line) in all_lines[start..=end].iter().enumerate() {
+                        let abs_idx = start + c_idx;
+                        let sep = if abs_idx == idx { ':' } else { '-' };
+                        let clipped: String = c_line.chars().take(220).collect();
+                        out.push(format!("{}{}{}{}{}", disp, sep, abs_idx + 1, sep, clipped));
+                    }
+                } else {
+                    let clipped: String = line.chars().take(220).collect();
+                    out.push(format!("{}:{}:{}", disp, idx + 1, clipped));
+                }
                 file_hits += 1;
                 if file_hits >= 10 || out.len() >= 80 {
                     break;
@@ -254,7 +309,14 @@ pub(crate) fn native_search_fallback(root: &Path, pattern: &str) -> String {
             }
         }
     }
-    fn walk_search(cur: &Path, depth: usize, terms: &[&str], out: &mut Vec<String>) {
+    fn walk_search(
+        cur: &Path,
+        depth: usize,
+        terms: &[String],
+        file_glob: &str,
+        ctx_n: usize,
+        out: &mut Vec<String>,
+    ) {
         if depth > 6 || out.len() >= 80 {
             return;
         }
@@ -275,16 +337,16 @@ pub(crate) fn native_search_fallback(root: &Path, pattern: &str) -> String {
                 if is_ignored_dir_name(&name, false) {
                     continue;
                 }
-                walk_search(&p, depth + 1, terms, out);
+                walk_search(&p, depth + 1, terms, file_glob, ctx_n, out);
             } else if !name.starts_with('.') {
-                search_file(&p, terms, out);
+                search_file(&p, terms, file_glob, ctx_n, out);
             }
         }
     }
     if root.is_file() {
-        search_file(root, &terms, &mut results);
+        search_file(root, &terms, file_glob, context_lines, &mut results);
     } else {
-        walk_search(root, 0, &terms, &mut results);
+        walk_search(root, 0, &terms, file_glob, context_lines, &mut results);
     }
     if results.is_empty() {
         "(no matches)".to_string()
@@ -376,6 +438,13 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
     if let Err(blocked) = ctx.enforce_path(raw_path, false, "search") {
         return blocked;
     }
+    let file_glob = get_str_alias(args, &["glob", "file_pattern", "include"]);
+    let context_lines = args
+        .get("context")
+        .or_else(|| args.get("context_lines"))
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).min(8))
+        .unwrap_or(0);
     let path = expand_tilde(raw_path);
     let mut cmd = Command::new(rg_binary());
     cmd.args([
@@ -389,6 +458,12 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
         "--max-columns",
         "220",
     ]);
+    if context_lines > 0 {
+        cmd.args(["-C", &context_lines.to_string()]);
+    }
+    if !file_glob.is_empty() {
+        cmd.args(["-g", file_glob]);
+    }
     push_ignore_globs(&mut cmd);
     cmd.arg(pattern).arg(path.as_os_str());
 
@@ -405,7 +480,9 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
                 lines.join("\n")
             }
         }
-        Err(e) if e.contains("not installed") => native_search_fallback(&path, pattern),
+        Err(e) if e.contains("not installed") => {
+            native_search_fallback(&path, pattern, file_glob, context_lines)
+        }
         Err(e) => format!("Search error: {}", e),
     }
 }

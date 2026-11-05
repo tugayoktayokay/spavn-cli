@@ -38,16 +38,16 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Replace `old_text` with `new_text` in a file, or apply several non-overlapping edits atomically via `edits`.",
+                "description": "Replace `old_text` with `new_text` in a file, apply multiple hunks via `edits`, or apply a cross-file atomic transaction via `files` (rolls back all files if any hunk fails).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "File to edit" },
+                        "path": { "type": "string", "description": "File to edit (single-file mode)" },
                         "old_text": { "type": "string", "description": "Exact existing snippet (single edit)" },
                         "new_text": { "type": "string", "description": "Replacement snippet (single edit)" },
                         "edits": {
                             "type": "array",
-                            "description": "Batch of `{old_text, new_text}` applied atomically to the same file",
+                            "description": "Batch of `{old_text, new_text}` applied atomically to `path`",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -55,6 +55,19 @@ pub fn tool_definitions() -> Value {
                                     "new_text": { "type": "string" }
                                 },
                                 "required": ["old_text", "new_text"]
+                            }
+                        },
+                        "files": {
+                            "type": "array",
+                            "description": "Cross-file atomic transaction: array of `{path, old_text, new_text}` applied across multiple files with full rollback on error",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string" },
+                                    "old_text": { "type": "string" },
+                                    "new_text": { "type": "string" }
+                                },
+                                "required": ["path", "old_text", "new_text"]
                             }
                         }
                     },
@@ -99,12 +112,14 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "search",
-                "description": "Regex content search (ripgrep).",
+                "description": "Fast regex/symbol content search across files (skips node_modules/target/.git). Supports `glob` filter and `context` lines so you rarely need a follow-up `read`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string", "description": "Regex pattern" },
-                        "path": { "type": "string", "description": "Path to search (default `.`)" }
+                        "pattern": { "type": "string", "description": "Regex or symbol pattern (e.g. `uploadInboxFile|takePhoto`)" },
+                        "path": { "type": "string", "description": "File or directory to search (default `.`)" },
+                        "glob": { "type": "string", "description": "Optional filename glob filter, e.g. `*.tsx` or `*.rs`" },
+                        "context": { "type": "integer", "description": "Surrounding context lines per match (0..8, default 0)" }
                     },
                     "required": ["pattern"]
                 }

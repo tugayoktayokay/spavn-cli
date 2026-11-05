@@ -146,7 +146,8 @@ pub(crate) struct ConsoleScreenBufferInfo {
 #[link(name = "kernel32")]
 extern "system" {
     pub(crate) fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
-    pub(crate) fn GetConsoleMode(h_console_handle: *mut std::ffi::c_void, lp_mode: *mut u32) -> i32;
+    pub(crate) fn GetConsoleMode(h_console_handle: *mut std::ffi::c_void, lp_mode: *mut u32)
+        -> i32;
     pub(crate) fn SetConsoleMode(h_console_handle: *mut std::ffi::c_void, dw_mode: u32) -> i32;
     pub(crate) fn GetConsoleScreenBufferInfo(
         h_console_output: *mut std::ffi::c_void,
@@ -565,7 +566,10 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
     Vec::new()
 }
 
-pub(crate) fn image_token_span_before_cursor(chars: &[char], cursor_pos: usize) -> Option<(usize, usize)> {
+pub(crate) fn image_token_span_before_cursor(
+    chars: &[char],
+    cursor_pos: usize,
+) -> Option<(usize, usize)> {
     if cursor_pos == 0 || cursor_pos > chars.len() || chars[cursor_pos - 1] != ']' {
         return None;
     }
@@ -582,7 +586,10 @@ pub(crate) fn image_token_span_before_cursor(chars: &[char], cursor_pos: usize) 
     None
 }
 
-pub(crate) fn image_token_span_at_cursor(chars: &[char], cursor_pos: usize) -> Option<(usize, usize)> {
+pub(crate) fn image_token_span_at_cursor(
+    chars: &[char],
+    cursor_pos: usize,
+) -> Option<(usize, usize)> {
     if cursor_pos + 1 >= chars.len() || chars[cursor_pos] != '[' || chars[cursor_pos + 1] != '🖼'
     {
         return None;
@@ -897,4 +904,3 @@ pub(crate) fn render_inline_dock(
     *prev_top_w = geometry.next_top_w;
     *prev_cursor_col = cursor_col;
 }
-

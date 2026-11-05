@@ -80,9 +80,25 @@ pub fn load_session(path: &PathBuf) -> Vec<ChatMessage> {
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
     for line in reader.lines().map_while(Result::ok) {
-        if let Ok(msg) = serde_json::from_str::<ChatMessage>(&line) {
+        if let Ok(mut msg) = serde_json::from_str::<ChatMessage>(&line) {
             if !messages.is_empty() && msg.role == "system" {
                 continue;
+            }
+            if msg.role == "assistant" && msg.tool_calls.is_none() {
+                if let Some(ref c) = msg.content {
+                    if c.contains("DSML") && c.contains("invoke") {
+                        let recovered = crate::router::recover_inline_tool_calls(c);
+                        if !recovered.is_empty() {
+                            let stripped = crate::router::strip_recovered_tool_markup(c);
+                            msg.content = if stripped.is_empty() {
+                                None
+                            } else {
+                                Some(stripped)
+                            };
+                            msg.tool_calls = Some(recovered);
+                        }
+                    }
+                }
             }
             messages.push(msg);
         }
@@ -536,7 +552,9 @@ pub fn perform_manual_compact(
         // is requested). On local models (`endpoint.is_local()`) during auto-compact, skip the LLM
         // summarization round-trip so we never flush the local KV-cache or stall for 20-30s.
         let mut llm_summary: Option<String> = None;
-        if !transcript_lines.is_empty() && (!endpoint.is_local() || focus.is_some()) {
+        let use_llm_compact = focus.is_some()
+            || (!endpoint.is_local() && !endpoint.model.contains("free") && messages.len() <= 80);
+        if !transcript_lines.is_empty() && use_llm_compact {
             let mut spin = LiveSpinner::start(tr_en(
                 "🗜️  Bağlam LLM ile anlamsal olarak özetleniyor",
                 "🗜️  Summarizing context semantically with LLM",
@@ -736,10 +754,10 @@ mod tests {
             "[local] cargo test"
         );
         let alias_host =
-            serde_json::json!({ "target": "telya-server", "command": "uptime" }).to_string();
+            serde_json::json!({ "target": "prod-server", "command": "uptime" }).to_string();
         assert_eq!(
             summarize_tool_args("bash", &alias_host, "local"),
-            "[telya-server] uptime"
+            "[prod-server] uptime"
         );
     }
 

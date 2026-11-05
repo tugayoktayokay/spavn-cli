@@ -87,7 +87,10 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
         .filter(|s| !s.is_empty())
     {
         let low = pre.to_ascii_lowercase();
-        if matches!(low.as_str(), "local" | "m3" | "llama" | "vllm" | "lmstudio") {
+        if matches!(
+            low.as_str(),
+            "local" | "llama" | "vllm" | "lmstudio" | "mlx"
+        ) {
             "local-server".to_string()
         } else if matches!(low.as_str(), "custom" | "url") {
             "custom-provider".to_string()

@@ -161,9 +161,19 @@ pub fn dispatch_slash_command(
 
     if input == "/reload" || input == "/r" || input == "/reload bin" || input == "/rb" {
         if !messages.is_empty() {
-            messages[0] =
-                ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
-            rewrite_session(session_file, messages);
+            messages.retain(|m| {
+                !(m.role == "assistant"
+                    && m.tool_calls.is_none()
+                    && m.content
+                        .as_deref()
+                        .map(|c| c.contains("DSML") && c.contains("invoke"))
+                        .unwrap_or(false))
+            });
+            if !messages.is_empty() {
+                messages[0] =
+                    ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+                rewrite_session(session_file, messages);
+            }
         }
         reset_scroll_region();
         let skill_count = discover_skills().len();

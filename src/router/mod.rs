@@ -3,13 +3,13 @@ pub mod openai;
 pub mod vision;
 
 pub use anthropic::stream_anthropic;
+pub(crate) use openai::*;
 pub use openai::{stream_chat_completion, stream_openai};
+pub(crate) use vision::*;
 pub use vision::{
     base64_encode_bytes, collapse_pasted_image_paths, extract_dragged_images_info,
     register_read_image, DraggedImage,
 };
-pub(crate) use openai::*;
-pub(crate) use vision::*;
 
 use crate::config::{byok_catalog, load_user_config, resolve_api_key};
 use serde::{Deserialize, Serialize};

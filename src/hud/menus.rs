@@ -1162,4 +1162,3 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
     }
     result
 }
-

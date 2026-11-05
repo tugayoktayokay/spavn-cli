@@ -4,17 +4,17 @@ pub mod read;
 pub mod schema;
 pub mod search;
 pub mod shell;
-pub mod web;
 #[cfg(test)]
 mod tests;
+pub mod web;
 
+pub(crate) use edit::*;
 pub use edit::{
     build_live_project_signatures, check_unfinished_placeholders, run_project_verification_gate,
 };
-pub use schema::{tool_definitions, tool_definitions_for_phase, tool_definitions_for_turn};
-pub(crate) use edit::*;
 pub(crate) use mcp_subagent::*;
 pub(crate) use read::*;
+pub use schema::{tool_definitions, tool_definitions_for_phase, tool_definitions_for_turn};
 pub(crate) use search::*;
 pub(crate) use shell::*;
 pub(crate) use web::*;
@@ -215,7 +215,6 @@ impl ToolContext {
     }
 }
 
-
 pub(crate) fn expand_tilde(path_str: &str) -> PathBuf {
     if path_str == "~" {
         return home_dir();
@@ -387,7 +386,8 @@ pub(crate) fn write_target_file(raw_path: &str, content: &str) -> Result<(), Str
     }
 }
 
-pub(crate) static ATOMIC_WRITE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static ATOMIC_WRITE_SEQ: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Temp file in the same dir + rename: a crash or full disk never leaves a truncated target.
 /// Follows symlinks (including broken symlinks) and keeps the existing file's permissions.
@@ -570,7 +570,11 @@ pub(crate) fn gate_safe(s: &str) -> String {
         .collect()
 }
 
-pub(crate) fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str) -> bool {
+pub(crate) fn prompt_user_approval(
+    ctx: &mut ToolContext,
+    action_title: &str,
+    detail: &str,
+) -> bool {
     // Fail closed without a TTY: the read below would block forever on a piped/inherited stdin
     // and the turn could never make progress. A prompt that cannot be answered is a "no".
     if !crate::hud::stdin_is_tty() {
@@ -632,8 +636,6 @@ pub(crate) fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, de
     crate::hud::resume_active_spinner();
     approved
 }
-
-
 
 pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> String {
     ctx.tool_step_counter += 1;
@@ -770,4 +772,3 @@ pub fn phase_locked_tool(name: &str) -> bool {
             | "terminal"
     )
 }
-
