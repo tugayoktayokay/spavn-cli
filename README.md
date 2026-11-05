@@ -1,14 +1,77 @@
-# spavn
+# spavn-cli
 
-**A terminal-native coding agent in one Rust binary.**
+**The terminal-native coding agent that ships as one Rust binary.**
 
-`spavn` streams from a local or hosted model, drives real tools against your filesystem and
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 2021](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](Cargo.toml)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
+[![Dependencies](https://img.shields.io/badge/dependencies-3-success.svg)](Cargo.toml)
+
+`spavn-cli` streams from a local or hosted model, drives real tools against your filesystem and
 shell, and keeps every session on disk. No daemon, no database, no telemetry, no async runtime,
 no Node/Python sidecar — three crates and the shell you already use.
 
-```
+```sh
 $ spavn "audit src/guard.rs, then write the missing regression tests"
 ```
+
+**This repository is the CLI.** `spavn.dev` hosts a separate, unrelated product — a multiplayer
+web platform for teams. Same brand, different codebase, no shared code or releases. Everything
+documented here is the local binary in this repo.
+
+---
+
+## Screenshots
+
+Captured from the running TUI, also published on the product page at <https://spavn.dev>. Exact HUD
+wording moves between releases, so the prose below states what each frame demonstrates and, where
+the current source differs, says so explicitly.
+
+### The dock, live
+
+![SPAVN TUI dock with a queued message, tool cards with a diffstat, and a live context meter](assets/shots/spavn-hero-tui.png)
+
+One turn, start to finish. The user turn carries an image attachment, rendered as the vision badge
+`[🖼️ arch-diagram.png (142KB)]`. Three tool cards follow: `read src/main.rs (425..560)` reporting
+`135 lines · 1ms`, an `edit` whose title already carries the diffstat (`edit src/main.rs (+48 / -9
+lines)`) with a `[Syntax Check: RS Braces Balanced · LSP: 0 errors]` verdict in the body, and a
+`bash` run reporting `test result: ok. 78 passed`. The assistant answer streams below them, closed
+by the turn metrics (`TTFT 310ms · 2.4s · 84.2 tok/s`).
+
+The dock stays pinned while all of that happens: access mode (`SOVEREIGN`), phase (`CODE`), the
+resolved model, a queue slot (`#1: Queued … ↑: Edit · Ctrl+X: Cancel`), a context-budget bar
+(`9% (18k/200k)`), and the key hints (`/: Menu · /model · /login · Shift+Tab: Access · \: Phase`).
+Typing during a turn never scrolls the dock away — the message either steers the running turn or
+queues behind it.
+
+Card shape in the current build (`src/hud/toolcard.rs` documents the same layout):
+
+```text
+╭─ ⚡ bash  [local] git status --short
+│  M install.sh
+│  M src/http.rs
+│  … (37 lines hidden)
+╰─ ✓ 39 lines · 14ms
+```
+
+### `/model` — BYOK cloud plus local workstations
+
+![The /model picker listing a local llama-swap workstation above the cloud BYOK providers](assets/shots/spavn-models-fleet.png)
+
+Local servers are auto-discovered from their `/v1/models` root, so a llama-swap, LM Studio, or Ollama
+box appears in the same list as the cloud providers, with its context window and measured decode
+speed, rather than being a separate mode you switch into. `/login` configures keys from inside the
+picker; the filter row at the top is a live search.
+
+### `/bench` and `/fleet`
+
+![Live model benchmark showing TTFT, decode speed and a tool-calling probe, above the remote host radar](assets/shots/spavn-bench-fleet.png)
+
+`/bench` runs the real harness against an endpoint and prints `TTFT` (VRAM load + prefill), decode
+speed as `N tok/s` with produce/total seconds, and a tool-call probe that ends in `✅ PASS (read
+JSON)` or `⚠️ NO TOOL CALL` — a model that looks fine on paper fails exactly here. `/fleet` then
+sweeps every configured host with `uptime` (over `ssh -o ConnectTimeout=3` for remote targets) and
+prints reachability with round-trip latency (`🟢 ONLINE (38ms)` plus the host's uptime line).
 
 ---
 
@@ -26,7 +89,7 @@ $ spavn "audit src/guard.rs, then write the missing regression tests"
 
 ## Requirements
 
-- **macOS** (aarch64, x86_64) or **Linux** (x86_64, aarch64). The TUI uses `termios`; Windows builds exist in the release matrix but are untested.
+- **macOS** (aarch64, x86_64) or **Linux** (x86_64 prebuilt; aarch64 builds from source and is supported by the installer). The TUI uses `termios`; Windows targets exist in the release matrix but are untested and have no installer.
 - **Rust stable**, edition 2021, to build from source.
 - **`rg`** on `PATH` for the `search` tool. Remote targets fall back to `grep -rn`, local ones do not.
 - Optional: `ssh` for remote host targets, `git` for `/diff` and `/commit`, whatever interpreter your quota and memory helper scripts need.
@@ -35,33 +98,95 @@ $ spavn "audit src/guard.rs, then write the missing regression tests"
 
 ## Install
 
-Prebuilt archives are published by `.github/workflows/release.yml` on every `v*` tag
-(`spavn-<target>.tar.gz` + `.sha256`).
+Four ways in. Pick one.
+
+### 1. One line (macOS, Linux)
 
 ```sh
-# From the repository (downloads the release archive, falls back to cargo)
 curl -fsSL https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/install.sh | sh
+```
 
-# Or from source
+The one-liner lands in `$HOME/.local/bin`, alongside an `spvn` symlink.
+
+### 2. Cargo
+
+```sh
+cargo install --git https://github.com/tugayoktayokay/spavn-cli.git --locked
+```
+
+Cargo installs to `~/.cargo/bin`; add that directory to `PATH` if `spavn --version` is not found.
+
+### 3. Prebuilt archive
+
+Download from [Releases](https://github.com/tugayoktayokay/spavn-cli/releases), or fetch directly:
+
+```sh
+# macOS Apple Silicon
+curl -fsSLO https://github.com/tugayoktayokay/spavn-cli/releases/latest/download/spavn-aarch64-apple-darwin.tar.gz
+shasum -a 256 -c spavn-aarch64-apple-darwin.tar.gz.sha256
+tar -xzf spavn-aarch64-apple-darwin.tar.gz && ./install.sh --local ./spavn
+```
+
+| Platform | Archive |
+| --- | --- |
+| macOS Apple Silicon | `spavn-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `spavn-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc) | `spavn-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `spavn-x86_64-pc-windows-msvc.zip` |
+| Linux aarch64 | no archive — the installer falls back to `cargo install` |
+
+Each Unix archive ships with a `.sha256` sibling. Windows has no installer script — unzip and run
+`spavn.exe`.
+
+> Until the first `v*` tag is pushed the Releases page is empty, so the one-liner silently falls
+> back to `cargo install` when Cargo is on `PATH`. That is the intended path, not a failure.
+
+### 4. From source
+
+```sh
 git clone https://github.com/tugayoktayokay/spavn-cli.git
 cd spavn-cli
 cargo build --release
 ./install.sh --local target/release/spavn
 ```
 
-`install.sh` installs to `$HOME/.local/bin` (override with `SPAVN_INSTALL_DIR`), writes an
-`spvn` alias, and stages a fresh inode before signing on macOS so `amfid` never kills a
-replaced binary.
+### What the installer does
+
+1. Picks the archive for `uname -s` / `uname -m`, or builds from source when no archive exists.
+2. Copies the binary onto a **fresh inode** next to the destination (`--local <path>` skips the download).
+3. Ad-hoc signs it on macOS (`codesign -s - -f`) and clears every xattr (`xattr -c`).
+4. Atomically `mv`s it into `$SPAVN_INSTALL_DIR` (default `$HOME/.local/bin`).
+5. Symlinks `spvn` → `spavn`, so the alias can never be a second stale copy.
+6. Runs `spavn --version` and **fails loudly** if the new binary cannot exec.
+
+Nothing else is written: your config, sessions, and audit log appear under `~/.spavn` only on
+first run.
+
+### PATH, upgrade, uninstall
+
+```sh
+# make sure the install dir is reachable
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
+spavn --version            # spavn v0.1.0 (macos/aarch64)
+
+# upgrade: re-run the installer, it stages a new inode and re-signs
+curl -fsSL https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/install.sh | sh
+
+# uninstall
+rm -f ~/.local/bin/spavn ~/.local/bin/spvn
+rm -rf ~/.spavn            # also deletes sessions, audit log, and config
+```
 
 ---
 
 ## Quick start
 
 ```sh
-spavn                       # interactive TUI
-spavn "explain src/router.rs"   # single turn, then exit
-spavn -a safe -P plan       # ask-everything access, read-only plan phase
-spavn -r                    # interactive session picker
+spavn                           # interactive TUI
+spavn "explain src/router.rs"   # single headless turn, then exit
+spavn -a safe -P plan           # ask-everything access, read-only plan phase
+spavn -r                        # interactive session picker
+spavn --help                    # every flag, path, and env var
 ```
 
 ### Against a local model
@@ -94,6 +219,34 @@ spavn --model gpt-5.4 "write the migration"
 Inside the TUI, `/login`, `/byok`, and `/models` handle keys and base URLs without touching a
 shell profile.
 
+### First run: what to do after installing
+
+Nothing has been configured yet, and `spavn` tells you so instead of failing at the first request.
+
+```sh
+$ spavn
+👋 First-run setup: No active API key or local model configured yet. Opening provider setup wizard (/login)...
+```
+
+The wizard (`/login`) writes a provider group into `~/.spavn/config.json` with `0600` and picks it as
+the active model. Afterwards:
+
+```sh
+$ spavn --version            # spavn v0.1.0 (macos/aarch64)
+$ spavn                      # straight into the TUI
+```
+
+`~/.spavn` appears on first run only — `config.json`, `sessions/`, `audit/`, `tool-output/`, `pins/`,
+all `0700`/`0600`. No files are written into the repository or your `$HOME` root.
+
+| You want to | Do this |
+| --- | --- |
+| Use a cloud provider | `/login` (or `/byok` for a custom base URL), then `/models` |
+| Use a server already running locally | `/models` — local `/v1/models` roots are auto-discovered |
+| Check what the binary can do before trusting it | `spavn --help`, then `/help` inside the TUI |
+| Run one prompt and leave | `spavn -q "summarize this repo"` |
+| Undo an edit the model made | `/undo` |
+
 ---
 
 ## CLI reference
@@ -116,6 +269,60 @@ shell profile.
 | `-h`, `--help` | Usage summary. |
 
 Anything that is not a flag is joined into the prompt, so `spavn fix the bug` works.
+
+`spavn --help` prints the same reference without opening the TUI. The model default it shows is
+whatever `default_model` resolves to on your machine:
+
+```text
+SPAVN v0.1.0 (macos/aarch64) — Native Rust Coding Agent & Harness
+Usage: spavn [options] [prompt...]
+
+Run without arguments to open the interactive TUI. A prompt is executed
+headless, then the TUI opens only when -i/--interactive is given.
+
+Options:
+  -m, --model <key>           Select model (default: <your default_model>)
+  -a, --access <mode>         Access mode: safe | auto | sovereign
+  -P, --phase <phase>         Agent phase: plan | code
+  -H, --host <host>           Default target host (default: local)
+  -s, --session <id|fork:id>  Resume or fork a specific session
+  -c, --continue              Continue latest session
+  -r, --resume                Interactive session picker
+  -i, --interactive           Start interactive TUI after initial prompt
+  -p, --prompt <text>         Explicit prompt (same as a positional argument)
+  -t, --think                 Toggle thinking stream display
+  -q, --quiet                 Quiet/headless output mode
+  -j, --json                  Structured JSON output mode
+  -V, --version               Print version and exit
+  -h, --help                  Print this help message
+
+Examples:
+  spavn                                  Open the interactive TUI
+  spavn "explain src/router.rs"           One headless turn, then exit
+  spavn -a safe -m local "fix the tests"  Explicit mode, model, prompt
+  spavn -c                               Continue the latest session
+  spavn -s fork:session-17938104.jsonl    Fork a session and keep history
+
+Paths:
+  config    ~/.spavn/config.json      (override the root with SPAVN_HOME)
+  sessions  ~/.spavn/sessions/         resumable JSONL, mode 0600
+  audit     ~/.spavn/audit/            HMAC-chained action ledger
+
+Environment:
+  SPAVN_MODEL, SPAVN_HOME, SPAVN_LANG, SPAVN_SHELL
+  SPAVN_LOCAL_MODELS_URL, SPAVN_LOCAL_BASE_URL, SPAVN_FORCE_ANTHROPIC
+  OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY,
+  DEEPSEEK_API_KEY, GROQ_API_KEY, XAI_API_KEY, SPAVN_API_KEY, SPAVN_BASE_URL
+
+Files:
+  ~/.spavn/PROFILE.md               user profile injected into the prompt
+  ~/.spavn/skills/                  on-demand domain instructions
+  ~/.spavn/tool-output/             spilled tool output, newest 40 kept
+  ~/.spavn/audit.key                HMAC key for the audit chain
+
+Inside the TUI: /help lists every slash command, / lists the menu.
+Docs: https://github.com/tugayoktayokay/spavn-cli#readme
+```
 
 ---
 
@@ -191,11 +398,11 @@ block-coloured hunk with a per-block line-number gutter, and elisions collapse t
 | `/janitor`, `/j` | Run the project quality gates (check, types, lint, test). |
 | `/wiki`, `/w` | Instant module and architecture map of the repository. |
 | `/pin <note>`, `/pins`, `/unpin <id>` | Persist architectural rules into the project context. |
-| `/goal <text>`, `/goals`, `/goal done <n>` | Track project goals. |
-| `/todo`, `/tasks` | Live task list; `- [ ]` lines in the model's text drive the progress bar. |
+| `/goal`, `/goals`, `/g` | Goals panel. `/goal <text>` adds one, `/goal done <n>` completes it. |
+| `/todo`, `/tasks` | Live task list. `/todo <text>` adds, `/todo done <n>` toggles, `/todo clear` resets. The dock bar also follows `- [ ]` lines in the model's text. |
 | `/undo`, `/u` | Restore the last `write`/`edit` snapshot. |
 | `review <target>`, `/refactor <target>`, `/security <target>`, `/test <target>`, `/docs <target>` | Switch to that role and dispatch a focused pass over the given target. |
-| `/think`, `/t` | Toggle reasoning display. |
+| `/think` | Toggle reasoning display. |
 | `/skill`, `/skills` | List, add, show, or remove skills. |
 | `/host`, `/tmp` | Target host and scratch paths. |
 | `/fleet`, `/f` | Parallel reachability and uptime sweep over every configured host. |
@@ -346,7 +553,7 @@ non-local alias is never silently trusted.
 | Field | Meaning |
 | --- | --- |
 | `default_model` | Endpoint key used when `--model` and `SPAVN_MODEL` are absent. |
-| `fallback_cloud_model` | Endpoint tried when the default one fails to resolve. |
+| `fallback_cloud_model` | Cloud key used for hybrid escalation: when a **local** model loops (`repeat_count >= 2`) or stops responding, that step is retried on this model. `none` disables it. |
 | `language` | `en` or `tr` — the UI language, same as `/lang`. |
 | `busy_input_mode` | `queue` (default) or `steer`: what `Enter` does while a turn is running. |
 | `local_discovery_url` | OpenAI-compatible `/v1` URL probed for local models. |
@@ -389,6 +596,7 @@ Everything lives under `~/.spavn` (or `SPAVN_HOME`), mode `0700`:
 ```
 ~/.spavn/
 ├── config.json         providers, paths, MCP servers
+├── secrets.env         BYOK keys (0600); flagged as secret material by the path policy
 ├── PROFILE.md          user profile injected into the system prompt
 ├── skills/             on-demand domain instructions
 ├── sessions/           session-<epoch>.jsonl transcripts, resumable and greppable
@@ -396,6 +604,8 @@ Everything lives under `~/.spavn` (or `SPAVN_HOME`), mode `0700`:
 ├── audit.key           key material for that chain
 ├── pins/               architectural rules pinned with /pin, one <project>.json each
 ├── goals.json          /goal state
+├── artifacts/          <project>.jsonl knowledge summaries recalled into later prompts
+├── bg/                 logs from bash(background=true), owner-only
 └── tool-output/        spilled oversized tool output
 ```
 
@@ -457,7 +667,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly those four steps on `ubuntu-latest` and
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test --all-targets`, and `cargo build --release` on `ubuntu-latest` and
 `macos-latest`. `.github/workflows/release.yml` builds `aarch64-apple-darwin`,
 `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc` archives with
 SHA-256 sidecars on every `v*` tag.
@@ -494,6 +705,41 @@ path that fails the probe.
 
 ---
 
+## Project scope: two separate products
+
+`spavn` is one brand with two independent codebases. Nothing is shared between them — no code, no
+schema, no releases, no CLI flags.
+
+| | `spavn-cli` (this repo) | `spavn.dev` (web platform) |
+| --- | --- | --- |
+| What it is | Local terminal coding agent | Multiplayer web platform for teams |
+| Language / stack | Rust, 2021 edition, no async runtime | TypeScript / Node.js 22, Fastify, Prisma, Redis |
+| Binary / artifact | One ~4 MB static executable | Docker Compose deployment |
+| Installed by | `install.sh`, Cargo, or a release archive | Hosted service |
+| Runs | On the machine you are editing | Server-side, reached over the network |
+| State | `~/.spavn` on your machine | Server-side database |
+| Account required | No | Yes |
+
+Screenshot gallery, product page, and the web build live at **<https://spavn.dev>**. The Rust
+implementation in this repository is the CLI; the web platform is developed separately.
+
+---
+
 ## License
 
-[MIT](LICENSE) — use it, fork it, ship it. Contributions welcome under the same license.
+`spavn-cli` is released under the **MIT License**. See [LICENSE](LICENSE).
+
+```
+MIT License — Copyright (c) 2026 Tugay Oktay Okay
+```
+
+MIT was chosen deliberately: this is a tool people run against their own machines and vendor into
+their own workflows, so there is no reason to impose copyleft or a contributor licence agreement.
+You may use it commercially, fork it, rebrand it, and ship it closed-source. The only obligation is
+keeping the copyright notice, and there is no warranty.
+
+Contributions are accepted under the same MIT terms — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Third-party crates keep their own licences: `serde` 1.0 and `serde_json` 1.0 are `MIT OR
+Apache-2.0`, `ureq` 3.5 is `MIT OR Apache-2.0`, and `rustls` 0.23 is `Apache-2.0 OR ISC OR MIT`.
+`cargo deny` is not wired into CI, but the dependency tree is three direct crates deep on purpose.

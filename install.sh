@@ -81,7 +81,9 @@ if curl -fsSL "$TARBALL_URL" -o "$TMP_DIR/spavn.tar.gz" 2>/dev/null; then
 elif command -v cargo >/dev/null 2>&1; then
   echo "📦 Building from source with Cargo..."
   cargo install --git "https://github.com/${REPO}.git" --locked --root "$HOME/.local"
-  ln -sf "$INSTALL_DIR/spavn" "$INSTALL_DIR/spvn"
+  # Cargo always drops the binary in $HOME/.local/bin; route it through install_binary so the
+  # staged inode is signed and probed even when SPAVN_INSTALL_DIR points somewhere else.
+  install_binary "$HOME/.local/bin/spavn"
 else
   echo "Error: Prebuilt binary not found for $TARGET and Cargo is not installed." >&2
   exit 1
