@@ -272,16 +272,21 @@ pub fn read_bottom_dock_input(
                                     cursor_pos =
                                         match image_token_span_before_cursor(&chars, cursor_pos) {
                                             Some((start, _)) => start,
-                                            None if has_alt_or_ctrl => jump_left(&chars, cursor_pos),
+                                            None if has_alt_or_ctrl => {
+                                                jump_left(&chars, cursor_pos)
+                                            }
                                             None => cursor_pos.saturating_sub(1),
                                         };
                                 }
                                 b'C' => {
-                                    cursor_pos = match image_token_span_at_cursor(&chars, cursor_pos) {
-                                        Some((_, end)) => end,
-                                        None if has_alt_or_ctrl => jump_right(&chars, cursor_pos),
-                                        None => (cursor_pos + 1).min(chars.len()),
-                                    };
+                                    cursor_pos =
+                                        match image_token_span_at_cursor(&chars, cursor_pos) {
+                                            Some((_, end)) => end,
+                                            None if has_alt_or_ctrl => {
+                                                jump_right(&chars, cursor_pos)
+                                            }
+                                            None => (cursor_pos + 1).min(chars.len()),
+                                        };
                                 }
                                 b'H' | b'A' => {
                                     cursor_pos = 0;

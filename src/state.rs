@@ -270,9 +270,11 @@ pub fn sync_live_tasks_from_text(text: &str) {
                 .collect()
         })
         .unwrap_or_default();
-    let restates = parsed
-        .iter()
-        .any(|i| carried.iter().any(|(title, _)| *title == i.title.to_lowercase()));
+    let restates = parsed.iter().any(|i| {
+        carried
+            .iter()
+            .any(|(title, _)| *title == i.title.to_lowercase())
+    });
     let adoptable = (parsed.len() >= 2
         && (carried.is_empty()
             || carried.iter().all(|(_, s)| *s == LiveTaskStatus::Done)
@@ -483,7 +485,10 @@ mod tests {
         sync_live_tasks_from_text("- [x] One\n- [x] Two");
         assert_eq!(titles().len(), 2);
         clear_finished_live_tasks();
-        assert!(titles().is_empty(), "a fully done bar must not survive the turn");
+        assert!(
+            titles().is_empty(),
+            "a fully done bar must not survive the turn"
+        );
 
         sync_live_tasks_from_text("- [x] One\n- [ ] Two");
         clear_finished_live_tasks();
@@ -500,7 +505,11 @@ mod tests {
         let after_first = titles();
         assert_eq!(after_first[0].1, LiveTaskStatus::Done);
         sync_live_tasks_from_text("- [ ] Update config.rs\n- [ ] Run cargo test");
-        assert_eq!(titles()[0].1, LiveTaskStatus::Done, "status must carry over");
+        assert_eq!(
+            titles()[0].1,
+            LiveTaskStatus::Done,
+            "status must carry over"
+        );
         clear_live_tasks();
     }
 

@@ -1217,11 +1217,7 @@ mod tests {
             "http://lvh.me/",
             "http://engine.local/",
         ] {
-            assert_eq!(
-                classify_egress(url),
-                Some(EgressTarget::Loopback),
-                "{url}"
-            );
+            assert_eq!(classify_egress(url), Some(EgressTarget::Loopback), "{url}");
         }
         for url in [
             "http://169.254.169.254/latest/meta-data/",
@@ -1232,11 +1228,7 @@ mod tests {
             "http://[fd00::1]/",
             "http://0.0.0.0/",
         ] {
-            assert_eq!(
-                classify_egress(url),
-                Some(EgressTarget::Private),
-                "{url}"
-            );
+            assert_eq!(classify_egress(url), Some(EgressTarget::Private), "{url}");
             assert!(egress_is_blocked(url), "{url} must be blocked");
         }
         for url in ["https://example.com/x", "https://api.github.com"] {
@@ -1268,11 +1260,7 @@ mod tests {
             "http://nas.home.arpa/",
             "http://build.corp/",
         ] {
-            assert_eq!(
-                classify_egress(url),
-                Some(EgressTarget::Private),
-                "{url}"
-            );
+            assert_eq!(classify_egress(url), Some(EgressTarget::Private), "{url}");
         }
     }
 
@@ -1503,8 +1491,8 @@ pub fn classify_egress(url: &str) -> Option<EgressTarget> {
     if h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local") {
         return Some(EgressTarget::Loopback);
     }
-    let numeric = h.starts_with("0x")
-        || (!h.contains('.') && h.chars().all(|c| c.is_ascii_digit()));
+    let numeric =
+        h.starts_with("0x") || (!h.contains('.') && h.chars().all(|c| c.is_ascii_digit()));
     if numeric {
         // `2130706433` and `0x7f000001` are inet_aton spellings of 127.0.0.1; decode them so the
         // loopback branch above applies instead of lumping every numeric host into "private".
@@ -1520,10 +1508,12 @@ pub fn classify_egress(url: &str) -> Option<EgressTarget> {
         return Some(EgressTarget::Private);
     }
     // `1.0x7f.0.1` / `127.1` style short forms keep a dot but still encode loopback.
-    if h.split('.').count() < 4 && h.split('.').all(|p| {
-        p.chars().all(|c| c.is_ascii_digit())
-            || (p.starts_with("0x") && p[2..].chars().all(|c| c.is_ascii_hexdigit()))
-    }) && h.contains('.')
+    if h.split('.').count() < 4
+        && h.split('.').all(|p| {
+            p.chars().all(|c| c.is_ascii_digit())
+                || (p.starts_with("0x") && p[2..].chars().all(|c| c.is_ascii_hexdigit()))
+        })
+        && h.contains('.')
     {
         return Some(EgressTarget::Private);
     }
@@ -1538,11 +1528,7 @@ pub fn classify_egress(url: &str) -> Option<EgressTarget> {
         }
     }
     // These always answer with loopback, so no embedded address to read.
-    if h == "lvh.me"
-        || h.ends_with(".lvh.me")
-        || h == "vcap.me"
-        || h.ends_with(".vcap.me")
-    {
+    if h == "lvh.me" || h.ends_with(".lvh.me") || h == "vcap.me" || h.ends_with(".vcap.me") {
         return Some(EgressTarget::Loopback);
     }
     // Internal-only naming. `metadata.google.internal` resolves to 169.254.169.254, and the

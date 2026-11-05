@@ -81,7 +81,8 @@ pub fn dispatch_slash_command(
 
     if input == "/reload" || input == "/r" || input == "/reload bin" || input == "/rb" {
         if !messages.is_empty() {
-            messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+            messages[0] =
+                ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
             rewrite_session(session_file, messages);
         }
         reset_scroll_region();
@@ -209,7 +210,8 @@ pub fn dispatch_slash_command(
     if matches!(input, "/lang" | "/language" | "/dil") {
         if let Some(chosen_lang) = interactive_select_language() {
             if !messages.is_empty() {
-                messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+                messages[0] =
+                    ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
             }
             let label = if chosen_lang == "en" {
                 "🇬🇧 English (EN)"
@@ -236,7 +238,8 @@ pub fn dispatch_slash_command(
         cfg.language = input.trim_start_matches('/').to_string();
         let _ = config::save_user_config(&cfg);
         if !messages.is_empty() {
-            messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+            messages[0] =
+                ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         }
         println!(
             "\n{}🌐 {}: {}{}{}",
@@ -1117,7 +1120,8 @@ pub fn dispatch_slash_command(
     if let Some(note) = input.strip_prefix("/pin ") {
         let pin = add_pin(cwd, note);
         if !messages.is_empty() {
-            messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+            messages[0] =
+                ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         }
         println!(
             "\n{}📌 Proje bağlamına sabitlendi (#{}): {}{}{}",
@@ -1129,8 +1133,10 @@ pub fn dispatch_slash_command(
         if let Ok(id) = id_str.trim().parse::<usize>() {
             if remove_pin(cwd, id) {
                 if !messages.is_empty() {
-                    messages[0] =
-                        ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+                    messages[0] = ChatMessage::system(cached_system_prompt(
+                        cwd,
+                        endpoint.wants_compact_prompt(),
+                    ));
                 }
                 println!("\n{}🗑️  Sabitlenmiş not silindi: #{}{}", GREEN, id, RESET);
             } else {
@@ -1148,8 +1154,10 @@ pub fn dispatch_slash_command(
         if let Ok(id) = id_str.trim().parse::<usize>() {
             if complete_goal(id) {
                 if !messages.is_empty() {
-                    messages[0] =
-                        ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+                    messages[0] = ChatMessage::system(cached_system_prompt(
+                        cwd,
+                        endpoint.wants_compact_prompt(),
+                    ));
                 }
                 println!(
                     "\n{}✅ Hedef tamamlandı olarak işaretlendi: #{}{}",
@@ -1164,7 +1172,8 @@ pub fn dispatch_slash_command(
     if let Some(obj) = input.strip_prefix("/goal ") {
         let g = add_goal(cwd, obj);
         if !messages.is_empty() {
-            messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+            messages[0] =
+                ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         }
         println!(
             "\n{}🎯 Yeni proje hedefi eklendi (#{}): {}{}{}",

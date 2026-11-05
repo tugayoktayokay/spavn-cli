@@ -135,7 +135,13 @@ fn alias<'a>(val: &'a serde_json::Value, keys: &[&str]) -> &'a str {
 }
 
 const OLD_KEYS: &[&str] = &["old_text", "old_string", "old_str", "search", "target"];
-const NEW_KEYS: &[&str] = &["new_text", "new_string", "new_str", "replace", "replacement"];
+const NEW_KEYS: &[&str] = &[
+    "new_text",
+    "new_string",
+    "new_str",
+    "replace",
+    "replacement",
+];
 const CONTENT_KEYS: &[&str] = &["content", "text", "body", "code"];
 
 /// Pairs of `(old, new)` text in a payload: batched hunks first, then the single-hunk shape.
@@ -199,7 +205,10 @@ pub fn change_rows(tool_name: &str, args_json: &str, max_rows: usize) -> Vec<Str
         push_hunk(&mut rows, old_text, new_text, max_rows);
     }
     if pairs.len() > CHANGE_MAX_HUNKS {
-        rows.push(format!("  ⋯ ({} more hunks)", pairs.len() - CHANGE_MAX_HUNKS));
+        rows.push(format!(
+            "  ⋯ ({} more hunks)",
+            pairs.len() - CHANGE_MAX_HUNKS
+        ));
     }
     elide(&rows, max_rows)
 }
@@ -289,7 +298,10 @@ pub fn diff_row_sized(number: Option<usize>, row: &str, cols: usize, gutter_w: u
     };
     let styled = if number.is_none() {
         let t = row.trim_start();
-        let bare = t.strip_prefix("- ").or_else(|| t.strip_prefix("+ ")).unwrap_or(t);
+        let bare = t
+            .strip_prefix("- ")
+            .or_else(|| t.strip_prefix("+ "))
+            .unwrap_or(t);
         format!("{}{}", DIM, bare)
     } else {
         let t = row.trim_start();
@@ -353,7 +365,10 @@ pub fn footer_line(ok: bool, preview: &str, lines: usize, millis: u128) -> Strin
     } else {
         format!("{} · {}", preview, count)
     };
-    format!("{}╰─ {} {}{} · {}ms{}", YELLOW, mark, DIM, body, millis, RESET)
+    format!(
+        "{}╰─ {} {}{} · {}ms{}",
+        YELLOW, mark, DIM, body, millis, RESET
+    )
 }
 
 #[cfg(test)]
@@ -482,8 +497,16 @@ mod tests {
     fn numbered_diff_rows_put_a_gutter_on_changes_and_skip_markers() {
         let rows = rows(&["- old", "+ new", "  ⋯"]);
         let out = numbered_diff_rows(&rows, 80);
-        assert!(out[0].contains("│ 1 ") && out[0].contains(BG_REMOVED), "{:?}", out[0]);
-        assert!(out[1].contains("│ 2 ") && out[1].contains(BG_ADDED), "{:?}", out[1]);
+        assert!(
+            out[0].contains("│ 1 ") && out[0].contains(BG_REMOVED),
+            "{:?}",
+            out[0]
+        );
+        assert!(
+            out[1].contains("│ 2 ") && out[1].contains(BG_ADDED),
+            "{:?}",
+            out[1]
+        );
         assert!(!out[2].contains("│ 3 "), "markers take no number");
         assert!(out[2].contains('⋯'));
     }
@@ -495,7 +518,11 @@ mod tests {
         let out = numbered_diff_rows(&r, 80);
         assert!(out[0].contains("│ 1 "), "{:?}", out[0]);
         assert!(out[1].contains("│ 2 "), "{:?}", out[1]);
-        assert!(out[3].contains("│ 1 "), "the green side restarts at 1: {:?}", out[3]);
+        assert!(
+            out[3].contains("│ 1 "),
+            "the green side restarts at 1: {:?}",
+            out[3]
+        );
         assert!(out[4].contains("│ 2 "), "{:?}", out[4]);
 
         let many: Vec<String> = (0..12).map(|i| format!("- l{i}")).collect();

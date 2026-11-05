@@ -329,7 +329,11 @@ pub fn summarize_tool_args(name: &str, args_json: &str, default_host: &str) -> S
         "memory" => {
             let op = get_str_alias(&val, &["op", "action", "mode"]);
             let op = if op.is_empty() { "recall" } else { op };
-            format!("{}: {}", op, get_str_alias(&val, &["query", "text", "content", "note"]))
+            format!(
+                "{}: {}",
+                op,
+                get_str_alias(&val, &["query", "text", "content", "note"])
+            )
         }
         "skill" => get_str_alias(&val, &["name", "skill", "id", "query"]).to_string(),
         "web" => {
@@ -671,7 +675,12 @@ mod tests {
     fn one_line_strips_escapes_and_caps_width() {
         let poisoned = "\x1b[31mabcdefghij\x1b[0m";
         assert_eq!(one_line(poisoned, 4), "a…ij");
-        assert_eq!(one_line(&"x".repeat(500), SUMMARY_MAX_CHARS).chars().count(), SUMMARY_MAX_CHARS);
+        assert_eq!(
+            one_line(&"x".repeat(500), SUMMARY_MAX_CHARS)
+                .chars()
+                .count(),
+            SUMMARY_MAX_CHARS
+        );
         let cmd = "cd ~/apps/spavn-cli && cargo test memory::";
         let squeezed = one_line(cmd, 24);
         assert_eq!(squeezed.chars().count(), 24);
@@ -698,23 +707,35 @@ mod tests {
         })
         .to_string();
         let summary = summarize_tool_args("bash", &args, "local");
-        assert_eq!(summary, "[local] cd ~/apps/spavn-cli && cat > /tmp/probe2.sh <<'EOF'");
+        assert_eq!(
+            summary,
+            "[local] cd ~/apps/spavn-cli && cat > /tmp/probe2.sh <<'EOF'"
+        );
     }
 
     #[test]
     fn path_summary_is_unchanged() {
         let args = serde_json::json!({ "path": "src/hud/menus.rs" }).to_string();
-        assert_eq!(summarize_tool_args("read", &args, "local"), "src/hud/menus.rs");
+        assert_eq!(
+            summarize_tool_args("read", &args, "local"),
+            "src/hud/menus.rs"
+        );
     }
 
     #[test]
     fn summary_honours_the_executor_aliases() {
         let alias_path = serde_json::json!({ "file_path": "src/tools.rs" }).to_string();
-        assert_eq!(summarize_tool_args("read", &alias_path, "local"), "src/tools.rs");
+        assert_eq!(
+            summarize_tool_args("read", &alias_path, "local"),
+            "src/tools.rs"
+        );
         let alias_cmd = serde_json::json!({ "cmd": "cargo test" }).to_string();
-        assert_eq!(summarize_tool_args("bash", &alias_cmd, "local"), "[local] cargo test");
-        let alias_host = serde_json::json!({ "target": "telya-server", "command": "uptime" })
-            .to_string();
+        assert_eq!(
+            summarize_tool_args("bash", &alias_cmd, "local"),
+            "[local] cargo test"
+        );
+        let alias_host =
+            serde_json::json!({ "target": "telya-server", "command": "uptime" }).to_string();
         assert_eq!(
             summarize_tool_args("bash", &alias_host, "local"),
             "[telya-server] uptime"
@@ -724,7 +745,10 @@ mod tests {
     #[test]
     fn empty_host_falls_back_to_the_default_instead_of_rendering_brackets() {
         let args = serde_json::json!({ "host": "", "command": "uptime" }).to_string();
-        assert_eq!(summarize_tool_args("bash", &args, "local"), "[local] uptime");
+        assert_eq!(
+            summarize_tool_args("bash", &args, "local"),
+            "[local] uptime"
+        );
     }
 
     #[test]

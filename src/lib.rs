@@ -34,9 +34,9 @@ pub mod memory;
 pub mod router;
 pub mod session;
 pub mod skills;
-pub mod spill;
 pub mod slash_commands;
 pub mod spavn_engine;
+pub mod spill;
 pub mod state;
 pub mod tools;
 

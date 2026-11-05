@@ -220,7 +220,9 @@ mod tests {
                 "redirect pivot not blocked: {target}"
             );
         }
-        assert!(!crate::guard::egress_is_blocked("https://api.anthropic.com/v1/messages"));
+        assert!(!crate::guard::egress_is_blocked(
+            "https://api.anthropic.com/v1/messages"
+        ));
     }
 
     /// Serves one canned HTTP/1.1 response on an ephemeral loopback port and returns
