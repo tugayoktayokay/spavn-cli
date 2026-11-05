@@ -650,6 +650,15 @@ Nothing is rebuilt per channel: one tag, three distribution paths.
 
 ---
 
+## 🔗 Related repositories
+
+| Repo | What lives there |
+| :--- | :--- |
+| [`spavn-cli`](https://github.com/tugayoktayokay/spavn-cli) | This repo — the agent binary, its HUD, tools and policy |
+| [`spavn-desktop`](https://github.com/tugayoktayokay/spavn-desktop) | Tauri 2 desktop shell and the app-shell design surface; drives this binary, re-implements none of it |
+
+---
+
 ## 📄 License
 
 MIT — see [LICENSE](LICENSE).
