@@ -1,5 +1,23 @@
 # Değişiklik Günlüğü
 
+## 2026-11-05 — Sürüm denetimi, crates.io & Homebrew paketleme
+
+### Sürüm denetimi (`update.rs`, `hud/mod.rs`, `slash_commands.rs`, `main.rs`)
+- **Otomatik güncelleme uyarısı**: Açılışta `updateCheckIntervalHours` (varsayılan 24 saat) aralığıyla tek bir arka plan `GET` yapılır; yeni sürüm varsa karşılama banner'ında `⬆️ YENİ SÜRÜM VAR` kutusu ve **çalıştırılacak komut** yazılır. Hiçbir şey indirilmez veya çalıştırılmaz.
+- **Oturum içi uyarı**: Denetim açılıştan sonra biterse sonuç `PENDING_NOTICE`'a park edilir; giriş döngüsü bir sonraki turunda dock'u silip uyarıyı temiz satıra basar. Aynı sürüm iki kez duyurulmaz (`should_park`).
+- **`/update` (`/upgrade`, `/upd`)**: Anında denetim; güncelse `✅`, yeni sürüm varsa komut, hata varsa neden. Denetim kapalıysa "güncel" demek yerine kapalı olduğunu söyler.
+- **Kanal algılama**: `/opt/homebrew/Cellar/...` → `brew upgrade spavn`, `~/.cargo/bin` → `cargo install spavn --locked --force`, `~/.local/bin` → `install.sh`. Çalıştırılabilir dosyanın gerçek yolu okunur.
+- **Ayarlar**: `updateCheck`, `updateCheckIntervalHours`, `updateCheckUrl` + `SPAVN_UPDATE_CHECK=0`. Sonuç `<spavn_dir>/update-check.json` içinde `0600` olarak önbelleklenir.
+
+### Paketleme
+- **crates.io**: `readme`, `homepage`, `documentation`, `keywords`, `categories`, `rust-version = "1.80"` eklendi; `assets/` ve `.github/` paketten çıkarıldı (1.8 MiB → 224 KiB).
+- **Homebrew**: `packaging/homebrew/Formula/spavn.rb` — macOS arm64/x86_64 ve Linux x86_64, v0.1.0 SHA-256'ları asset'lerden doğrulanmış, `spvn` symlink'i ve `brew test` bloğu dahil.
+- **Release matrisi**: `aarch64-unknown-linux-gnu` eklendi.
+
+### Düzeltmeler
+- `web` aracının gömülü arama sağlayıcısı ve gömülü tool adları kaldırıldı; endpoint yalnızca `webSearchUrl` / `SPAVN_WEB_SEARCH_URL`'den gelir.
+- `lib.rs` doc listesine `update` modülü eklendi; `--help` çıktısı `/update` ve `SPAVN_UPDATE_CHECK`'i gösterir.
+
 ## 2026-11-04 — Apple-tarzı TUI sadeleştirmesi, atomik görsel rozetleri, `/login` merkezi, `subagent`, Windows & yerel Q4 optimizasyonları
 
 ### Arayüz & UX (`hud.rs`, `main.rs`, `slash_commands.rs`)

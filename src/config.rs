@@ -234,6 +234,25 @@ pub struct SpavnUserConfig {
         alias = "byok_catalog"
     )]
     pub byok_catalog: bool,
+    /// Check for a newer release once per `updateCheckIntervalHours` at startup. The check is a
+    /// single GET to `updateCheckUrl` (default: this build's GitHub releases) and never downloads
+    /// anything; set `false` to keep the binary fully offline.
+    #[serde(
+        default = "default_true",
+        rename = "updateCheck",
+        alias = "update_check"
+    )]
+    pub update_check: bool,
+    /// Hours between background release checks. Minimum 1.
+    #[serde(
+        default = "default_update_interval",
+        rename = "updateCheckIntervalHours"
+    )]
+    pub update_check_interval_hours: u64,
+    /// Release endpoint for the update check. Unset derives it from `CARGO_PKG_REPOSITORY`;
+    /// empty disables the check. Must answer with JSON carrying `tag_name`.
+    #[serde(default, rename = "updateCheckUrl")]
+    pub update_check_url: Option<String>,
     pub quota_quick_script: Option<String>,
     pub quota_full_script: Option<String>,
     pub memory_recall_bin: Option<String>,
@@ -252,6 +271,10 @@ pub struct SpavnUserConfig {
 
 fn default_model_key() -> String {
     std::env::var("SPAVN_MODEL").unwrap_or_else(|_| "sonnet".to_string())
+}
+
+fn default_update_interval() -> u64 {
+    24
 }
 
 fn default_true() -> bool {
@@ -855,6 +878,9 @@ pub fn load_user_config() -> SpavnUserConfig {
         web_search_http_tool: None,
         web_fetch_http_tool: None,
         byok_catalog: true,
+        update_check: true,
+        update_check_interval_hours: default_update_interval(),
+        update_check_url: None,
         quota_quick_script: None,
         quota_full_script: None,
         memory_recall_bin: None,

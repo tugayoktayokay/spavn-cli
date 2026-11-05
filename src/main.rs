@@ -1171,6 +1171,7 @@ fn main() {
                      \x20 audit     ~/.spavn/audit/            HMAC-chained action ledger\n\n\
                      Environment:\n\
                      \x20 SPAVN_MODEL, SPAVN_HOME, SPAVN_LANG, SPAVN_SHELL\n\
+                     \x20 SPAVN_UPDATE_CHECK=0 disables the release check\n\
                      \x20 SPAVN_LOCAL_MODELS_URL, SPAVN_LOCAL_BASE_URL, SPAVN_FORCE_ANTHROPIC\n\
                      \x20 OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY,\n\
                      \x20 DEEPSEEK_API_KEY, GROQ_API_KEY, XAI_API_KEY, SPAVN_API_KEY, SPAVN_BASE_URL\n\n\
@@ -1180,6 +1181,7 @@ fn main() {
                      \x20 ~/.spavn/tool-output/             spilled tool output, newest 40 kept\n\
                      \x20 ~/.spavn/audit.key                HMAC key for the audit chain\n\n\
                      Inside the TUI: /help lists every slash command, / lists the menu.\n\
+                     /update checks for a newer release and prints the upgrade command.\n\
                      Docs: https://github.com/tugayoktayokay/spavn-cli#readme",
                     env!("CARGO_PKG_VERSION"),
                     std::env::consts::OS,
@@ -1369,6 +1371,10 @@ fn main() {
         .to_string();
 
     setup_scroll_region();
+    // Read the cache before the check can rewrite it: the banner shows what was already known, and
+    // anything this run discovers arrives later through the input loop instead.
+    let known_update = spavn::update::cached_notice();
+    spavn::update::spawn_background_check();
     render_welcome_header(
         &endpoint,
         ctx.access,
@@ -1376,6 +1382,9 @@ fn main() {
         &cwd,
         &session_name,
     );
+    if let Some(info) = known_update {
+        hud::render_update_notice(&info);
+    }
 
     if !endpoint.is_local()
         && !endpoint.has_quota_pool

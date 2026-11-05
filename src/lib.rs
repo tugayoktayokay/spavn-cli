@@ -23,6 +23,7 @@
 //! - [`spavn_engine`] — agent phases, role dispatch, knowledge artifacts.
 //! - [`state`] — the crate's only mutable globals (queues, live tasks, signal flags).
 //! - [`tools`] — tool schemas, executors, and approval flow.
+//! - [`update`] — version check and the upgrade advice shown to the user.
 
 pub mod ansi;
 pub mod config;
@@ -39,6 +40,7 @@ pub mod spavn_engine;
 pub mod spill;
 pub mod state;
 pub mod tools;
+pub mod update;
 
 // Re-exported at the crate root so `crate::take_resized()` and friends keep resolving
 // from every module without threading a context object through the terminal code.

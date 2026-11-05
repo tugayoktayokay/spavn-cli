@@ -1287,6 +1287,10 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                 "/commit",
                 tr_en("/commit (Değişiklikleri İşle)", "/commit (Commit Changes)"),
             ),
+            (
+                "/update",
+                tr_en("/update (Sürüm Denetimi)", "/update (Check for Updates)"),
+            ),
             ("/exit", tr_en("/exit (Çıkış)", "/exit (Exit)")),
         ];
         let q = input_buf.trim().to_lowercase();
@@ -1795,6 +1799,35 @@ pub fn render_welcome_header(
     for line in flex_wrap_items(&p_top, &p_bot, &sep, &row1_items, full_w) {
         println!("{}", line);
     }
+}
+
+/// Boxed upgrade notice for the welcome banner and the input loop.
+///
+/// Prints nothing unless a newer release was actually found, so the caller can render it
+/// unconditionally. The wording carries the exact command for the channel this binary was
+/// installed from, so the user never has to look it up.
+pub fn render_update_notice(info: &crate::update::UpdateInfo) {
+    let width = info.url.chars().count().max(info.command.chars().count()) + 12;
+    let rule = "─".repeat(width.min(72));
+    let title = tr_en("YENİ SÜRÜM VAR", "NEW VERSION AVAILABLE");
+    println!("\n{}╭─ ⬆️  {} {}{}", YELLOW, title, rule, RESET);
+    println!(
+        "{}│{}  {}v{} → {}{}v{}{}",
+        YELLOW, RESET, DIM, info.current, BOLD, RESET, info.latest, RESET
+    );
+    println!(
+        "{}│{}  {}: {}{}{}",
+        YELLOW,
+        RESET,
+        tr_en("Güncelle", "Update"),
+        BOLD,
+        info.command,
+        RESET
+    );
+    if !info.url.is_empty() {
+        println!("{}│{}  {}{}{}", YELLOW, RESET, DIM, info.url, RESET);
+    }
+    println!("{}╰{}{}", YELLOW, rule, RESET);
 }
 
 fn bar_for_pct(pct: f64) -> String {

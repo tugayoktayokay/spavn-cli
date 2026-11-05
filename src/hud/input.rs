@@ -73,6 +73,17 @@ pub fn read_bottom_dock_input(
             needs_redraw = true;
         }
 
+        // A finished update check parks its notice here; the dock is erased first so the advice
+        // lands on a clean line instead of inside the prompt box.
+        if let Some(info) = crate::update::take_pending_notice() {
+            erase_inline_dock(prev_top_w, prev_cursor_col);
+            print!("\n\r");
+            prev_top_w = 0;
+            prev_cursor_col = 1;
+            render_update_notice(&info);
+            needs_redraw = true;
+        }
+
         let mut buf: String = chars.iter().collect();
         if buf.contains('/') || buf.contains('~') {
             let (collapsed, changed) = crate::router::collapse_pasted_image_paths(&buf);

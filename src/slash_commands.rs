@@ -4,9 +4,9 @@ use crate::hud::{
     interactive_queue_manager, interactive_select_access, interactive_select_host,
     interactive_select_language, interactive_select_model, interactive_select_role,
     interactive_select_session, interactive_select_skill, render_fleet_radar,
-    render_full_quota_card, render_session_resume_preview, render_welcome_header,
-    reset_scroll_region, set_idle_recap, setup_scroll_region, term_size, toggle_idle_recap,
-    QueueAction,
+    render_full_quota_card, render_session_resume_preview, render_update_notice,
+    render_welcome_header, reset_scroll_region, set_idle_recap, setup_scroll_region, term_size,
+    toggle_idle_recap, QueueAction,
 };
 use crate::memory::cached_system_prompt;
 use crate::router::{resolve_endpoint, ChatMessage, ModelEndpoint};
@@ -1276,6 +1276,34 @@ pub fn dispatch_slash_command(
         return SlashOutcome::Handled;
     }
 
+    if input == "/update" || input == "/upgrade" || input == "/upd" {
+        if crate::update::is_check_disabled() {
+            println!(
+                "\n{}⚠️  {}{}",
+                YELLOW,
+                tr_en(
+                    "Sürüm denetimi kapalı (`updateCheck: false` veya SPAVN_UPDATE_CHECK).",
+                    "Update check is off (`updateCheck: false` or SPAVN_UPDATE_CHECK)."
+                ),
+                RESET
+            );
+            return SlashOutcome::Handled;
+        }
+        match crate::update::check_now() {
+            Ok(Some(info)) => render_update_notice(&info),
+            Ok(None) => println!(
+                "\n{}✅ SPAVN v{} güncel.{} ({}/{})",
+                GREEN,
+                env!("CARGO_PKG_VERSION"),
+                RESET,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+            Err(e) => println!("\n{}⚠️  Sürüm denetimi yapılamadı: {}{}", YELLOW, e, RESET),
+        }
+        return SlashOutcome::Handled;
+    }
+
     if input == "/help" {
         println!(
             "\n{}╭─ ⚡ SPAVN v0.1 KOMUTLAR, BYOK & MOTOR ÖZELLİKLERİ ──────────────────────────{}",
@@ -1309,6 +1337,7 @@ pub fn dispatch_slash_command(
             "{}│{}  {}/goal <hedef> · /goal done N{}  Proje hedeflerini kaydet ve takip et",
             CYAN, RESET, BOLD, RESET
         );
+        println!("{}│{}  {}/update (/upgrade){}           Yeni sürüm denetimi; güncelleme komutunu yazdır", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}Shift+Tab · Esc · Ctrl+R{}      Yetki değiştir · İşlemi/Menüyü iptal et · Canlı Reload", CYAN, RESET, BOLD, RESET);
         println!(
             "{}╰────────────────────────────────────────────────────────────────────────────{}",
