@@ -1411,8 +1411,26 @@ mod slash_tests {
 
     #[test]
     fn probe_binary_rejects_a_path_that_cannot_exec() {
-        assert!(probe_binary(Path::new("/bin/sh")), "/bin/sh must probe ok");
         let dir = scratch("probe");
+        // A script, not `/bin/sh`: the probe appends `--version`, and `dash --version` (Ubuntu's
+        // `/bin/sh`) exits 2, so `/bin/sh` is not a portable "this execs" control.
+        let ok = dir.join("ok.sh");
+        std::fs::write(&ok, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&ok, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        assert!(probe_binary(&ok), "a script that exits 0 must probe ok");
+
+        let failing = dir.join("failing.sh");
+        std::fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::set_permissions(
+            &failing,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(
+            !probe_binary(&failing),
+            "a non-zero exit must fail the probe"
+        );
+
         let junk = dir.join("spavn");
         std::fs::write(&junk, "not a binary").unwrap();
         std::fs::set_permissions(&junk, std::os::unix::fs::PermissionsExt::from_mode(0o644))

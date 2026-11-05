@@ -347,6 +347,15 @@ pub fn summarize_tool_args(name: &str, args_json: &str, default_host: &str) -> S
         "subagent" | "spawn_submodels" | "task" | "delegate" => {
             get_str_alias(&val, &["task", "prompt", "query", "objective"]).to_string()
         }
+        "computer" | "computer_use" | "open_computer_use" => {
+            let act = get_str_alias(&val, &["action", "op", "cmd"]);
+            let target = get_str_alias(&val, &["app", "target", "text", "key"]);
+            if target.is_empty() {
+                act.to_string()
+            } else {
+                format!("{}: {}", act, target)
+            }
+        }
         _ => String::new(),
     };
     one_line(&raw, SUMMARY_MAX_CHARS)
@@ -382,6 +391,9 @@ pub fn tool_progress_target(name: &str, args_json: &str) -> String {
                 .to_string()
         }
         "search" => get_str_alias(&val, &["pattern", "query", "regex", "search"]).to_string(),
+        "computer" | "computer_use" | "open_computer_use" => {
+            get_str_alias(&val, &["app", "target", "action"]).to_string()
+        }
         _ => String::new(),
     }
 }
