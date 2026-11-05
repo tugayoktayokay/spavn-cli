@@ -26,7 +26,7 @@ use crate::state::{push_queued_message, queued_message_count};
 use crate::tools::{AccessMode, ToolContext};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CYAN: &str = "\x1b[36m";
 const DIM: &str = "\x1b[2m";
@@ -53,6 +53,86 @@ fn refresh_system_prompt(
     if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
         *first = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         rewrite_session(session_file, messages);
+    }
+}
+
+/// Copies `src` onto a fresh inode beside `dest`, ad-hoc signs it on macOS, then renames it into
+/// place. Writing over the inode `dest` already points at leaves a stale code signature in the
+/// kernel cache, and the next `execve()` of that path is killed before `main()` runs.
+fn stage_binary(src: &Path, dest: &Path) -> bool {
+    let Some(parent) = dest.parent() else {
+        return false;
+    };
+    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("spavn");
+    let tmp = parent.join(format!(".{}.tmp.{}", name, std::process::id()));
+    if std::fs::copy(src, &tmp).is_err() {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for (cmd, args) in [("codesign", &["-s", "-", "-f"][..]), ("xattr", &["-c"][..])] {
+            let _ = std::process::Command::new(cmd)
+                .args(args)
+                .arg(&tmp)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+    if std::fs::rename(&tmp, dest).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    true
+}
+
+/// Points `spvn` at `spavn` as a symlink, matching `install.sh`.
+///
+/// A copy would be a second inode with its own signature to go stale, which is exactly how a
+/// working `spavn` and a killed `spvn` end up side by side.
+fn link_alias(binary: &Path) {
+    let Some(parent) = binary.parent() else {
+        return;
+    };
+    let alias = parent.join("spvn");
+    let _ = std::fs::remove_file(&alias);
+    #[cfg(unix)]
+    let _ = std::os::unix::fs::symlink(binary, &alias);
+    #[cfg(not(unix))]
+    let _ = std::fs::copy(binary, &alias);
+}
+
+/// True when `path` really execs, checked with `--version`.
+///
+/// Staging plus a probe is what keeps a broken install from costing the session: without it the
+/// loop execs the bad path and the terminal reports nothing but `[1] killed`.
+fn probe_binary(path: &Path) -> bool {
+    let mut child = match std::process::Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                return false;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
@@ -101,8 +181,11 @@ pub fn dispatch_slash_command(
             } else {
                 dev_release_bin
             };
-            // If a newer release binary exists or if home_bin might have a dirty vnode signature cache on macOS,
-            // atomically replace home_bin (new inode via rename) and ad-hoc sign so execve() never gets SIGKILL.
+            // If a newer release binary exists, stage it on a fresh inode, ad-hoc sign it, then
+            // rename it over the installed path. Writing over the existing inode leaves a stale
+            // code signature in the kernel cache and `execve()` is killed outright — and `spvn`
+            // must stay a symlink to `spavn`, because a second copy is a second inode that can go
+            // stale on its own.
             let candidate = if release_bin.exists() {
                 let rel_mtime = std::fs::metadata(&release_bin)
                     .and_then(|m| m.modified())
@@ -119,27 +202,28 @@ pub fn dispatch_slash_command(
                 &home_bin
             };
             if candidate.exists() && home_bin.parent().map(|p| p.exists()).unwrap_or(false) {
-                for dest_name in ["spavn", "spvn"] {
-                    let dest_bin = PathBuf::from(&home).join(format!(".local/bin/{}", dest_name));
-                    let tmp_bin = PathBuf::from(&home).join(format!(
-                        ".local/bin/.{}.tmp.{}",
-                        dest_name,
-                        std::process::id()
-                    ));
-                    if std::fs::copy(candidate, &tmp_bin).is_ok() {
-                        #[cfg(target_os = "macos")]
-                        {
-                            let _ = std::process::Command::new("codesign")
-                                .args(["-s", "-", "-f"])
-                                .arg(&tmp_bin)
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .status();
-                        }
-                        let _ = std::fs::rename(&tmp_bin, &dest_bin);
+                if stage_binary(candidate, &home_bin) {
+                    link_alias(&home_bin);
+                    if probe_binary(&home_bin) {
+                        home_bin
+                    } else {
+                        // The new binary does not exec (stale or broken signature). Keep this
+                        // session alive on the running image instead of exec'ing into a kill.
+                        eprintln!(
+                            "{}⚠ {} {} {}",
+                            YELLOW,
+                            home_bin.display(),
+                            tr_en(
+                                "çalıştırılamıyor, mevcut binary ile devam ediliyor.",
+                                "cannot exec, continuing on the running binary."
+                            ),
+                            RESET
+                        );
+                        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spavn"))
                     }
+                } else {
+                    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spavn"))
                 }
-                home_bin
             } else {
                 std::env::current_exe().unwrap_or_else(|_| PathBuf::from("spavn"))
             }
@@ -1310,6 +1394,113 @@ mod slash_tests {
             &mut msgs,
         )
     }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "spavn-stage-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn probe_binary_rejects_a_path_that_cannot_exec() {
+        assert!(probe_binary(Path::new("/bin/sh")), "/bin/sh must probe ok");
+        let dir = scratch("probe");
+        let junk = dir.join("spavn");
+        std::fs::write(&junk, "not a binary").unwrap();
+        std::fs::set_permissions(&junk, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        assert!(!probe_binary(&junk), "a non-executable file must fail");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The failure this whole path exists for: on Apple Silicon an arm64 binary with no valid
+    /// signature is SIGKILLed by `amfid` before `main()`, so the shell only reports `[1] killed`
+    /// (137). A probe that returns true for that binary would exec the session into a kill.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn probe_binary_rejects_a_binary_whose_signature_is_gone() {
+        // The probe must see a binary that answers `--version`, so use the real release artifact
+        // rather than the test harness (which treats `--version` as a filter and exits non-zero).
+        let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/release/spavn");
+        let codesign = Path::new("/usr/bin/codesign");
+        if !real.exists() || !codesign.exists() {
+            return;
+        }
+        let dir = scratch("unsigned");
+        let victim = dir.join("spavn");
+        if std::fs::copy(&real, &victim).is_err() {
+            return;
+        }
+        assert!(probe_binary(&victim), "the copy must run while signed");
+        let removed = std::process::Command::new(codesign)
+            .arg("--remove-signature")
+            .arg(&victim)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !removed.map(|s| s.success()).unwrap_or(false) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(
+            !probe_binary(&victim),
+            "an unsigned binary is killed on exec and must never be exec'd into"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stage_binary_leaves_a_runnable_binary_on_a_fresh_inode() {
+        let dir = scratch("stage");
+        // A shell script, not a Mach-O: `codesign -s - -f` rewrites the signature of a Mach-O and
+        // changes its size, which would make the byte comparison below test layout, not staging.
+        let src = dir.join("src.sh");
+        std::fs::write(&src, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&src, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let dest = dir.join("spavn");
+        std::fs::write(&dest, "stale").unwrap();
+        let before = std::fs::metadata(&dest).unwrap().ino();
+
+        assert!(stage_binary(&src, &dest), "staging should succeed");
+        assert_ne!(
+            std::fs::metadata(&dest).unwrap().ino(),
+            before,
+            "rename must replace the inode, not overwrite it"
+        );
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            std::fs::read(&src).unwrap(),
+            "the staged file must be a full copy of the source"
+        );
+        assert!(probe_binary(&dest), "the staged file must still exec");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_alias_replaces_a_stale_copy_with_a_symlink() {
+        let dir = scratch("alias");
+        let bin = dir.join("spavn");
+        std::fs::write(&bin, "x").unwrap();
+        let alias = dir.join("spvn");
+        std::fs::write(&alias, "stale copy").unwrap();
+        link_alias(&bin);
+        let meta = std::fs::symlink_metadata(&alias).unwrap();
+        assert!(meta.file_type().is_symlink(), "spvn must become a symlink");
+        assert_eq!(std::fs::read_link(&alias).unwrap(), bin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn non_slash_input_returns_not_slash() {
