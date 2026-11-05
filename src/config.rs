@@ -131,6 +131,23 @@ mod host_tests {
         let hosts = vec![h("local", "local", false)];
         assert!(host_is_sensitive_in("mystery", &hosts));
     }
+
+    #[test]
+    fn documented_config_keys_parse_in_both_spellings() {
+        // The README documents camelCase for the newer keys; snake_case stays accepted so
+        // hand-written configs from earlier releases keep loading.
+        for raw in [
+            r#"{"webSearchUrl":"https://example.test/mcp","byokCatalog":false}"#,
+            r#"{"web_search_url":"https://example.test/mcp","byok_catalog":false}"#,
+        ] {
+            let parsed: SpavnUserConfig = serde_json::from_str(raw).expect(raw);
+            assert_eq!(
+                parsed.web_search_url.as_deref(),
+                Some("https://example.test/mcp")
+            );
+            assert!(!parsed.byok_catalog);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,7 +201,7 @@ pub struct SpavnUserConfig {
     pub local_base_url: Option<String>,
     /// MCP endpoint the `web` tool posts search calls to. Unset or an empty string leaves the HTTP
     /// backend off; nothing is baked in, so no external host is reached unless this is set.
-    #[serde(default)]
+    #[serde(default, rename = "webSearchUrl", alias = "web_search_url")]
     pub web_search_url: Option<String>,
     /// Name of an entry in `mcpServers` that serves web search. When set, `web` goes through
     /// that server instead of the built-in HTTP endpoint, so no external host is baked in.
@@ -203,15 +220,19 @@ pub struct SpavnUserConfig {
     /// guessed, so an unrelated secret cannot leak to the configured endpoint.
     #[serde(default, rename = "webSearchApiKeyEnv")]
     pub web_search_api_key_env: Option<String>,
-    /// Tool name on `web_search_url` serving search. Unset means search over HTTP is not wired up.
+    /// Tool name on `webSearchUrl` serving search. Unset means search over HTTP is not wired up.
     #[serde(default, rename = "webSearchHttpTool")]
     pub web_search_http_tool: Option<String>,
-    /// Tool name on `web_search_url` serving fetch. Unset falls back to the plain GET path.
+    /// Tool name on `webSearchUrl` serving fetch. Unset falls back to the plain GET path.
     #[serde(default, rename = "webFetchHttpTool")]
     pub web_fetch_http_tool: Option<String>,
     /// Serve the built-in BYOK provider catalog alongside `providers`.
     /// Set `false` to run the provider list entirely from config.
-    #[serde(default = "default_true")]
+    #[serde(
+        default = "default_true",
+        rename = "byokCatalog",
+        alias = "byok_catalog"
+    )]
     pub byok_catalog: bool,
     pub quota_quick_script: Option<String>,
     pub quota_full_script: Option<String>,

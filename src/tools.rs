@@ -3018,7 +3018,7 @@ fn strip_html_to_clean_text(html: &str) -> String {
 /// Endpoint the `web` tool posts its MCP calls to.
 ///
 /// There is no built-in host. Shipping one would send queries to a third party nobody chose, so
-/// the endpoint comes only from `web_search_url` or `SPAVN_WEB_SEARCH_URL`; unset or empty leaves
+/// the endpoint comes only from `webSearchUrl` or `SPAVN_WEB_SEARCH_URL`; unset or empty leaves
 /// the HTTP backend off and the caller reports how to switch it on.
 fn web_search_endpoint() -> Option<String> {
     let configured = crate::config::load_user_config().web_search_url;
@@ -3215,7 +3215,9 @@ fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
                 }
                 Ok(None) => {
                     let tool = web_http_tool(
-                        crate::config::load_user_config().web_fetch_http_tool.as_deref(),
+                        crate::config::load_user_config()
+                            .web_fetch_http_tool
+                            .as_deref(),
                     );
                     if let Some(tool) = tool {
                         if let Some(markdown) = call_web_http(
@@ -4815,8 +4817,14 @@ mod security_tests {
     fn missing_search_backend_names_both_ways_to_wire_it_up() {
         // Nothing is baked in, so the refusal is the onboarding text: it has to point at the stdio
         // route and the HTTP route instead of implying a hidden default host.
-        assert!(NO_SEARCH_BACKEND.contains("webSearchServer"), "{NO_SEARCH_BACKEND}");
-        assert!(NO_SEARCH_BACKEND.contains("webSearchUrl"), "{NO_SEARCH_BACKEND}");
+        assert!(
+            NO_SEARCH_BACKEND.contains("webSearchServer"),
+            "{NO_SEARCH_BACKEND}"
+        );
+        assert!(
+            NO_SEARCH_BACKEND.contains("webSearchUrl"),
+            "{NO_SEARCH_BACKEND}"
+        );
     }
 
     #[test]
