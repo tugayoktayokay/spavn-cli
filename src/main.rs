@@ -1,427 +1,36 @@
-mod config;
-mod guard;
-mod http;
-mod hud;
-mod markdown;
-mod memory;
-mod router;
-mod session;
-mod skills;
-mod slash_commands;
-mod spavn_engine;
-mod tools;
-
-use config::{load_user_config, tr_en};
-use hud::{
+use spavn::config::{load_user_config, tr_en};
+use spavn::hud::{
     draw_bottom_dock, fetch_quick_quota_line, interactive_select_session,
     interactive_select_slash_command, read_bottom_dock_input, render_assistant_footer,
     render_assistant_header, render_welcome_header, reset_scroll_region, setup_scroll_region,
-    term_size, truncate_ansi_to_width, LiveSpinner, MarkdownStreamRenderer, PromptEvent,
+    term_size, truncate_ansi_to_width, truncate_ansi_to_width_middle, visible_width, LiveSpinner,
+    MarkdownStreamRenderer, PromptEvent,
 };
-use memory::{build_system_prompt, current_workdir};
-use router::{resolve_endpoint, stream_chat_completion, ChatMessage, ModelEndpoint};
-use session::{
+use spavn::memory::{cached_system_prompt, current_workdir};
+use spavn::router::{resolve_endpoint, stream_chat_completion, ChatMessage, ModelEndpoint};
+use spavn::session::{
     append_message, fork_session, latest_session_path, load_session, new_session_path,
     rewrite_session, sessions_dir,
 };
-use skills::expand_inline_skills;
-use slash_commands::{dispatch_slash_command, SlashOutcome};
-use spavn_engine::{
+use spavn::session::{
+    evict_old_skill_blocks, perform_manual_compact, safe_utf8_prefix, safe_utf8_suffix,
+    summarize_tool_args, tool_progress_target,
+};
+use spavn::skills::expand_inline_skills;
+use spavn::slash_commands::{dispatch_slash_command, SlashOutcome};
+use spavn::spavn_engine::{
     dispatch_role_from_prompt, record_knowledge_artifact, retrieve_relevant_artifacts, AgentPhase,
     AgentRoleKey,
 };
+use spavn::state::{
+    advance_live_tasks_on_tool, clear_finished_live_tasks, clear_interrupted,
+    install_sigint_handler, is_interrupted, pop_steer_messages, push_queued_message,
+    queued_message_count, sync_live_tasks_from_text,
+};
+use spavn::tools::{execute_tool, tool_definitions_for_phase, AccessMode, ToolContext};
+use spavn::{hud, tools};
 use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use tools::{execute_tool, tool_definitions_for_phase, AccessMode, ToolContext};
-
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-static RESIZED: AtomicBool = AtomicBool::new(false);
-static STEER_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
-static PROMPT_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
-
-pub fn push_steer_message(msg: String) {
-    if let Ok(mut q) = STEER_QUEUE.lock() {
-        q.push_back(msg);
-    }
-}
-
-pub fn pop_steer_messages() -> Vec<String> {
-    if let Ok(mut q) = STEER_QUEUE.lock() {
-        q.drain(..).collect()
-    } else {
-        Vec::new()
-    }
-}
-
-pub fn steer_message_count() -> usize {
-    STEER_QUEUE.lock().map(|q| q.len()).unwrap_or(0)
-}
-
-pub fn pop_last_steer_message() -> Option<String> {
-    STEER_QUEUE.lock().ok()?.pop_back()
-}
-
-pub fn clear_steer_messages() {
-    if let Ok(mut q) = STEER_QUEUE.lock() {
-        q.clear();
-    }
-}
-
-pub fn push_queued_message(msg: String) {
-    if let Ok(mut q) = PROMPT_QUEUE.lock() {
-        q.push_back(msg);
-    }
-}
-
-pub fn pop_next_queued_message() -> Option<String> {
-    PROMPT_QUEUE.lock().ok()?.pop_front()
-}
-
-pub fn pop_last_queued_message() -> Option<String> {
-    PROMPT_QUEUE.lock().ok()?.pop_back()
-}
-
-pub fn peek_last_pending_message() -> Option<(bool, String)> {
-    if let Ok(sq) = STEER_QUEUE.lock() {
-        if let Some(last) = sq.back() {
-            return Some((true, last.clone()));
-        }
-    }
-    if let Ok(pq) = PROMPT_QUEUE.lock() {
-        if let Some(last) = pq.back() {
-            return Some((false, last.clone()));
-        }
-    }
-    None
-}
-
-pub fn pop_last_pending_message() -> Option<(bool, String)> {
-    if let Some(s) = pop_last_steer_message() {
-        return Some((true, s));
-    }
-    if let Some(q) = pop_last_queued_message() {
-        return Some((false, q));
-    }
-    None
-}
-
-pub fn list_pending_messages() -> Vec<(bool, String)> {
-    let mut out = Vec::new();
-    if let Ok(sq) = STEER_QUEUE.lock() {
-        for m in sq.iter() {
-            out.push((true, m.clone()));
-        }
-    }
-    if let Ok(pq) = PROMPT_QUEUE.lock() {
-        for m in pq.iter() {
-            out.push((false, m.clone()));
-        }
-    }
-    out
-}
-
-pub fn list_queued_messages() -> Vec<String> {
-    PROMPT_QUEUE
-        .lock()
-        .map(|q| q.iter().cloned().collect())
-        .unwrap_or_default()
-}
-
-pub fn remove_queued_message(idx: usize) {
-    if let Ok(mut q) = PROMPT_QUEUE.lock() {
-        if idx < q.len() {
-            q.remove(idx);
-        }
-    }
-}
-
-pub fn promote_queued_message(idx: usize) {
-    if let Ok(mut q) = PROMPT_QUEUE.lock() {
-        if idx > 0 && idx < q.len() {
-            if let Some(item) = q.remove(idx) {
-                q.push_front(item);
-            }
-        }
-    }
-}
-
-pub fn clear_queued_messages() {
-    if let Ok(mut q) = PROMPT_QUEUE.lock() {
-        q.clear();
-    }
-}
-
-pub fn queued_message_count() -> usize {
-    PROMPT_QUEUE.lock().map(|q| q.len()).unwrap_or(0)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LiveTaskStatus {
-    Pending,
-    InProgress,
-    Done,
-}
-
-#[derive(Debug, Clone)]
-pub struct LiveTaskItem {
-    pub title: String,
-    pub status: LiveTaskStatus,
-}
-
-static LIVE_TASKS: std::sync::LazyLock<Mutex<Vec<LiveTaskItem>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
-
-pub fn list_live_tasks() -> Vec<LiveTaskItem> {
-    LIVE_TASKS.lock().map(|t| t.clone()).unwrap_or_default()
-}
-
-pub fn clear_live_tasks() {
-    if let Ok(mut t) = LIVE_TASKS.lock() {
-        t.clear();
-    }
-}
-
-pub fn add_live_task(title: String) {
-    let clean = title.trim().to_string();
-    if clean.is_empty() {
-        return;
-    }
-    if let Ok(mut t) = LIVE_TASKS.lock() {
-        t.push(LiveTaskItem {
-            title: clean,
-            status: LiveTaskStatus::Pending,
-        });
-    }
-}
-
-pub fn toggle_live_task(idx_1based: usize) -> bool {
-    if idx_1based == 0 {
-        return false;
-    }
-    if let Ok(mut t) = LIVE_TASKS.lock() {
-        if let Some(item) = t.get_mut(idx_1based - 1) {
-            item.status = match item.status {
-                LiveTaskStatus::Done => LiveTaskStatus::Pending,
-                _ => LiveTaskStatus::Done,
-            };
-            return true;
-        }
-    }
-    false
-}
-
-/// Zero-roundtrip task extractor: parses markdown checkboxes (`- [ ]`, `- [x]`) or
-/// updates active task progress based on assistant output and tool calls without extra LLM turns.
-pub fn sync_live_tasks_from_text(text: &str) {
-    let mut parsed = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        let rest = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-            .or_else(|| {
-                let bytes = trimmed.as_bytes();
-                if bytes.len() >= 3
-                    && bytes[0].is_ascii_digit()
-                    && bytes[1] == b'.'
-                    && bytes[2] == b' '
-                {
-                    Some(&trimmed[3..])
-                } else {
-                    None
-                }
-            });
-        if let Some(r) = rest {
-            let r = r.trim_start();
-            if let Some(title) = r.strip_prefix("[ ] ").or_else(|| r.strip_prefix("[] ")) {
-                let clean = title.trim().trim_matches('*').trim_matches('`').trim();
-                if !clean.is_empty() && clean.len() <= 120 {
-                    parsed.push(LiveTaskItem {
-                        title: clean.to_string(),
-                        status: LiveTaskStatus::Pending,
-                    });
-                }
-            } else if let Some(title) = r
-                .strip_prefix("[x] ")
-                .or_else(|| r.strip_prefix("[X] "))
-                .or_else(|| r.strip_prefix("[✓] "))
-            {
-                let clean = title.trim().trim_matches('*').trim_matches('`').trim();
-                if !clean.is_empty() && clean.len() <= 120 {
-                    parsed.push(LiveTaskItem {
-                        title: clean.to_string(),
-                        status: LiveTaskStatus::Done,
-                    });
-                }
-            } else if let Some(title) = r.strip_prefix("[~] ").or_else(|| r.strip_prefix("[>] ")) {
-                let clean = title.trim().trim_matches('*').trim_matches('`').trim();
-                if !clean.is_empty() && clean.len() <= 120 {
-                    parsed.push(LiveTaskItem {
-                        title: clean.to_string(),
-                        status: LiveTaskStatus::InProgress,
-                    });
-                }
-            }
-        }
-    }
-    if parsed.len() >= 2 {
-        if !parsed
-            .iter()
-            .any(|i| i.status == LiveTaskStatus::InProgress)
-        {
-            if let Some(first_pending) = parsed
-                .iter_mut()
-                .find(|i| i.status == LiveTaskStatus::Pending)
-            {
-                first_pending.status = LiveTaskStatus::InProgress;
-            }
-        }
-        if let Ok(mut t) = LIVE_TASKS.lock() {
-            *t = parsed;
-        }
-    }
-}
-
-/// Automatically advances task progress when tools touch files mentioned in a task item
-/// or when all edits are verified. Zero LLM roundtrip cost.
-pub fn advance_live_tasks_on_tool(tool_name: &str, args_summary: &str) {
-    if let Ok(mut t) = LIVE_TASKS.lock() {
-        if t.is_empty() {
-            return;
-        }
-        let summary_lower = args_summary.to_lowercase();
-        let file_stem = std::path::Path::new(args_summary.trim())
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let is_mutating = matches!(
-            tool_name,
-            "edit" | "edit_file" | "write" | "write_file" | "bash"
-        );
-        if is_mutating && !file_stem.is_empty() && file_stem.len() >= 3 {
-            let mut matched_idx = None;
-            for (idx, item) in t.iter().enumerate() {
-                if item.status != LiveTaskStatus::Done
-                    && (item.title.to_lowercase().contains(&file_stem)
-                        || (!summary_lower.is_empty()
-                            && item.title.to_lowercase().contains(&summary_lower)))
-                {
-                    matched_idx = Some(idx);
-                    break;
-                }
-            }
-            if let Some(idx) = matched_idx {
-                t[idx].status = LiveTaskStatus::Done;
-            }
-        }
-        if !t.iter().any(|i| i.status == LiveTaskStatus::InProgress) {
-            if let Some(next_p) = t.iter_mut().find(|i| i.status == LiveTaskStatus::Pending) {
-                next_p.status = LiveTaskStatus::InProgress;
-            }
-        }
-    }
-}
-
-pub fn format_live_tasks_compact_bar(max_w: usize) -> Option<String> {
-    let tasks = list_live_tasks();
-    if tasks.is_empty() {
-        return None;
-    }
-    let total = tasks.len();
-    let done = tasks
-        .iter()
-        .filter(|t| t.status == LiveTaskStatus::Done)
-        .count();
-    let mut parts = Vec::with_capacity(tasks.len().min(4));
-    for item in tasks.iter().take(4) {
-        let short_t: String = item.title.chars().take(26).collect();
-        let s_str = match item.status {
-            LiveTaskStatus::Done => format!("{}✓ {}{}", GREEN, short_t, RESET),
-            LiveTaskStatus::InProgress => format!("{}{}▶ {}{}", CYAN, BOLD, short_t, RESET),
-            LiveTaskStatus::Pending => format!("{}○ {}{}", DIM, short_t, RESET),
-        };
-        parts.push(s_str);
-    }
-    if total > 4 {
-        parts.push(format!("{}+{}{}", DIM, total - 4, RESET));
-    }
-    let bar_color = if done == total { GREEN } else { YELLOW };
-    let raw = format!(
-        "{}│{}  {}📋 [{}/{}]{} {}",
-        CYAN,
-        RESET,
-        bar_color,
-        done,
-        total,
-        RESET,
-        parts.join(&format!(" {}·{} ", DIM, RESET))
-    );
-    let (trunc, _) = hud::truncate_ansi_to_width(&raw, max_w);
-    Some(trunc)
-}
-
-#[cfg(unix)]
-extern "C" fn handle_sigint(_sig: i32) {
-    INTERRUPTED.store(true, Ordering::SeqCst);
-}
-
-#[cfg(unix)]
-extern "C" fn handle_sigwinch(_sig: i32) {
-    RESIZED.store(true, Ordering::SeqCst);
-}
-
-#[cfg(unix)]
-#[link(name = "c")]
-unsafe extern "C" {
-    fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
-}
-
-#[cfg(windows)]
-extern "system" fn handle_win_ctrl(ctrl_type: u32) -> i32 {
-    if ctrl_type == 0 || ctrl_type == 1 {
-        INTERRUPTED.store(true, Ordering::SeqCst);
-        return 1;
-    }
-    0
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
-}
-
-pub fn install_sigint_handler() {
-    #[cfg(unix)]
-    unsafe {
-        let _ = signal(2, handle_sigint);
-        let _ = signal(28, handle_sigwinch);
-    }
-    #[cfg(windows)]
-    unsafe {
-        let _ = SetConsoleCtrlHandler(Some(handle_win_ctrl), 1);
-    }
-}
-
-pub fn take_resized() -> bool {
-    RESIZED.swap(false, Ordering::SeqCst)
-}
-
-pub fn is_interrupted() -> bool {
-    INTERRUPTED.load(Ordering::SeqCst)
-}
-
-pub fn trigger_interrupt() {
-    INTERRUPTED.store(true, Ordering::SeqCst);
-}
-
-pub fn clear_interrupted() {
-    INTERRUPTED.store(false, Ordering::SeqCst);
-}
+use std::path::PathBuf;
 
 const CYAN: &str = "\x1b[36m";
 const DIM: &str = "\x1b[2m";
@@ -460,97 +69,18 @@ fn is_fast_inline_tool(name: &str) -> bool {
             | "search"
             | "grep"
             | "rg"
+            | "glob"
+            | "find_files"
+            | "list_files"
+            | "file_glob"
             | "lsp"
     )
 }
 
-fn summarize_tool_args(name: &str, args_json: &str, default_host: &str) -> String {
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(args_json) else {
-        return String::new();
-    };
-    match name {
-        "read" | "edit" | "write" => val
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "bash" => {
-            let host = val
-                .get("host")
-                .and_then(|v| v.as_str())
-                .unwrap_or(default_host);
-            let cmd = val.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let short_cmd: String = cmd.chars().take(68).collect();
-            format!("[{}] {}", host, short_cmd)
-        }
-        "search" => val
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "memory" => {
-            let op = val.get("op").and_then(|v| v.as_str()).unwrap_or("recall");
-            let q = val.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            format!("{}: {}", op, q)
-        }
-        "skill" => val
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "subagent" | "spawn_submodels" | "task" => val
-            .get("task")
-            .or_else(|| val.get("prompt"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .chars()
-            .take(64)
-            .collect(),
-        _ => String::new(),
-    }
-}
-
-fn safe_utf8_prefix(s: &str, max_bytes: usize) -> &str {
-    if max_bytes >= s.len() {
-        return s;
-    }
-    let mut idx = max_bytes;
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    &s[..idx]
-}
-
-fn safe_utf8_suffix(s: &str, tail_bytes: usize) -> &str {
-    if tail_bytes >= s.len() {
-        return s;
-    }
-    let mut idx = s.len() - tail_bytes;
-    while idx < s.len() && !s.is_char_boundary(idx) {
-        idx += 1;
-    }
-    &s[idx..]
-}
-
-fn evict_old_skill_blocks(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<active_skill") {
-        out.push_str(&rest[..start]);
-        let after_start = &rest[start..];
-        if let Some(end) = after_start.find("</active_skill>") {
-            out.push_str(
-                "[SPAVN Skill Evicted: 1-turn skill instructions auto-removed to save context]",
-            );
-            rest = &after_start[end + "</active_skill>".len()..];
-        } else {
-            out.push_str(after_start);
-            rest = "";
-            break;
-        }
-    }
-    out.push_str(rest);
-    out
+/// A call may join a parallel batch only when it is read-only *and* cannot reach the approval
+/// prompt: two simultaneous prompts read the same stdin and swallow each other's keystrokes.
+fn is_batchable(name: &str, ctx: &ToolContext) -> bool {
+    ctx.access == AccessMode::Sovereign && tools::parallel_safe_tool(name)
 }
 
 fn compact_messages_for_model(
@@ -685,217 +215,6 @@ fn compact_messages_for_model(
         .collect()
 }
 
-fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-    messages
-        .iter()
-        .map(|m| {
-            let c_len = m.content.as_ref().map(|s| s.len()).unwrap_or(0);
-            let r_len = m.reasoning_content.as_ref().map(|s| s.len()).unwrap_or(0);
-            (c_len + r_len) / 4 + 12
-        })
-        .sum()
-}
-
-pub(crate) fn perform_manual_compact(
-    endpoint: &ModelEndpoint,
-    messages: &mut Vec<ChatMessage>,
-    focus: Option<&str>,
-) {
-    if messages.len() <= 3 {
-        println!(
-            "\n{}🗜️  Bağlam zaten çok kısa ({} mesaj, ~{} token).{}",
-            DIM,
-            messages.len(),
-            estimate_tokens(messages),
-            RESET
-        );
-        return;
-    }
-
-    let before_tok = estimate_tokens(messages);
-    let mut touched_tools: Vec<String> = Vec::new();
-    for m in messages.iter_mut().skip(1) {
-        if let Some(ref c) = m.content {
-            if c.contains("<active_skill") {
-                m.content = Some(evict_old_skill_blocks(c));
-            }
-        }
-        if let Some(ref tcs) = m.tool_calls {
-            for tc in tcs {
-                let summary =
-                    summarize_tool_args(&tc.function.name, &tc.function.arguments, "local");
-                let item = if summary.is_empty() {
-                    tc.function.name.clone()
-                } else {
-                    format!("{}({})", tc.function.name, summary)
-                };
-                if !touched_tools.contains(&item) && touched_tools.len() < 24 {
-                    touched_tools.push(item);
-                }
-            }
-        }
-        if m.role == "tool" {
-            if let Some(ref c) = m.content {
-                if c.len() > 350 {
-                    let head = safe_utf8_prefix(c, 180);
-                    m.content = Some(format!(
-                        "{}\n...[Compacted {} bytes]...",
-                        head,
-                        c.len().saturating_sub(180)
-                    ));
-                }
-            }
-        }
-    }
-
-    if messages.len() > 6 {
-        let sys = messages[0].clone();
-        let active_user_idx = messages.iter().rposition(|m| {
-            m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
-        });
-        let active_user_prompt = active_user_idx
-            .and_then(|idx| messages[idx].content.clone())
-            .map(|c| hud::strip_internal_tags_for_display(&c).trim().to_string())
-            .filter(|s| !s.is_empty());
-        let mut tail_start = messages.len().saturating_sub(4);
-        if let Some(u_idx) = active_user_idx {
-            if messages.len().saturating_sub(u_idx) <= 8 {
-                tail_start = tail_start.min(u_idx);
-            }
-        }
-        while tail_start > 1 && messages[tail_start].role == "tool" {
-            tail_start -= 1;
-        }
-        let mut transcript_lines = Vec::new();
-        for m in &messages[1..tail_start] {
-            if m.role == "user" || m.role == "assistant" {
-                if let Some(c) = &m.content {
-                    let clean = hud::strip_internal_tags_for_display(c);
-                    let snippet: String = clean
-                        .lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty())
-                        .take(4)
-                        .collect::<Vec<_>>()
-                        .join(" / ")
-                        .chars()
-                        .take(260)
-                        .collect();
-                    if !snippet.is_empty() {
-                        transcript_lines.push(format!("- [{}]: {}", m.role, snippet));
-                    }
-                }
-            }
-        }
-        let focus_note = focus.map(|f| format!(" (Odak: {})", f)).unwrap_or_default();
-        // Try LLM-powered semantic compaction first (OMP-style structured handoff summary),
-        // with instant fallback to algorithmic digest if offline/interrupted.
-        let mut llm_summary: Option<String> = None;
-        if !transcript_lines.is_empty() {
-            let mut spin = LiveSpinner::start(tr_en(
-                "🗜️  Bağlam LLM ile anlamsal olarak özetleniyor",
-                "🗜️  Summarizing context semantically with LLM",
-            ));
-            let focus_instruction = focus
-                .map(|f| format!("\nFocus especially on: {}", f))
-                .unwrap_or_default();
-            let prompt_body = format!(
-                "Summarize the following coding session history into a dense, high-signal technical handoff (<300 words) preserving:\n\
-                 1. Goal & User Preferences\n\
-                 2. Files Modified & Key Architectural Decisions\n\
-                 3. Current State & Pending Next Steps{}\n\n\
-                 Touched tools/files: {}\n\n\
-                 Conversation Transcript:\n{}",
-                focus_instruction,
-                if touched_tools.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    touched_tools.join(", ")
-                },
-                transcript_lines.join("\n")
-            );
-            let compact_msgs = vec![
-                ChatMessage::system(
-                    "You are SPAVN's Context Compactor. Output ONLY the structured technical handoff summary in concise bullet points. No preamble.",
-                ),
-                ChatMessage::user(prompt_body),
-            ];
-            let empty_tools = serde_json::json!([]);
-            if let Ok(res) =
-                stream_chat_completion(endpoint, &compact_msgs, &empty_tools, |_| {}, |_| {})
-            {
-                let text = res
-                    .message
-                    .content
-                    .or(res.message.reasoning_content)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                if !text.is_empty() {
-                    llm_summary = Some(text);
-                }
-            }
-            spin.stop();
-        }
-
-        let mut new_msgs = vec![sys];
-        let active_tasks = list_live_tasks();
-        let tasks_handoff_suffix = if active_tasks.is_empty() {
-            String::new()
-        } else {
-            let lines: Vec<String> = active_tasks
-                .iter()
-                .map(|t| {
-                    let box_str = match t.status {
-                        LiveTaskStatus::Done => "[x]",
-                        LiveTaskStatus::InProgress => "[~]",
-                        LiveTaskStatus::Pending => "[ ]",
-                    };
-                    format!("- {} {}", box_str, t.title)
-                })
-                .collect();
-            format!("\n\n[Active Live Task Checklist]:\n{}", lines.join("\n"))
-        };
-        let preserved_user_suffix = match (active_user_idx, active_user_prompt.as_deref()) {
-            (Some(u_idx), Some(prompt)) if u_idx < tail_start => {
-                format!(
-                    "\n\n[Active User Request — MUST complete all items]:\n{}{}",
-                    prompt, tasks_handoff_suffix
-                )
-            }
-            _ => tasks_handoff_suffix,
-        };
-        if let Some(semantic_summary) = llm_summary {
-            new_msgs.push(ChatMessage::user(format!(
-                "[SPAVN Semantic Context Handoff{}]:\n{}{}",
-                focus_note, semantic_summary, preserved_user_suffix
-            )));
-        } else if !transcript_lines.is_empty() {
-            let tools_note = if touched_tools.is_empty() {
-                String::new()
-            } else {
-                format!("\n- [tools/files]: {}", touched_tools.join(", "))
-            };
-            new_msgs.push(ChatMessage::user(format!(
-                "[SPAVN Auto-Compact Özet{}]:\n{}{}{}",
-                focus_note,
-                transcript_lines.join("\n"),
-                tools_note,
-                preserved_user_suffix
-            )));
-        }
-        new_msgs.extend_from_slice(&messages[tail_start..]);
-        *messages = new_msgs;
-    }
-
-    let after_tok = estimate_tokens(messages);
-    let saved_pct = ((before_tok.saturating_sub(after_tok)) * 100) / before_tok.max(1);
-    println!(
-        "\n{}🗜️  [Compact Tamamlandı]: ~{} tok -> ~{} tok (%{} bağlam tasarrufu){}",
-        GREEN, before_tok, after_tok, saved_pct, RESET
-    );
-}
-
 /// True when the reply announces an action ("let me read...", "şimdi ... okuyacağım", trailing `:`)
 /// but stops without calling a tool. Questions and "let me know" sign-offs are final answers.
 fn is_premature_stop(text: &str) -> bool {
@@ -936,6 +255,9 @@ fn run_agent_turn(
     quiet: bool,
 ) -> Result<(), String> {
     clear_interrupted();
+    // A bar left at `[3/3]` from the previous request describes finished work; keeping it up
+    // made the next, unrelated turn look like it was still mid-plan.
+    clear_finished_live_tasks();
     hud::set_sticky_dock_status(
         endpoint,
         ctx.access,
@@ -951,6 +273,9 @@ fn run_agent_turn(
     let mut verification_nudged = false;
     let mut modified_files_in_turn: Vec<String> = Vec::new();
     let mut auto_verify_rounds = 0usize;
+    // Last diagnostic handed to the model by the zero-stop gate; a repeat means the previous
+    // round changed nothing relevant and re-sending it only costs an API turn.
+    let mut last_gate_err: Option<String> = None;
     let mut empty_stop_retries = 0usize;
     let mut length_stop_retries = 0usize;
     let mut premature_stop_retries = 0usize;
@@ -1114,7 +439,9 @@ fn run_agent_turn(
                     );
                     return Ok(());
                 }
-                if step_endpoint.is_local() {
+                // A reconnect replays the whole turn, so it is only safe while nothing has
+                // been printed yet; otherwise the partial answer would appear twice.
+                if step_endpoint.is_local() && partial_content.borrow().is_empty() {
                     if !quiet {
                         println!(
                             "\n{}🔄 {} ({}) — {}{}",
@@ -1275,7 +602,53 @@ fn run_agent_turn(
 
         if let Some(tool_calls) = assistant_msg.tool_calls {
             let mut local_read_count = 0usize;
-            for tc in tool_calls {
+            // Pre-pass: runs maximal runs of independent read-only calls concurrently. The
+            // results are consumed by index below, so rendering, bookkeeping and message order
+            // stay exactly as they were in the serial path.
+            let batch_calls: Vec<(String, String)> = tool_calls
+                .iter()
+                .map(|tc| {
+                    (
+                        tc.function.name.trim().to_string(),
+                        tc.function.arguments.clone(),
+                    )
+                })
+                .collect();
+            let mut prefetched: std::collections::HashMap<usize, (String, u128)> =
+                std::collections::HashMap::new();
+            let mut budget_used = 0usize;
+            let mut batch_idx = 0usize;
+            while batch_idx < batch_calls.len() {
+                if !is_batchable(&batch_calls[batch_idx].0, ctx) {
+                    batch_idx += 1;
+                    continue;
+                }
+                let start = batch_idx;
+                while batch_idx < batch_calls.len() && is_batchable(&batch_calls[batch_idx].0, ctx)
+                {
+                    if endpoint.is_local()
+                        && is_read_tool_name(&batch_calls[batch_idx].0)
+                        && budget_used >= LOCAL_READ_BUDGET
+                    {
+                        break;
+                    }
+                    if endpoint.is_local() && is_read_tool_name(&batch_calls[batch_idx].0) {
+                        budget_used += 1;
+                    }
+                    batch_idx += 1;
+                }
+                if batch_idx - start > 1 {
+                    let batch_started = std::time::Instant::now();
+                    let out = tools::execute_read_only_batch(ctx, &batch_calls[start..batch_idx]);
+                    // A batch shares one wall clock: charging each member the serial-looking
+                    // duration would report a cost the user never paid.
+                    let batch_ms = batch_started.elapsed().as_millis();
+                    for (off, res) in out.into_iter().enumerate() {
+                        prefetched.insert(start + off, (res, batch_ms));
+                    }
+                }
+            }
+            for (idx, tc) in tool_calls.into_iter().enumerate() {
                 let tool_name = tc.function.name.trim().to_string();
                 if endpoint.is_local()
                     && is_read_tool_name(&tool_name)
@@ -1306,18 +679,51 @@ fn run_agent_turn(
 
                 let summary_for_task =
                     summarize_tool_args(&tool_name, &tc.function.arguments, &ctx.default_host);
+                let progress_target =
+                    tool_progress_target(&tool_name, &tc.function.arguments);
+                let mut batched_ms: Option<u128> = None;
                 let (mut tool_output, tool_ms) = if quiet {
                     let t0 = std::time::Instant::now();
-                    let out = execute_tool(ctx, &tool_name, &tc.function.arguments);
-                    (out, t0.elapsed().as_millis())
+                    let (out, elapsed) = match prefetched.remove(&idx) {
+                        Some((out, ms)) => (out, ms),
+                        None => (
+                            execute_tool(ctx, &tool_name, &tc.function.arguments),
+                            t0.elapsed().as_millis(),
+                        ),
+                    };
+                    (out, elapsed)
                 } else {
                     let summary = summary_for_task.clone();
-                    println!(
-                        "{}╭─ ⚡ {}{} {}{}{}",
-                        YELLOW, BOLD, tool_name, RESET, DIM, summary
-                    );
+                    let (_, cols) = term_size();
+                    // The header must never wrap: a wrapped line desynchronises the inline
+                    // dock's erase math, which then eats the rows above it.
+                    let head_w = cols.saturating_sub(2).max(20);
+                    // Cut the middle of the summary, not its tail: `cd <path> && <cmd>` is the
+                    // common shape and the command at the end is the informative half.
+                    let prefix = format!("{}╭─ ⚡ {}{}{} {}", YELLOW, BOLD, tool_name, RESET, DIM);
+                    let budget = head_w.saturating_sub(visible_width(&prefix)).max(8);
+                    let (shown, used) = truncate_ansi_to_width_middle(&summary, budget);
+                    // The diffstat rides on the header, so the size of a change is visible
+                    // before any body row is read.
+                    let stat = if matches!(tool_name.as_str(), "edit" | "write") {
+                        hud::toolcard::diff_stat(&tool_name, &tc.function.arguments)
+                    } else {
+                        None
+                    };
+                    let stat_line = match stat {
+                        Some((add, del)) => format!(
+                            " {}(+{}{}{} -{}{}{}){}",
+                            DIM, GREEN, add, RESET, RED, del, RESET, DIM
+                        ),
+                        None => String::new(),
+                    };
+                    let _ = used;
+                    println!("{}{}{}{}", prefix, shown, stat_line, RESET);
                     let tool_started = std::time::Instant::now();
-                    let out = if is_fast_inline_tool(&tool_name) && ctx.default_host == "local" {
+                    let out = if let Some((out, ms)) = prefetched.remove(&idx) {
+                        batched_ms = Some(ms);
+                        out
+                    } else if is_fast_inline_tool(&tool_name) && ctx.default_host == "local" {
                         execute_tool(ctx, &tool_name, &tc.function.arguments)
                     } else {
                         let mut tool_spinner =
@@ -1326,7 +732,7 @@ fn run_agent_turn(
                         tool_spinner.stop();
                         res
                     };
-                    (out, tool_started.elapsed().as_millis())
+                    (out, batched_ms.unwrap_or_else(|| tool_started.elapsed().as_millis()))
                 };
 
                 if ctx.phase == AgentPhase::Code
@@ -1376,7 +782,7 @@ fn run_agent_turn(
                     || tool_output.starts_with("BLOCKED")
                     || tool_output.starts_with("Execution error:");
                 if !is_err_tool {
-                    advance_live_tasks_on_tool(&tool_name, &summary_for_task);
+                    advance_live_tasks_on_tool(&tool_name, &progress_target);
                 }
 
                 if !quiet {
@@ -1387,23 +793,56 @@ fn run_agent_turn(
                         .chars()
                         .take(80)
                         .collect::<String>();
-                    let is_err = is_err_tool;
-                    let status_mark = if is_err {
-                        format!("{}✗{}", RED, YELLOW)
-                    } else {
-                        format!("{}✓{}", GREEN, YELLOW)
-                    };
                     let (_, cols) = term_size();
                     let full_w = cols.saturating_sub(2).max(20);
-                    let raw_footer = format!(
-                        "{}╰─ {} {}{} ({} satır · {}ms){}",
-                        YELLOW,
-                        status_mark,
-                        DIM,
-                        preview_line,
-                        tool_output.lines().count().max(1),
+                    // Show what actually changed for edits instead of a byte tally, and a
+                    // head+tail slice of the output for everything else.
+                    let is_diff_body =
+                        !is_err_tool && matches!(tool_name.as_str(), "edit" | "write");
+                    let body = if is_err_tool {
+                        Vec::new()
+                    } else if is_diff_body {
+                        let changes = hud::toolcard::change_rows(
+                            &tool_name,
+                            &tc.function.arguments,
+                            hud::toolcard::CHANGE_MAX_ROWS,
+                        );
+                        if changes.is_empty() {
+                            hud::toolcard::body_rows(&tool_output, hud::toolcard::BODY_MAX_ROWS)
+                        } else {
+                            changes
+                        }
+                    } else {
+                        hud::toolcard::body_rows(&tool_output, hud::toolcard::BODY_MAX_ROWS)
+                    };
+                    if is_diff_body && !body.is_empty() {
+                        for row in hud::toolcard::numbered_diff_rows(&body, full_w) {
+                            println!("{}", row);
+                        }
+                    } else {
+                        for row in &body {
+                            println!("{}", hud::toolcard::rail_row(row, full_w));
+                        }
+                    }
+                    let raw_footer = hud::toolcard::footer_line(
+                        !is_err_tool,
+                        // Only echo the output when the body is empty: otherwise the preview
+                        // would just repeat the first rail row the reader already sees.
+                        if body.is_empty() {
+                            &preview_line
+                        } else {
+                            ""
+                        },
+                        // A diff body is the visible change, not the one-line executor result:
+                        // counting `Successfully …` as "1 line" under five drawn rows lies.
+                        if is_diff_body {
+                            body.iter()
+                                .filter(|r| !hud::toolcard::is_marker_row(r))
+                                .count()
+                        } else {
+                            tool_output.lines().count()
+                        },
                         tool_ms,
-                        RESET
                     );
                     let (trunc_footer, _) = truncate_ansi_to_width(&raw_footer, full_w);
                     println!("{}", trunc_footer);
@@ -1517,7 +956,9 @@ fn run_agent_turn(
             continue;
         }
 
-        // 4. Autonomous Zero-Stop Verification Gate after file edits (up to 4 auto-fix rounds)
+        // 4. Autonomous Zero-Stop Verification Gate after file edits (up to 4 auto-fix rounds).
+        // An identical diagnostic means the previous round changed nothing relevant; re-sending
+        // it just burns a whole API turn, so the gate stops nudging instead of looping.
         if !modified_files_in_turn.is_empty() && auto_verify_rounds < 4 {
             let cwd_str = ctx.policy.cwd.to_string_lossy();
             let gate_res = if compiler_verified_in_edit {
@@ -1529,16 +970,24 @@ fn run_agent_turn(
                 auto_verify_rounds += 1;
                 unverified_edits = false;
                 compiler_verified_in_edit = false;
-                if !quiet {
-                    println!(
-                        "\n{}⚡ [SPAVN Zero-Stop Doğrulama Kapısı ({}/4): Derleme/eksik kod tespit edildi -> Otomatik düzeltme tetikleniyor...]{}",
-                        YELLOW, auto_verify_rounds, RESET
-                    );
+                if last_gate_err.as_deref() == Some(gate_err.as_str()) {
+                    // Byte-identical diagnostic: the last round produced no relevant change, so
+                    // another nudge would be a wasted API turn with the same outcome.
+                    last_gate_err = None;
+                    auto_verify_rounds = 4;
+                } else {
+                    last_gate_err = Some(gate_err.clone());
+                    if !quiet {
+                        println!(
+                            "\n{}⚡ [SPAVN Zero-Stop Doğrulama Kapısı ({}/4): Derleme/eksik kod tespit edildi -> Otomatik düzeltme tetikleniyor...]{}",
+                            YELLOW, auto_verify_rounds, RESET
+                        );
+                    }
+                    let gate_msg = ChatMessage::user(gate_err);
+                    append_message(session_file, &gate_msg);
+                    messages.push(gate_msg);
+                    continue;
                 }
-                let gate_msg = ChatMessage::user(gate_err);
-                append_message(session_file, &gate_msg);
-                messages.push(gate_msg);
-                continue;
             } else if compiler_verified_in_edit
                 || ctx.policy.cwd.join("Cargo.toml").is_file()
                 || ctx.policy.cwd.join("tsconfig.json").is_file()
@@ -1579,63 +1028,6 @@ fn run_agent_turn(
     Ok(())
 }
 
-pub(crate) fn render_session_resume_preview(session_path: &Path, messages: &[ChatMessage]) {
-    let fname = session_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let short_name = fname
-        .trim_start_matches("session-")
-        .trim_end_matches(".jsonl");
-    let text_msgs: Vec<&ChatMessage> = messages
-        .iter()
-        .filter(|m| {
-            (m.role == "user" || m.role == "assistant")
-                && m.content
-                    .as_deref()
-                    .map(|s| !hud::strip_internal_tags_for_display(s).is_empty())
-                    .unwrap_or(false)
-        })
-        .collect();
-    let last_user_preview = text_msgs
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .and_then(|m| m.content.as_deref())
-        .map(hud::strip_internal_tags_for_display)
-        .unwrap_or_default()
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.contains('╭') && !l.contains('╰') && !l.contains('│'))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let snippet: String = last_user_preview.chars().take(56).collect();
-    let suffix = if snippet.is_empty() {
-        String::new()
-    } else if last_user_preview.chars().count() > 56 {
-        format!(" · \"{}…\"", snippet)
-    } else {
-        format!(" · \"{}\"", snippet)
-    };
-
-    let (_, cols) = term_size();
-    let full_w = cols.saturating_sub(2).max(6);
-    let raw = format!(
-        "{}╭─ 🗂️  {}{}{} {}({} {}{}){}",
-        CYAN,
-        BOLD,
-        short_name,
-        RESET,
-        DIM,
-        text_msgs.len(),
-        tr_en("mesaj", "msgs"),
-        suffix,
-        RESET
-    );
-    let (trunc, _) = truncate_ansi_to_width(&raw, full_w);
-    println!("\n{}", trunc);
-}
-
 fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1670,7 +1062,7 @@ fn main() {
             }
             "-a" | "--access" => {
                 if i + 1 < args.len() {
-                    if let Some(m) = AccessMode::from_str(&args[i + 1]) {
+                    if let Some(m) = AccessMode::parse_alias(&args[i + 1]) {
                         access_mode = m;
                     }
                     i += 2;
@@ -1679,7 +1071,7 @@ fn main() {
             }
             "-P" | "--phase" => {
                 if i + 1 < args.len() {
-                    if let Some(ph) = AgentPhase::from_str(&args[i + 1]) {
+                    if let Some(ph) = AgentPhase::parse_alias(&args[i + 1]) {
                         phase_opt = Some(ph);
                     }
                     i += 2;
@@ -1827,7 +1219,7 @@ fn main() {
             pair
         } else {
             let p = new_session_path();
-            let sys = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+            let sys = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
             append_message(&p, &sys);
             (p, vec![sys])
         }
@@ -1838,25 +1230,25 @@ fn main() {
                 (path, loaded)
             } else {
                 let p = new_session_path();
-                let sys = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+                let sys = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
                 append_message(&p, &sys);
                 (p, vec![sys])
             }
         } else {
             let p = new_session_path();
-            let sys = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+            let sys = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
             append_message(&p, &sys);
             (p, vec![sys])
         }
     } else {
         let p = new_session_path();
-        let sys = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+        let sys = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
         append_message(&p, &sys);
         (p, vec![sys])
     };
 
     if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
-        *first = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+        *first = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
     }
 
     if !prompt_parts.is_empty() && force_interactive {
@@ -1973,7 +1365,7 @@ fn main() {
         if let Some(new_model_key) = hud::interactive_provider_login(None) {
             endpoint = resolve_endpoint(&new_model_key);
             if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
-                *first = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+                *first = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
                 rewrite_session(&session_file, &messages);
             }
         }
@@ -1996,13 +1388,13 @@ fn main() {
                     .to_string();
                 messages = loaded;
                 if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
-                    *first = ChatMessage::system(build_system_prompt(&cwd, endpoint.is_local()));
+                    *first = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
                 }
-                render_session_resume_preview(&session_file, &messages);
+                hud::render_session_resume_preview(&session_file, &messages);
             }
         }
     } else if resume_last {
-        render_session_resume_preview(&session_file, &messages);
+        hud::render_session_resume_preview(&session_file, &messages);
     }
 
     loop {
@@ -2011,7 +1403,7 @@ fn main() {
         hud::set_context_window_usage(hud::estimate_messages_tokens(&cur_view), max_win);
         // Automatically pop next queued message if available and no edit prefill is pending!
         let mut input = if prefill_input.is_none() {
-            if let Some(queued_msg) = pop_next_queued_message() {
+            if let Some(queued_msg) = spavn::state::pop_next_queued_message() {
                 println!(
                     "\n{}📥 [Kuyruktan Otomatik Çalıştırılıyor ({} kalan)]: {}{}{}",
                     GREEN,
@@ -2169,7 +1561,7 @@ fn main() {
         } else {
             dispatched_role.badge()
         };
-        let dragged_imgs = crate::router::extract_dragged_images_info(&input);
+        let dragged_imgs = spavn::router::extract_dragged_images_info(&input);
         let mut display_input = input.clone();
         for img in &dragged_imgs {
             let escaped = img.path.replace(' ', "\\ ");
@@ -2256,33 +1648,33 @@ mod premature_stop_tests {
 
     #[test]
     fn queue_and_steer_pop_last_for_live_edit_and_cancel() {
-        super::clear_queued_messages();
-        super::clear_steer_messages();
+        spavn::state::clear_queued_messages();
+        spavn::state::clear_steer_messages();
         super::push_queued_message("ilk görev".to_string());
         super::push_queued_message("ikinci görev".to_string());
         assert_eq!(
-            super::peek_last_pending_message(),
+            spavn::state::peek_last_pending_message(),
             Some((false, "ikinci görev".to_string()))
         );
         assert_eq!(
-            super::pop_last_pending_message(),
+            spavn::state::pop_last_pending_message(),
             Some((false, "ikinci görev".to_string()))
         );
-        super::push_steer_message("acil müdahale".to_string());
+        spavn::state::push_steer_message("acil müdahale".to_string());
         assert_eq!(
-            super::pop_last_pending_message(),
+            spavn::state::pop_last_pending_message(),
             Some((true, "acil müdahale".to_string()))
         );
         assert_eq!(
-            super::pop_last_pending_message(),
+            spavn::state::pop_last_pending_message(),
             Some((false, "ilk görev".to_string()))
         );
-        assert_eq!(super::pop_last_pending_message(), None);
+        assert_eq!(spavn::state::pop_last_pending_message(), None);
     }
 
     #[test]
     fn local_compact_messages_preserves_kv_prefix_across_turn_steps() {
-        use crate::router::ChatMessage;
+        use spavn::router::ChatMessage;
         let mut msgs = vec![
             ChatMessage::system("system prompt".to_string()),
             ChatMessage::user("first task".to_string()),

@@ -1207,6 +1207,84 @@ mod tests {
     }
 
     #[test]
+    fn egress_classification_covers_the_ssrf_bypasses() {
+        // Loopback spellings that used to slip past a `contains("127.0.0.1")` test.
+        for url in [
+            "http://127.0.0.1:8080/v1",
+            "http://localhost/admin",
+            "http://[::1]:11434/api/tags",
+            "http://127.0.0.1.nip.io/",
+            "http://lvh.me/",
+            "http://engine.local/",
+        ] {
+            assert_eq!(
+                classify_egress(url),
+                Some(EgressTarget::Loopback),
+                "{url}"
+            );
+        }
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/admin",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://100.100.100.200/",
+            "http://[fd00::1]/",
+            "http://0.0.0.0/",
+        ] {
+            assert_eq!(
+                classify_egress(url),
+                Some(EgressTarget::Private),
+                "{url}"
+            );
+            assert!(egress_is_blocked(url), "{url} must be blocked");
+        }
+        for url in ["https://example.com/x", "https://api.github.com"] {
+            assert_eq!(classify_egress(url), Some(EgressTarget::Public), "{url}");
+            assert!(!egress_is_blocked(url), "{url}");
+        }
+        // A name that merely *starts* with "localhost" is remote; it is only dangerous when it
+        // resolves to loopback, which the resolver now refuses (see `PublicOnlyResolver`).
+        assert_eq!(
+            classify_egress("http://localhost.attacker.net/"),
+            Some(EgressTarget::Public)
+        );
+    }
+
+    #[test]
+    fn mapped_v6_and_internal_names_are_not_public() {
+        // `[::ffff:127.0.0.1]` dials v4 loopback; `metadata.google.internal` resolves to
+        // 169.254.169.254. Both used to classify as public because neither is a v4 literal and
+        // the name is not one of the wildcard-DNS services.
+        for url in [
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:169.254.169.254]/",
+        ] {
+            assert!(egress_is_blocked(url), "{url} must be blocked");
+        }
+        for url in [
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://router.lan/",
+            "http://nas.home.arpa/",
+            "http://build.corp/",
+        ] {
+            assert_eq!(
+                classify_egress(url),
+                Some(EgressTarget::Private),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_and_hex_loopback_spellings_are_decimal_mapped() {
+        // `http://2130706433/` and `http://0x7f000001/` both reach 127.0.0.1.
+        for url in ["http://2130706433/", "http://0x7f000001/"] {
+            assert_eq!(classify_egress(url), Some(EgressTarget::Loopback), "{url}");
+        }
+    }
+
+    #[test]
     fn path_inside_workspace_is_allowed() {
         assert_eq!(policy().check("src/main.rs", true), PathRisk::Allow);
         assert_eq!(policy().check(".", false), PathRisk::Allow);
@@ -1360,4 +1438,142 @@ mod tests {
         assert_eq!(p.check("/tmp/wrd_p1.png", false), PathRisk::Allow);
         assert_eq!(p.check("/tmp/wrd_p1.png", true), PathRisk::Allow);
     }
+}
+
+/// Where an outbound request actually lands.
+///
+/// The old check was a substring test over the raw URL, so `http://169.254.169.254/` (cloud
+/// metadata), `http://10.0.0.5/` (RFC1918), `http://127.1:8080/`, `http://2130706433/` and
+/// `http://127.0.0.1.nip.io/` all passed as "public". Classifying the parsed host instead of
+/// the string closes those spellings at the single point every egress path can call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressTarget {
+    Loopback,
+    Private,
+    Public,
+}
+
+pub fn classify_egress(url: &str) -> Option<EgressTarget> {
+    let host = crate::router::url_host(url);
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    if h.is_empty() {
+        return None;
+    }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return Some(match ip {
+            std::net::IpAddr::V4(v4) => {
+                let o = v4.octets();
+                if v4.is_loopback() {
+                    EgressTarget::Loopback
+                } else if v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.is_documentation()
+                    // 100.64.0.0/10 — carrier-grade NAT, reachable inside a VPC.
+                    || (o[0] == 100 && (64..128).contains(&o[1]))
+                {
+                    EgressTarget::Private
+                } else {
+                    EgressTarget::Public
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                // `::ffff:127.0.0.1` is a v6 spelling that dials v4 loopback; unwrap it before
+                // classifying, otherwise the mapped form reads as public.
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    return classify_egress(&format!("http://{}/", v4));
+                }
+                if v6.is_loopback() {
+                    EgressTarget::Loopback
+                } else if v6.is_unspecified()
+                    // fc00::/7 unique-local; also catches the IPv4-mapped form's prefix.
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+                {
+                    EgressTarget::Private
+                } else {
+                    EgressTarget::Public
+                }
+            }
+        });
+    }
+    // Decimal/hex spellings of an IPv4 address never reach `parse`, but they also only resolve
+    // locally, so anything that is all digits-with-dots or a bare integer is treated as private.
+    if h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local") {
+        return Some(EgressTarget::Loopback);
+    }
+    let numeric = h.starts_with("0x")
+        || (!h.contains('.') && h.chars().all(|c| c.is_ascii_digit()));
+    if numeric {
+        // `2130706433` and `0x7f000001` are inet_aton spellings of 127.0.0.1; decode them so the
+        // loopback branch above applies instead of lumping every numeric host into "private".
+        let decoded = if let Some(hex) = h.strip_prefix("0x") {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            h.parse::<u32>().ok()
+        };
+        if let Some(raw) = decoded {
+            let v4 = std::net::Ipv4Addr::from(raw);
+            return classify_egress(&format!("http://{}/", v4));
+        }
+        return Some(EgressTarget::Private);
+    }
+    // `1.0x7f.0.1` / `127.1` style short forms keep a dot but still encode loopback.
+    if h.split('.').count() < 4 && h.split('.').all(|p| {
+        p.chars().all(|c| c.is_ascii_digit())
+            || (p.starts_with("0x") && p[2..].chars().all(|c| c.is_ascii_hexdigit()))
+    }) && h.contains('.')
+    {
+        return Some(EgressTarget::Private);
+    }
+    // Wildcard-DNS services encode the destination in the name. `127.0.0.1.nip.io` parses as a
+    // hostname, so it used to be classified public and then dialled at loopback.
+    for label_group in ["nip.io", "sslip.io", "xip.io"] {
+        if let Some(prefix) = h.strip_suffix(label_group) {
+            let embedded = prefix.trim_end_matches('.');
+            if let Ok(ip) = embedded.parse::<std::net::IpAddr>() {
+                return classify_egress(&format!("http://{}/", ip));
+            }
+        }
+    }
+    // These always answer with loopback, so no embedded address to read.
+    if h == "lvh.me"
+        || h.ends_with(".lvh.me")
+        || h == "vcap.me"
+        || h.ends_with(".vcap.me")
+    {
+        return Some(EgressTarget::Loopback);
+    }
+    // Internal-only naming. `metadata.google.internal` resolves to 169.254.169.254, and the
+    // non-pinned fetch path never re-resolves a redirect hop, so a name that only exists inside
+    // a private zone has to be refused on its spelling alone.
+    const INTERNAL_SUFFIXES: [&str; 6] = [
+        ".internal",
+        ".intranet",
+        ".localdomain",
+        ".home.arpa",
+        ".lan",
+        ".corp",
+    ];
+    if INTERNAL_SUFFIXES.iter().any(|suffix| h.ends_with(suffix)) {
+        return Some(EgressTarget::Private);
+    }
+    Some(EgressTarget::Public)
+}
+
+/// True when an egress to `url` must be refused without an explicit local-address opt-in.
+pub fn egress_is_blocked(url: &str) -> bool {
+    !matches!(classify_egress(url), Some(EgressTarget::Public))
+}
+
+/// True for an address a public-internet request must never reach.
+///
+/// Shared by the URL classifier and the DNS resolver, so a hostname cannot be classified by one
+/// spelling and dialled by another.
+pub fn blocked_addr(ip: std::net::IpAddr) -> bool {
+    !matches!(
+        classify_egress(&format!("http://{}/", ip)),
+        Some(EgressTarget::Public)
+    )
 }

@@ -4,13 +4,15 @@ use crate::hud::{
     interactive_queue_manager, interactive_select_access, interactive_select_host,
     interactive_select_language, interactive_select_model, interactive_select_role,
     interactive_select_session, interactive_select_skill, render_fleet_radar,
-    render_full_quota_card, render_welcome_header, reset_scroll_region, set_idle_recap,
-    setup_scroll_region, term_size, toggle_idle_recap, QueueAction,
+    render_full_quota_card, render_session_resume_preview, render_welcome_header,
+    reset_scroll_region, set_idle_recap, setup_scroll_region, term_size, toggle_idle_recap,
+    QueueAction,
 };
-use crate::memory::build_system_prompt;
+use crate::memory::cached_system_prompt;
 use crate::router::{resolve_endpoint, ChatMessage, ModelEndpoint};
 use crate::session::{
-    append_message, fork_session, load_session, new_session_path, rewrite_session,
+    append_message, fork_session, load_session, new_session_path, perform_manual_compact,
+    rewrite_session,
 };
 use crate::skills::{
     discover_skills, load_skill_content, remove_custom_skill, render_skills_panel,
@@ -20,11 +22,8 @@ use crate::spavn_engine::{
     add_goal, add_pin, complete_goal, remove_pin, render_audit_panel, render_goals_panel,
     render_janitor_panel, render_pins_panel, render_repo_wiki, AgentPhase, AgentRoleKey,
 };
+use crate::state::{push_queued_message, queued_message_count};
 use crate::tools::{AccessMode, ToolContext};
-use crate::{
-    perform_manual_compact, push_queued_message, queued_message_count,
-    render_session_resume_preview,
-};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -52,7 +51,7 @@ fn refresh_system_prompt(
     messages: &mut [ChatMessage],
 ) {
     if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
-        *first = ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+        *first = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         rewrite_session(session_file, messages);
     }
 }
@@ -82,7 +81,7 @@ pub fn dispatch_slash_command(
 
     if input == "/reload" || input == "/r" || input == "/reload bin" || input == "/rb" {
         if !messages.is_empty() {
-            messages[0] = ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+            messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
             rewrite_session(session_file, messages);
         }
         reset_scroll_region();
@@ -210,7 +209,7 @@ pub fn dispatch_slash_command(
     if matches!(input, "/lang" | "/language" | "/dil") {
         if let Some(chosen_lang) = interactive_select_language() {
             if !messages.is_empty() {
-                messages[0] = ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+                messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
             }
             let label = if chosen_lang == "en" {
                 "🇬🇧 English (EN)"
@@ -237,7 +236,7 @@ pub fn dispatch_slash_command(
         cfg.language = input.trim_start_matches('/').to_string();
         let _ = config::save_user_config(&cfg);
         if !messages.is_empty() {
-            messages[0] = ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+            messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         }
         println!(
             "\n{}🌐 {}: {}{}{}",
@@ -394,7 +393,7 @@ pub fn dispatch_slash_command(
         return SlashOutcome::Handled;
     }
     if let Some(rest) = input.strip_prefix("/access ") {
-        if let Some(m) = AccessMode::from_str(rest) {
+        if let Some(m) = AccessMode::parse_alias(rest) {
             ctx.access = m;
             println!(
                 "\n{}🛡️  Erişim Yetki Modu ayarlandı: {}{}{}",
@@ -602,6 +601,186 @@ pub fn dispatch_slash_command(
         return SlashOutcome::Handled;
     }
 
+    if input == "/diff" || input == "/d" || input.starts_with("/diff ") {
+        let path_filter = input.strip_prefix("/diff").unwrap_or("").trim();
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["diff", "--color=always"]);
+        if !path_filter.is_empty() {
+            cmd.arg("--").arg(path_filter);
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if text.trim().is_empty() {
+                    println!(
+                        "\n{}{}{}",
+                        GREEN,
+                        tr_en(
+                            "Çalışma ağacında kaydedilmemiş değişiklik yok.",
+                            "Working tree clean. No uncommitted diffs."
+                        ),
+                        RESET
+                    );
+                } else {
+                    println!(
+                        "\n{}╭─ 🔍 GIT DIFF ──────────────────────────────────────────{}",
+                        CYAN, RESET
+                    );
+                    let total_lines = text.lines().count();
+                    for line in text.lines().take(120) {
+                        println!("{}│{} {}", CYAN, RESET, line);
+                    }
+                    if total_lines > 120 {
+                        println!(
+                            "{}╰─ ... {} {}{}",
+                            CYAN,
+                            total_lines - 120,
+                            tr_en(
+                                "satır daha var (/diff <dosya>: filtre)",
+                                "more lines (/diff <path>: filter)"
+                            ),
+                            RESET
+                        );
+                    } else {
+                        println!(
+                            "{}╰────────────────────────────────────────────────────────{}",
+                            CYAN, RESET
+                        );
+                    }
+                }
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                println!("\n{}✗ Git diff hatası: {}{}", RED, err.trim(), RESET);
+            }
+            Err(e) => println!("\n{}✗ Git komutu çalıştırılamadı: {}{}", RED, e, RESET),
+        }
+        return SlashOutcome::Handled;
+    }
+
+    if input == "/commit" || input == "/cm" || input.starts_with("/commit ") {
+        let custom_msg = input
+            .strip_prefix("/commit")
+            .or_else(|| input.strip_prefix("/cm"))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let stat_out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+
+        if stat_out.trim().is_empty() {
+            println!(
+                "\n{}{}{}",
+                GREEN,
+                tr_en(
+                    "Commit edilecek bir değişiklik yok.",
+                    "Nothing to commit, working tree clean."
+                ),
+                RESET
+            );
+            return SlashOutcome::Handled;
+        }
+
+        let changed_files: Vec<String> = stat_out
+            .lines()
+            .filter_map(|l| l.get(3..))
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect();
+
+        let msg = if !custom_msg.is_empty() {
+            custom_msg
+        } else {
+            suggest_commit_message(&changed_files)
+        };
+
+        println!(
+            "\n{}╭─ 📦 {} ────────────────────────────────────{}",
+            CYAN,
+            tr_en("GIT COMMIT", "GIT COMMIT"),
+            RESET
+        );
+        println!(
+            "{}│{}  {}{}{} ({} {})",
+            CYAN,
+            RESET,
+            BOLD,
+            tr_en("Değişen Dosyalar", "Changed Files"),
+            RESET,
+            changed_files.len(),
+            tr_en("dosya", "files")
+        );
+        for f in changed_files.iter().take(8) {
+            println!("{}│{}    • {}", CYAN, RESET, f);
+        }
+        println!(
+            "{}│{}  {}{}{} \"{}{}{}\"",
+            CYAN,
+            RESET,
+            BOLD,
+            tr_en("Mesaj", "Message"),
+            RESET,
+            GREEN,
+            msg,
+            RESET
+        );
+        print!(
+            "{}╰─ {} {}",
+            CYAN,
+            tr_en(
+                "Onaylıyor musunuz? [e = Evet / H = Hayır]",
+                "Approve? [y = Yes / N = No]"
+            ),
+            RESET
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        let mut ans = String::new();
+        // Ok(0) = EOF: never treat closed stdin as approval.
+        if !matches!(std::io::stdin().read_line(&mut ans), Ok(n) if n > 0) {
+            println!("\n{}✗ Commit iptal edildi.{}\n", YELLOW, RESET);
+            return SlashOutcome::Handled;
+        }
+        let clean = ans.trim().to_lowercase();
+        if !matches!(clean.as_str(), "e" | "evet" | "y" | "yes") {
+            println!("{}✗ Commit iptal edildi.{}\n", YELLOW, RESET);
+            return SlashOutcome::Handled;
+        }
+
+        let add_ok = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !add_ok {
+            println!("{}✗ git add başarısız.{}\n", RED, RESET);
+            return SlashOutcome::Handled;
+        }
+
+        match std::process::Command::new("git")
+            .args(["commit", "-m", &msg])
+            .output()
+        {
+            Ok(out) if out.status.success() => println!(
+                "{}✓ {}{}\n",
+                GREEN,
+                tr_en("Commit başarıyla oluşturuldu.", "Committed successfully."),
+                RESET
+            ),
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                println!("{}✗ Commit başarısız: {}{}\n", RED, err.trim(), RESET);
+            }
+            Err(e) => println!("{}✗ Git hatası: {}{}\n", RED, e, RESET),
+        }
+        return SlashOutcome::Handled;
+    }
+
     if input == "/undo" || input == "/u" {
         match ctx.pop_undo() {
             Some(msg) => println!("\n{}{}{}", GREEN, msg, RESET),
@@ -775,6 +954,7 @@ pub fn dispatch_slash_command(
     if input == "/compact" || input == "/c" {
         perform_manual_compact(endpoint, messages, None);
         rewrite_session(session_file, messages);
+        crate::memory::invalidate_system_prompt_cache();
         return SlashOutcome::Handled;
     }
     if let Some(focus) = input
@@ -813,7 +993,7 @@ pub fn dispatch_slash_command(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let sys = ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+        let sys = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         append_message(session_file, &sys);
         *messages = vec![sys];
         setup_scroll_region();
@@ -851,7 +1031,7 @@ pub fn dispatch_slash_command(
         .or_else(|| input.strip_prefix("/docs "))
     {
         let cmd_head = input.split_whitespace().next().unwrap_or("");
-        if let Some(r) = AgentRoleKey::from_str(cmd_head.trim_start_matches('/')) {
+        if let Some(r) = AgentRoleKey::parse_alias(cmd_head.trim_start_matches('/')) {
             *active_role = r;
             push_queued_message(rest.trim().to_string());
             return SlashOutcome::Handled;
@@ -882,7 +1062,7 @@ pub fn dispatch_slash_command(
         let mut parts = rest.trim().splitn(2, ' ');
         let role_tok = parts.next().unwrap_or("");
         let inline_prompt = parts.next().map(str::trim).filter(|s| !s.is_empty());
-        if let Some(r) = AgentRoleKey::from_str(role_tok) {
+        if let Some(r) = AgentRoleKey::parse_alias(role_tok) {
             *active_role = r;
             println!(
                 "\n{}🎭 {}: {}{}{}",
@@ -937,7 +1117,7 @@ pub fn dispatch_slash_command(
     if let Some(note) = input.strip_prefix("/pin ") {
         let pin = add_pin(cwd, note);
         if !messages.is_empty() {
-            messages[0] = ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+            messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         }
         println!(
             "\n{}📌 Proje bağlamına sabitlendi (#{}): {}{}{}",
@@ -950,7 +1130,7 @@ pub fn dispatch_slash_command(
             if remove_pin(cwd, id) {
                 if !messages.is_empty() {
                     messages[0] =
-                        ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+                        ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
                 }
                 println!("\n{}🗑️  Sabitlenmiş not silindi: #{}{}", GREEN, id, RESET);
             } else {
@@ -969,7 +1149,7 @@ pub fn dispatch_slash_command(
             if complete_goal(id) {
                 if !messages.is_empty() {
                     messages[0] =
-                        ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+                        ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
                 }
                 println!(
                     "\n{}✅ Hedef tamamlandı olarak işaretlendi: #{}{}",
@@ -984,7 +1164,7 @@ pub fn dispatch_slash_command(
     if let Some(obj) = input.strip_prefix("/goal ") {
         let g = add_goal(cwd, obj);
         if !messages.is_empty() {
-            messages[0] = ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+            messages[0] = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         }
         println!(
             "\n{}🎯 Yeni proje hedefi eklendi (#{}): {}{}{}",
@@ -994,7 +1174,8 @@ pub fn dispatch_slash_command(
     }
 
     if input == "/clear" {
-        let sys = ChatMessage::system(build_system_prompt(cwd, endpoint.is_local()));
+        crate::memory::invalidate_system_prompt_cache();
+        let sys = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         *messages = vec![sys];
         rewrite_session(session_file, messages);
         setup_scroll_region();
@@ -1022,6 +1203,10 @@ pub fn dispatch_slash_command(
         println!("{}│{}  {}/plan · /code · \\{}             Faz: 📐 PLAN (salt-okunur) ↔ 💻 CODE (uygulama)", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/janitor (/j){}                 Spavn Janitor kalite kapılarını (check/types/lint/test) koş", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/audit · /blame <dosya>{}       HMAC zincirli AI aksiyon ve dosya değişim izi", CYAN, RESET, BOLD, RESET);
+        println!(
+            "{}│{}  {}/diff [/yol] · /commit [mesaj]{} Git değişiklikleri ve onaylı akıllı commit",
+            CYAN, RESET, BOLD, RESET
+        );
         println!("{}│{}  {}/wiki (/w){}                    Anlık proje modül ve mimari haritası (Repo Wiki)", CYAN, RESET, BOLD, RESET);
         println!(
             "{}│{}  {}/pin <not> · /unpin <id>{}      Proje bağlamına kalıcı mimari kural sabitle",
@@ -1040,6 +1225,34 @@ pub fn dispatch_slash_command(
     }
 
     SlashOutcome::NotSlash
+}
+
+/// Heuristic Conventional-Commit message derived from the changed file list.
+fn suggest_commit_message(changed_files: &[String]) -> String {
+    let first = changed_files
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("project");
+    if changed_files.iter().any(|f| f.contains("test")) {
+        format!("test: update test suites ({})", first)
+    } else if changed_files.iter().all(|f| f.ends_with(".md")) {
+        "docs: update documentation and project rules".to_string()
+    } else if changed_files
+        .iter()
+        .any(|f| f.contains("hud") || f.contains("ui"))
+    {
+        format!(
+            "feat(hud): refine dock layout and visual elements ({})",
+            first
+        )
+    } else if changed_files
+        .iter()
+        .any(|f| f.contains("tool") || f.contains("guard"))
+    {
+        format!("fix(tools): harden file and system execution ({})", first)
+    } else {
+        format!("feat: update {}", first)
+    }
 }
 
 #[cfg(test)]

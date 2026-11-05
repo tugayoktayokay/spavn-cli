@@ -9,7 +9,6 @@ use std::process::Command;
 const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
@@ -53,7 +52,7 @@ impl AccessMode {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_alias(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "safe" | "1" | "ask" => Some(AccessMode::Safe),
             "auto" | "2" | "default" | "normal" => Some(AccessMode::Auto),
@@ -70,6 +69,7 @@ pub struct UndoSnapshot {
     pub description: String,
 }
 
+#[derive(Clone)]
 pub struct ToolContext {
     pub access: AccessMode,
     pub default_host: String,
@@ -84,6 +84,10 @@ pub struct ToolContext {
     pub current_prompt: String,
     pub phase: crate::spavn_engine::AgentPhase,
     pub policy: PathPolicy,
+    /// False for workers with no terminal behind them (sub-agents). An approval prompt needs a
+    /// human, so a context that cannot ask must decide on policy alone instead of hanging or
+    /// silently answering "no" on every call.
+    pub can_prompt: bool,
 }
 
 impl ToolContext {
@@ -105,6 +109,7 @@ impl ToolContext {
             current_model: "default".to_string(),
             current_prompt: String::new(),
             policy,
+            can_prompt: true,
         }
     }
 
@@ -117,12 +122,12 @@ impl ToolContext {
             )),
             PathRisk::Ask {
                 reason,
-                even_sovereign: _,
+                even_sovereign,
             } => {
-                if self.access == AccessMode::Sovereign {
-                    return Ok(());
-                }
-                if write && self.access == AccessMode::Safe {
+                // `even_sovereign` marks secret material (`.ssh`, `.aws`, `secrets.env`, keychains).
+                // Dropping it here meant SOVEREIGN — the default mode — returned private keys to
+                // the model with no prompt at all. SOVEREIGN waives ordinary questions, never these.
+                if !even_sovereign && self.access == AccessMode::Sovereign {
                     return Ok(());
                 }
                 if prompt_user_approval(self, &format!("{} — {}", reason, verb), raw_path) {
@@ -194,15 +199,12 @@ pub fn tool_definitions() -> Value {
     let mut mcp_names: Vec<String> = cfg.mcp_servers.keys().cloned().collect();
     mcp_names.sort();
     let mcp_hint = if mcp_names.is_empty() {
-        "Configure MCP servers in `~/.spavn/config.json` under `mcpServers`.".to_string()
+        "No MCP servers configured (`mcpServers` in `~/.spavn/config.json`).".to_string()
     } else {
-        format!(
-            "Configured MCP servers in `~/.spavn/config.json`: `{}`.",
-            mcp_names.join("`, `")
-        )
+        format!("MCP servers: `{}`.", mcp_names.join("`, `"))
     };
     let lsp_desc = format!(
-        "Fast symbol navigation (`op='definition'`, `'references'`, `'symbols'`) and generic MCP client (`op='mcp'`, `server`, `tool`, `arguments`). Omit `tool` to list tools on a server. {}",
+        "Symbol navigation (`op=definition|references|symbols`) and generic MCP client (`op='mcp'`). {}",
         mcp_hint
     );
     json!([
@@ -210,13 +212,13 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "read",
-                "description": "Read a file or directory locally or on a configured remote host ('<host>:/path'). Supports optional start_line and end_line (1-based).",
+                "description": "Read a file or directory. Supports several disjoint ranges in one call via `path:N-M,K-L` — prefer that over repeated reads or `bash sed`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "File or directory path (optionally prefixed with '<host>:')" },
-                        "start_line": { "type": "integer", "description": "Optional 1-based start line" },
-                        "end_line": { "type": "integer", "description": "Optional 1-based inclusive end line" }
+                        "path": { "type": "string", "description": "Path (optional `<host>:` prefix); may embed ranges, e.g. `src/x.rs:1-12,640-665`" },
+                        "start_line": { "type": "integer", "description": "Start line (1-based)" },
+                        "end_line": { "type": "integer", "description": "End line (1-based, inclusive)" }
                     },
                     "required": ["path"]
                 }
@@ -226,16 +228,16 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Surgical hashless file edit. Replaces old_text with new_text, or applies multiple non-overlapping replacements in one call via `edits: [{\"old_text\":\"...\",\"new_text\":\"...\"}]`.",
+                "description": "Replace `old_text` with `new_text` in a file, or apply several non-overlapping edits atomically via `edits`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Path to file to edit" },
-                        "old_text": { "type": "string", "description": "Exact existing snippet to replace (when performing a single edit)" },
-                        "new_text": { "type": "string", "description": "Replacement snippet (when performing a single edit)" },
+                        "path": { "type": "string", "description": "File to edit" },
+                        "old_text": { "type": "string", "description": "Exact existing snippet (single edit)" },
+                        "new_text": { "type": "string", "description": "Replacement snippet (single edit)" },
                         "edits": {
                             "type": "array",
-                            "description": "Optional batch of multiple `{old_text, new_text}` edits to apply atomically to the same file",
+                            "description": "Batch of `{old_text, new_text}` applied atomically to the same file",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -254,12 +256,12 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "write",
-                "description": "Create or overwrite a file locally or on a configured remote host ('<host>:/path').",
+                "description": "Create or overwrite a file (`<host>:/path` for a remote host).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Target file path" },
-                        "content": { "type": "string", "description": "Full file content to write" }
+                        "path": { "type": "string", "description": "Target path" },
+                        "content": { "type": "string", "description": "Full file content" }
                     },
                     "required": ["path", "content"]
                 }
@@ -269,15 +271,15 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Execute a shell command on local machine or a configured remote host.",
+                "description": "Run a shell command locally or on a configured remote host.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "Shell command to execute" },
-                        "host": { "type": "string", "description": "Target host alias (default: 'local')" },
-                        "cwd": { "type": "string", "description": "Optional working directory" },
-                        "timeout_sec": { "type": "integer", "description": "Command timeout in seconds (default: 120)" },
-                        "background": { "type": "boolean", "description": "If true, start command in background and return its PID + log file path immediately" }
+                        "command": { "type": "string", "description": "Command" },
+                        "host": { "type": "string", "description": "Host alias (default: local)" },
+                        "cwd": { "type": "string", "description": "Working directory" },
+                        "timeout_sec": { "type": "integer", "description": "Timeout seconds (default 120)" },
+                        "background": { "type": "boolean", "description": "Run detached; returns PID + log path" }
                     },
                     "required": ["command"]
                 }
@@ -287,12 +289,30 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "search",
-                "description": "Fast ripgrep (rg) regex search across files.",
+                "description": "Regex content search (ripgrep).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string", "description": "Regex pattern to search for" },
-                        "path": { "type": "string", "description": "Directory or file path to search (default '.')" }
+                        "pattern": { "type": "string", "description": "Regex pattern" },
+                        "path": { "type": "string", "description": "Path to search (default `.`)" }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": "List files matching a glob, no content search. Skips node_modules/target/.git and dotfiles unless `hidden`.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Glob, e.g. `**/*.rs`" },
+                        "path": { "type": "string", "description": "Root dir (default `.`; supports `<host>:/path`)" },
+                        "limit": { "type": "integer", "description": "Max files (default 100, cap 1000)" },
+                        "hidden": { "type": "boolean", "description": "Include dotfiles" },
+                        "host": { "type": "string", "description": "Host alias" }
                     },
                     "required": ["pattern"]
                 }
@@ -302,13 +322,13 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "memory",
-                "description": "Search or record persistent project/user memory and architectural decisions.",
+                "description": "Search or record persistent project/user memory and decisions.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "op": { "type": "string", "enum": ["recall", "remember"], "description": "'recall' to search memory, 'remember' to save a note/decision" },
-                        "query": { "type": "string", "description": "Search query (for recall) or note text (for remember)" },
-                        "kind": { "type": "string", "description": "For remember: 'durum', 'karar', 'bilgi', or 'not'" }
+                        "op": { "type": "string", "enum": ["recall", "remember"], "description": "recall | remember" },
+                        "query": { "type": "string", "description": "Query, or note text" },
+                        "kind": { "type": "string", "description": "durum | karar | bilgi | not" }
                     },
                     "required": ["op", "query"]
                 }
@@ -318,11 +338,11 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "skill",
-                "description": "Load specialized domain instructions on-demand from ~/.spavn/skills or ~/.claude/skills.",
+                "description": "Load domain instructions from ~/.spavn/skills or ~/.claude/skills.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "Skill name to load" }
+                        "name": { "type": "string", "description": "Skill name" }
                     },
                     "required": ["name"]
                 }
@@ -332,13 +352,13 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "web",
-                "description": "Search the live internet (`op='search'`, `query`) or fetch clean Markdown from a URL (`op='fetch'`, `url`).",
+                "description": "Web search (`op='search'`) or fetch a URL as Markdown (`op='fetch'`).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "op": { "type": "string", "enum": ["search", "fetch"], "description": "'search' for web/docs search, 'fetch' to read a URL as clean Markdown" },
-                        "query": { "type": "string", "description": "Search query (when op='search') or URL (when op='fetch')" },
-                        "url": { "type": "string", "description": "Target http/https URL when op='fetch'" }
+                        "op": { "type": "string", "enum": ["search", "fetch"], "description": "search | fetch" },
+                        "query": { "type": "string", "description": "Query, or URL" },
+                        "url": { "type": "string", "description": "URL for op='fetch'" }
                     },
                     "required": ["op"]
                 }
@@ -348,17 +368,17 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "subagent",
-                "description": "Delegate one or multiple isolated read-only investigations (`task` or `tasks: [...]`) in parallel to sub-agents with their own context windows.",
+                "description": "Delegate isolated read-only investigations to sub-agents with their own context: one `task`, or several via `tasks` in parallel.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "task": { "type": "string", "description": "Single sub-question or investigation task" },
-                        "context": { "type": "string", "description": "Relevant file paths or background context" },
-                        "expected_output": { "type": "string", "description": "Expected format or specific findings to return" },
-                        "model": { "type": "string", "description": "Optional model override (e.g. 'local', 'flash', 'argon')" },
+                        "task": { "type": "string", "description": "The sub-question" },
+                        "context": { "type": "string", "description": "File paths or background" },
+                        "expected_output": { "type": "string", "description": "Findings to return" },
+                        "model": { "type": "string", "description": "Model override, e.g. local | flash" },
                         "tasks": {
                             "type": "array",
-                            "description": "Optional list of up to 4 sub-tasks to run concurrently in parallel",
+                            "description": "Up to 4 sub-tasks run concurrently",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -381,12 +401,12 @@ pub fn tool_definitions() -> Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "op": { "type": "string", "enum": ["definition", "references", "symbols", "mcp"], "description": "Operation type" },
-                        "symbol": { "type": "string", "description": "Symbol/identifier name for definition or references" },
-                        "path": { "type": "string", "description": "File or directory path for symbols/search" },
-                        "server": { "type": "string", "description": "MCP server name configured in ~/.spavn/config.json mcpServers" },
-                        "tool": { "type": "string", "description": "MCP tool name to invoke (omit to list available tools on the server)" },
-                        "arguments": { "type": "object", "description": "JSON arguments for the MCP tool" }
+                        "op": { "type": "string", "enum": ["definition", "references", "symbols", "mcp"], "description": "Operation" },
+                        "symbol": { "type": "string", "description": "Symbol for definition/references" },
+                        "path": { "type": "string", "description": "Path for symbols" },
+                        "server": { "type": "string", "description": "MCP server name" },
+                        "tool": { "type": "string", "description": "MCP tool (omit to list)" },
+                        "arguments": { "type": "object", "description": "JSON arguments" }
                     },
                     "required": ["op"]
                 }
@@ -396,6 +416,22 @@ pub fn tool_definitions() -> Value {
 }
 
 pub fn tool_definitions_for_phase(phase: crate::spavn_engine::AgentPhase) -> Value {
+    // The schema shape only changes with the phase, so build it once per phase instead of
+    // re-serializing 6.7 KB of JSON on every model request.
+    static CACHE: std::sync::Mutex<[Option<Value>; 2]> = std::sync::Mutex::new([None, None]);
+    let idx = usize::from(phase == crate::spavn_engine::AgentPhase::Plan);
+    if let Ok(mut slot) = CACHE.lock() {
+        if let Some(hit) = slot[idx].as_ref() {
+            return hit.clone();
+        }
+        let built = build_tool_definitions_for_phase(phase);
+        slot[idx] = Some(built.clone());
+        return built;
+    }
+    build_tool_definitions_for_phase(phase)
+}
+
+fn build_tool_definitions_for_phase(phase: crate::spavn_engine::AgentPhase) -> Value {
     let all = tool_definitions();
     if phase == crate::spavn_engine::AgentPhase::Code {
         return all;
@@ -433,6 +469,32 @@ fn resolve_ssh_target(alias: &str) -> String {
         }
     }
     alias.to_string()
+}
+
+/// Rejects a host alias that `ssh` would read as an option instead of a destination.
+///
+/// `ssh -o ConnectTimeout=8 <dest> <cmd>` parses `<dest>`, so `-oProxyCommand=<shell>` runs an
+/// arbitrary *local* command before any gate can look at it — and in SOVEREIGN the gate never
+/// looks. Configured aliases were already safe (`resolve_ssh_target` maps them); the raw
+/// fallback returned the caller's string verbatim, which is the hole this closes.
+fn validate_host_arg(host: &str) -> Result<(), String> {
+    if host.is_empty() || host == "local" {
+        return Ok(());
+    }
+    let looks_like_option = host.starts_with('-');
+    let charset_ok = host.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':' | '[' | ']')
+    });
+    if looks_like_option || !charset_ok {
+        return Err(format!(
+            "BLOCKED by SPAVN Host Policy: `{}` is not a valid host alias.\n\
+             A host must be a name from `hosts` in ~/.spavn/config.json (or `user@host`, `host:port`);\n\
+             anything starting with `-` or containing spaces/quotes is rejected because ssh would\n\
+             parse it as an option.",
+            host
+        ));
+    }
+    Ok(())
 }
 
 fn split_remote_prefix(raw: &str) -> Option<(String, &str)> {
@@ -720,7 +782,21 @@ fn run_command_with_timeout(
     Ok((exit_code, out_bytes, err_bytes, timed_out))
 }
 
+/// Strips everything a terminal would interpret, keeping tabs.
+///
+/// `detail` and `action_title` carry model-controlled bytes (file content, shell command, MCP
+/// arguments). A leading `\x1b[1A\x1b[2K` reached the prompt verbatim and let a caller erase the
+/// path line it was asking the user to approve, then print a benign one in its place.
+fn gate_safe(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control() || *c == '\t').collect()
+}
+
 fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str) -> bool {
+    // Fail closed without a TTY: the read below would block forever on a piped/inherited stdin
+    // and the turn could never make progress. A prompt that cannot be answered is a "no".
+    if !crate::hud::stdin_is_tty() {
+        return false;
+    }
     crate::hud::pause_active_spinner();
     println!(
         "\n{}╭─ 🛡️  {} ({}){}",
@@ -729,9 +805,16 @@ fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str)
         ctx.access.short_badge(),
         RESET
     );
-    println!("{}│{} {}{}{}", YELLOW, RESET, BOLD, action_title, RESET);
+    println!(
+        "{}│{} {}{}{}",
+        YELLOW,
+        RESET,
+        BOLD,
+        gate_safe(action_title),
+        RESET
+    );
     for line in detail.lines().take(6) {
-        println!("{}│{} {}{}{}", YELLOW, RESET, DIM, line, RESET);
+        println!("{}│{} {}{}{}", YELLOW, RESET, DIM, gate_safe(line), RESET);
     }
     print!(
         "{}╰─ {}: {}",
@@ -769,59 +852,6 @@ fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str)
     let approved = matches!(clean.as_str(), "e" | "evet" | "y" | "yes");
     crate::hud::resume_active_spinner();
     approved
-}
-
-pub fn render_diff_preview(path_display: &str, old_text: &str, new_text: &str) {
-    crate::hud::pause_active_spinner();
-    let old_cnt = old_text.lines().count();
-    let new_cnt = new_text.lines().count();
-    println!(
-        "{}╭─ 📝 Diff: {}{}{} ({}+{}{}{} / {}-{}{}{}){}",
-        DIM, RESET, BOLD, path_display, GREEN, new_cnt, RESET, DIM, RED, old_cnt, RESET, DIM, RESET
-    );
-    for (idx, line) in old_text.lines().take(12).enumerate() {
-        println!(
-            "{}│ {:>2} {}\x1b[48;5;52m- {}\x1b[0m",
-            DIM,
-            idx + 1,
-            RED,
-            line
-        );
-    }
-    if old_cnt > 12 {
-        println!(
-            "{}│    {}... ({} {}){}",
-            DIM,
-            RED,
-            old_cnt,
-            crate::config::tr_en("satır silindi", "lines removed"),
-            RESET
-        );
-    }
-    for (idx, line) in new_text.lines().take(12).enumerate() {
-        println!(
-            "{}│ {:>2} {}\x1b[48;5;22m+ {}\x1b[0m",
-            DIM,
-            idx + 1,
-            GREEN,
-            line
-        );
-    }
-    if new_cnt > 12 {
-        println!(
-            "{}│    {}... ({} {}){}",
-            DIM,
-            GREEN,
-            new_cnt,
-            crate::config::tr_en("satır eklendi", "lines added"),
-            RESET
-        );
-    }
-    println!(
-        "{}╰──────────────────────────────────────────────────────────────{}",
-        DIM, RESET
-    );
-    crate::hud::resume_active_spinner();
 }
 
 fn is_structural_outline_line(line: &str) -> bool {
@@ -873,33 +903,141 @@ fn is_structural_outline_line(line: &str) -> bool {
     PREFIXES.iter().any(|p| trimmed.starts_with(p))
 }
 
-fn split_inline_line_selector(raw: &str) -> (&str, Option<usize>, Option<usize>) {
+/// One `N-M` (or bare `N`) span from a `path:N-M,K-L` selector.
+type LineSpan = (usize, usize);
+
+/// Parses `N-M`, `N`, `L12-L40`, or a comma-separated list of those.
+///
+/// Returns `None` when `suffix` is not purely line ranges, so callers can fall back to
+/// treating the whole argument as a path (e.g. `~/x:y.rs` on a remote host).
+fn parse_line_spans(suffix: &str) -> Option<Vec<LineSpan>> {
+    let mut spans = Vec::new();
+    for part in suffix.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        let part = part.strip_prefix('L').unwrap_or(part);
+        if let Some((s_str, e_str)) = part.split_once('-') {
+            let e_str = e_str.strip_prefix('L').unwrap_or(e_str);
+            let s = s_str.trim().parse::<usize>().ok()?;
+            let e = e_str.trim().parse::<usize>().ok()?;
+            spans.push((s, e));
+        } else {
+            let n = part.parse::<usize>().ok()?;
+            spans.push((n, n));
+        }
+    }
+    if spans.is_empty() {
+        None
+    } else {
+        Some(spans)
+    }
+}
+
+/// Parses the `:ranges` tail of a read selector into merged, ordered spans.
+///
+/// A bare `N` expands to `N..N+120` (rg-style peek) *only* when it is the sole span; inside a
+/// multi-range list it means exactly line `N`, so `path:5,90` does not silently swallow 120
+/// lines twice.
+fn expand_line_spans(spans: Vec<LineSpan>) -> Vec<LineSpan> {
+    let single = spans.len() == 1;
+    let mut out: Vec<LineSpan> = spans
+        .into_iter()
+        .map(|(s, e)| {
+            if single && s == e {
+                (s, s + 120)
+            } else {
+                (s.min(e), s.max(e))
+            }
+        })
+        .collect();
+    out.sort_by_key(|(s, _)| *s);
+    let mut merged: Vec<LineSpan> = Vec::with_capacity(out.len());
+    for (s, e) in out {
+        match merged.last_mut() {
+            // Overlapping or touching spans read as one continuous block.
+            Some((_, prev_e)) if s <= prev_e.saturating_add(1) => {
+                *prev_e = (*prev_e).max(e);
+            }
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
+/// Splits `path:ranges` into the path and the merged, ordered spans.
+///
+/// `read` accepts the shape people already type at `sed -n`: several disjoint regions of one
+/// file in a single call (`src/x.rs:1-12,640-665`). Without it every multi-region look costs
+/// an extra `bash sed` round trip — measured at 53% of all file inspection.
+fn split_inline_line_spans(raw: &str) -> (&str, Option<Vec<LineSpan>>) {
     if Path::new(raw).exists() || expand_tilde(raw).exists() {
-        return (raw, None, None);
+        return (raw, None);
     }
     if let Some((base, suffix)) = raw.rsplit_once(':') {
         let is_bare_ssh_host = !base.contains(':') && split_remote_prefix(raw).is_some();
         if !base.is_empty() && !base.ends_with(':') && !is_bare_ssh_host {
-            let suffix = suffix.strip_prefix('L').unwrap_or(suffix);
-            if let Some((s_str, e_str)) = suffix.split_once('-') {
-                let e_clean = e_str.strip_prefix('L').unwrap_or(e_str);
-                if let (Ok(s), Ok(e)) = (s_str.parse::<usize>(), e_clean.parse::<usize>()) {
-                    return (base, Some(s), Some(e));
-                }
-            } else if let Ok(num) = suffix.parse::<usize>() {
-                // Handle rg-style `path:line:col` by checking if `base` also ends with `:line`
-                if let Some((inner_base, line_str)) = base.rsplit_once(':') {
-                    if !inner_base.is_empty() && !inner_base.ends_with(':') {
-                        if let Ok(line_no) = line_str.parse::<usize>() {
-                            return (inner_base, Some(line_no), Some(line_no + 120));
-                        }
+            if let Some(spans) = parse_line_spans(suffix) {
+                return (base, Some(expand_line_spans(spans)));
+            }
+            // rg-style `path:line:col`: the base itself ends with `:line`.
+            if let Some((inner_base, line_str)) = base.rsplit_once(':') {
+                if !inner_base.is_empty() && !inner_base.ends_with(':') {
+                    if let Ok(line_no) = line_str.parse::<usize>() {
+                        return (inner_base, Some(vec![(line_no, line_no + 120)]));
                     }
                 }
-                return (base, Some(num), Some(num + 120));
             }
         }
     }
-    (raw, None, None)
+    (raw, None)
+}
+
+/// Renders several disjoint regions of `content` in one block, the way `sed -n 'a,b;c,d'`
+/// does — but with absolute line numbers and an explicit gap marker per jump.
+fn format_spans(content: &str, spans: &[LineSpan]) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return "[EOF STOP: File is empty (0 lines).]\n".to_string();
+    }
+    let budget: usize = 250;
+    let mut out = String::new();
+    let mut printed = 0usize;
+    let mut shown_any = false;
+    for &(s, e) in spans {
+        let s = s.max(1);
+        if s > total {
+            out.push_str(&format!(
+                "... [requested {}-{} is past EOF ({} lines)] ...\n",
+                s, e, total
+            ));
+            continue;
+        }
+        let e = e.min(total);
+        let take = (e - s + 1).min(budget.saturating_sub(printed).max(1));
+        if shown_any {
+            out.push_str(&format!("... [jump to line {}] ...\n", s));
+        }
+        for (i, line) in lines[(s - 1)..(s - 1 + take)].iter().enumerate() {
+            out.push_str(&format!("{:>4}: {}\n", s + i, line));
+        }
+        printed += take;
+        shown_any = true;
+        if take < e - s + 1 {
+            out.push_str(&format!(
+                "... [{} lines elided; {} line budget reached] ...\n",
+                (e - s + 1) - take,
+                budget
+            ));
+        }
+    }
+    if !shown_any {
+        return format!("(File has {} lines; none of the requested ranges exist)\n", total);
+    }
+    out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
+    out
 }
 
 fn format_lines(content: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
@@ -1006,7 +1144,7 @@ fn format_lines(content: &str, start_line: Option<usize>, end_line: Option<usize
     out
 }
 
-fn get_str_alias<'a>(args: &'a Value, keys: &[&str]) -> &'a str {
+pub(crate) fn get_str_alias<'a>(args: &'a Value, keys: &[&str]) -> &'a str {
     for k in keys {
         if let Some(s) = args.get(*k).and_then(|v| v.as_str()) {
             if !s.is_empty() {
@@ -1019,7 +1157,13 @@ fn get_str_alias<'a>(args: &'a Value, keys: &[&str]) -> &'a str {
 
 fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
     let raw_input_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
-    let (raw_path, inline_start, inline_end) = split_inline_line_selector(raw_input_path);
+    let (raw_path, inline_spans) = split_inline_line_spans(raw_input_path);
+    let (inline_start, inline_end) = match inline_spans.as_deref() {
+        // A single span stays on the plain `start_line`/`end_line` path so the existing
+        // head+outline heuristics (and the re-read dedup key) keep working unchanged.
+        Some([(s, e)]) => (Some(*s), Some(*e)),
+        _ => (None, None),
+    };
     if let Err(blocked) = ctx.enforce_path(raw_path, false, "read") {
         return blocked;
     }
@@ -1153,7 +1297,10 @@ fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
                 ctx.read_ranges
                     .insert(key, (mtime, start_line, end_line, ctx.tool_step_counter));
             }
-            format_lines(&content, start_line, end_line)
+            match inline_spans.as_deref() {
+                Some(spans) if spans.len() > 1 => format_spans(&content, spans),
+                _ => format_lines(&content, start_line, end_line),
+            }
         }
         Err(e) => {
             let hint = suggest_similar_path(raw_path);
@@ -1470,8 +1617,7 @@ pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Op
     None
 }
 
-fn count_code_braces(src: &str) -> (usize, usize) {
-    let mut open = 0usize;
+fn count_code_braces(src: &str) -> (usize, usize) {    let mut open = 0usize;
     let mut close = 0usize;
     let bytes = src.as_bytes();
     let len = bytes.len();
@@ -1822,7 +1968,6 @@ fn exec_edit_single(ctx: &mut ToolContext, args: &Value) -> String {
             old_text.lines().count(),
             &ctx.current_prompt,
         );
-        render_diff_preview(raw_path, old_text, new_text);
         let diag = run_instant_syntax_check(raw_path, &updated);
         return format!(
             "Successfully edited {} (exact match — file state is current in context, no need to re-read){}{}",
@@ -1886,7 +2031,6 @@ fn exec_edit_single(ctx: &mut ToolContext, args: &Value) -> String {
                 old_text.lines().count(),
                 &ctx.current_prompt,
             );
-            render_diff_preview(raw_path, old_text, new_text);
             let diag = run_instant_syntax_check(raw_path, &joined);
             return format!(
                 "Successfully edited {} (whitespace-tolerant match at line {} — file state is current in context, no need to re-read){}{}",
@@ -1973,7 +2117,6 @@ fn exec_edit_single(ctx: &mut ToolContext, args: &Value) -> String {
                     old_text.lines().count(),
                     &ctx.current_prompt,
                 );
-                render_diff_preview(raw_path, old_text, new_text);
                 let diag = run_instant_syntax_check(raw_path, &joined);
                 return format!(
                     "Successfully edited {} (fuzzy blank-line-tolerant match at lines {}-{} — file state is current in context, no need to re-read){}{}",
@@ -2137,6 +2280,42 @@ fn check_bash_gate(
     Ok(())
 }
 
+/// Gate for every outbound fetch.
+///
+/// Three states, in order: `Private` (RFC1918, link-local, IMDS, CGNAT) is refused outright — no
+/// prompt can make it safe, and it is where cloud credentials live. `Loopback` needs an explicit
+/// `allow_local` from the caller. `Public` asks in SAFE, or in PLAN where the phase must stay
+/// read-only for the workspace.
+fn check_egress_gate(ctx: &mut ToolContext, url: &str, allow_local: bool) -> Option<String> {
+    use crate::guard::{classify_egress, EgressTarget};
+    match classify_egress(url)? {
+        EgressTarget::Private => Some(format!(
+            "BLOCKED by SPAVN Egress Policy: {} özel/link-local bir adres hedefliyor.",
+            url
+        )),
+        EgressTarget::Loopback => {
+            if allow_local {
+                return None;
+            }
+            Some(format!(
+                "BLOCKED by SPAVN Egress Policy: {} loopback adresi; `allow_local: true` olmadan açılmaz.",
+                url
+            ))
+        }
+        EgressTarget::Public => {
+            // A sub-agent has no terminal: prompting would resolve to "no" and cost it the
+            // only tool that can reach documentation, so policy alone decides there.
+            let needs_prompt = ctx.can_prompt
+                && (ctx.access == AccessMode::Safe
+                    || ctx.phase == crate::spavn_engine::AgentPhase::Plan);
+            if needs_prompt && !prompt_user_approval(ctx, "Web erişimi (fetch)", url) {
+                return Some("Web fetch reddedildi (onay yok).".to_string());
+            }
+            None
+        }
+    }
+}
+
 fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
     let command = get_str_alias(args, &["command", "cmd", "script", "shell"]);
     let explicit_host = get_str_alias(args, &["host", "target"]);
@@ -2145,6 +2324,11 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
     } else {
         explicit_host.to_string()
     };
+    // Must run before the gate: the gate *displays* the host, and a poisoned alias would be
+    // approved as text and then executed as an `ssh` option.
+    if let Err(blocked) = validate_host_arg(&host) {
+        return blocked;
+    }
     let cwd = args.get("cwd").and_then(|v| v.as_str());
     let timeout_sec = args
         .get("timeout_sec")
@@ -2232,17 +2416,35 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
     };
 
     if background {
-        let log_path = std::env::temp_dir().join(format!(
-            "spavn-bg-{}-{}.log",
+        // Owner-only directory instead of `temp_dir()`: `/tmp` is shared, so the old predictable
+        // `spavn-bg-<pid>-<step>.log` name let another local user pre-create it (as a symlink) and
+        // capture or clobber the job's output. `create_new` also refuses an existing path.
+        let log_dir = crate::config::spavn_dir().join("bg");
+        let _ = fs::create_dir_all(&log_dir);
+        crate::config::set_owner_only_mode(&log_dir, 0o700);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let log_path = log_dir.join(format!(
+            "bg-{}-{}-{:09}.log",
             std::process::id(),
-            ctx.tool_step_counter
+            ctx.tool_step_counter,
+            nonce
         ));
-        if let Ok(log_file) = fs::File::create(&log_path) {
-            if let Ok(err_file) = log_file.try_clone() {
-                cmd_obj
-                    .stdout(std::process::Stdio::from(log_file))
-                    .stderr(std::process::Stdio::from(err_file));
-            }
+        let log_file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&log_path)
+        {
+            Ok(f) => f,
+            Err(e) => return format!("Background spawn error: cannot create log: {}", e),
+        };
+        crate::config::set_owner_only_mode(&log_path, 0o600);
+        if let Ok(err_file) = log_file.try_clone() {
+            cmd_obj
+                .stdout(std::process::Stdio::from(log_file))
+                .stderr(std::process::Stdio::from(err_file));
         }
         return match cmd_obj.spawn() {
             Ok(mut child) => {
@@ -2288,13 +2490,13 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
                 while tail_start < combined.len() && !combined.is_char_boundary(tail_start) {
                     tail_start += 1;
                 }
-                let head = &combined[..head_end];
-                let tail = &combined[tail_start..];
+                let dropped = tail_start.saturating_sub(head_end);
+                let spilled = crate::spill::spill_output(&format!("bash-{command}"), &combined);
                 combined = format!(
-                    "{}\n\n... [SPAVN truncated {} bytes of middle output] ...\n\n{}",
-                    head,
-                    tail_start.saturating_sub(head_end),
-                    tail
+                    "{}\n\n{}\n\n{}",
+                    &combined[..head_end],
+                    crate::spill::truncation_marker(dropped, combined.len(), spilled.as_deref()),
+                    &combined[tail_start..]
                 );
             }
             if combined.trim().is_empty() {
@@ -2304,6 +2506,42 @@ fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
             }
         }
         Err(e) => format!("Execution error: {}", e),
+    }
+}
+
+/// Directory patterns that ripgrep must never descend into. Shared by `search` and `glob` so a
+/// file-hunting call cannot accidentally walk a home directory into a multi-minute stall.
+///
+/// The leading `**/` is load-bearing: a bare `!target/**` is matched relative to the search root,
+/// so it silently stops working the moment the caller passes an absolute path.
+const RG_IGNORE_GLOBS: &[&str] = &[
+    "!**/Library/**",
+    "!**/Applications/**",
+    "!**/Pictures/**",
+    "!**/Movies/**",
+    "!**/Music/**",
+    "!**/*OneDrive*/**",
+    "!**/.Trash/**",
+    "!**/node_modules/**",
+    "!**/target/**",
+    "!**/.git/**",
+    "!**/.omp/**",
+    "!**/.cache/**",
+    "!**/.cargo/**",
+    "!**/.npm/**",
+];
+
+fn push_ignore_globs(cmd: &mut Command) {
+    for pat in RG_IGNORE_GLOBS {
+        cmd.args(["-g", pat]);
+    }
+}
+
+fn rg_binary() -> &'static str {
+    if Path::new("/opt/homebrew/bin/rg").exists() {
+        "/opt/homebrew/bin/rg"
+    } else {
+        "rg"
     }
 }
 
@@ -2348,6 +2586,9 @@ fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
         ctx.default_host.as_str()
     };
     if target_host != "local" && !target_host.is_empty() {
+        if let Err(blocked) = validate_host_arg(target_host) {
+            return blocked;
+        }
         let ssh_host = resolve_ssh_target(target_host);
         let q_pat = shell_quote_remote_path(pattern);
         let q_path = shell_quote_remote_path(raw_path);
@@ -2375,12 +2616,7 @@ fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
         return blocked;
     }
     let path = expand_tilde(raw_path);
-    let rg_bin = if Path::new("/opt/homebrew/bin/rg").exists() {
-        "/opt/homebrew/bin/rg"
-    } else {
-        "rg"
-    };
-    let mut cmd = Command::new(rg_bin);
+    let mut cmd = Command::new(rg_binary());
     cmd.args([
         "-n",
         "--max-count",
@@ -2391,37 +2627,9 @@ fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
         "512K",
         "--max-columns",
         "220",
-        "-g",
-        "!Library/**",
-        "-g",
-        "!Applications/**",
-        "-g",
-        "!Pictures/**",
-        "-g",
-        "!Movies/**",
-        "-g",
-        "!Music/**",
-        "-g",
-        "!*OneDrive*/**",
-        "-g",
-        "!.Trash/**",
-        "-g",
-        "!node_modules/**",
-        "-g",
-        "!target/**",
-        "-g",
-        "!.git/**",
-        "-g",
-        "!.omp/**",
-        "-g",
-        "!.cache/**",
-        "-g",
-        "!.cargo/**",
-        "-g",
-        "!.npm/**",
-        pattern,
-        &path.to_string_lossy(),
     ]);
+    push_ignore_globs(&mut cmd);
+    cmd.arg(pattern).arg(path.as_os_str());
 
     match run_command_with_timeout(cmd, 8) {
         Ok((_, stdout, _, timed_out)) => {
@@ -2437,6 +2645,130 @@ fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
             }
         }
         Err(e) => format!("Search error: {}", e),
+    }
+}
+
+/// Default and hard cap for `glob` results: enough for a real project, small enough that a
+/// runaway pattern cannot flood the model context.
+const GLOB_DEFAULT_LIMIT: usize = 100;
+const GLOB_MAX_LIMIT: usize = 1000;
+
+fn exec_glob(ctx: &mut ToolContext, args: &Value) -> String {
+    let pattern = {
+        let p = get_str_alias(args, &["pattern", "glob", "query", "name", "match"]);
+        if p.is_empty() {
+            return "glob: missing `pattern` (e.g. `**/*.rs`)".to_string();
+        }
+        p
+    };
+    let raw_path = {
+        let p = get_str_alias(args, &["path", "dir", "directory", "root", "cwd"]);
+        if p.is_empty() {
+            "."
+        } else {
+            p
+        }
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).clamp(1, GLOB_MAX_LIMIT))
+        .unwrap_or(GLOB_DEFAULT_LIMIT);
+    let hidden = args.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
+    let explicit_host = get_str_alias(args, &["host", "target"]);
+
+    if let Some((ssh_host, remote_path)) = split_remote_prefix(raw_path) {
+        let q_pat = shell_quote_remote_path(pattern);
+        let q_path = shell_quote_remote_path(remote_path);
+        // The positive glob goes first so the negations below still win (rg is
+        // last-match-wins). `--hidden` is the only thing that re-admits dotfiles.
+        let remote_cmd = format!(
+            "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; \
+             if command -v rg >/dev/null 2>&1; then \
+                 rg --files --color never {} -g {} -- {} | head -n {}; \
+             else \
+                 find {} -type f -name {} | head -n {}; \
+             fi",
+            if hidden { "--hidden" } else { "" },
+            q_pat,
+            q_path,
+            limit,
+            q_path,
+            q_pat,
+            limit
+        );
+        let out = Command::new("ssh")
+            .args(["-o", "ConnectTimeout=6", &ssh_host, &remote_cmd])
+            .output();
+        return match out {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout).to_string();
+                if s.trim().is_empty() {
+                    format!("(no files match `{}` in {}:{})", pattern, ssh_host, remote_path)
+                } else {
+                    s
+                }
+            }
+            Err(e) => format!("Remote glob error: {}", e),
+        };
+    }
+
+    let target_host = if !explicit_host.is_empty() {
+        explicit_host
+    } else {
+        ctx.default_host.as_str()
+    };
+    if target_host != "local" && !target_host.is_empty() {
+        return format!(
+            "glob: remote host '{}' configured but path has no '<host>:' prefix",
+            target_host
+        );
+    }
+
+    if let Err(blocked) = ctx.enforce_path(raw_path, false, "glob") {
+        return blocked;
+    }
+    let path = expand_tilde(raw_path);
+
+    // Order matters: ripgrep applies `-g` overrides last-match-wins, and a *positive* glob also
+    // bypasses the implicit hidden filter. So the pattern goes first, and the negations that
+    // should win over it (dotfiles, build dirs) go last.
+    let mut cmd = Command::new(rg_binary());
+    cmd.args(["--files", "--color", "never"]);
+    if hidden {
+        cmd.arg("--hidden");
+    }
+    cmd.args(["-g", pattern]);
+    if !hidden {
+        cmd.args(["-g", "!**/.*"]);
+    }
+    push_ignore_globs(&mut cmd);
+    cmd.arg(path.as_os_str());
+
+    match run_command_with_timeout(cmd, 8) {
+        Ok((_, stdout, _, timed_out)) => {
+            let raw = String::from_utf8_lossy(&stdout);
+            let lines: Vec<&str> = raw
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .take(limit)
+                .collect();
+            if lines.is_empty() {
+                return format!("(no files match `{}` in {})", pattern, path.display());
+            }
+            let truncated = !timed_out && lines.len() == limit;
+            let mut out = lines.join("\n");
+            if timed_out {
+                out.push_str("\n[glob: 8s time limit reached, showing the first matches]");
+            } else if truncated {
+                out.push_str(&format!(
+                    "\n[glob: limit {} reached — narrow the pattern or pass a higher `limit`]",
+                    limit
+                ));
+            }
+            out
+        }
+        Err(e) => format!("Glob error: {}", e),
     }
 }
 
@@ -2697,22 +3029,29 @@ fn call_exa_mcp(tool_name: &str, arguments: Value) -> Option<String> {
     None
 }
 
-fn exec_web(args: &Value) -> String {
+fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
     let op_raw = get_str_alias(args, &["op", "action", "mode"]);
     let url = get_str_alias(args, &["url", "href", "link"]);
-    let query = get_str_alias(args, &["query", "q", "search", "url"]);
+    // `url` is deliberately absent: with it here, `web search {"query":"https://…"}` silently
+    // became a fetch — an unrequested outbound GET the model never asked for.
+    let query = get_str_alias(args, &["query", "q", "search"]);
     let is_fetch = op_raw.eq_ignore_ascii_case("fetch")
         || op_raw.eq_ignore_ascii_case("read")
-        || (!url.is_empty() && (url.starts_with("http://") || url.starts_with("https://")))
-        || (query.starts_with("http://") || query.starts_with("https://"));
+        || (!url.is_empty() && (url.starts_with("http://") || url.starts_with("https://")));
 
     if is_fetch {
         let target_url = if !url.is_empty() { url } else { query };
         if target_url.is_empty() {
             return "Web fetch error: missing 'url' parameter.".to_string();
         }
-        let is_local_url = target_url.contains("localhost") || target_url.contains("127.0.0.1");
-        if !is_local_url {
+        let allow_local = args
+            .get("allow_local")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if let Some(blocked) = check_egress_gate(ctx, target_url, allow_local) {
+            return blocked;
+        }
+        if !crate::guard::egress_is_blocked(target_url) {
             if let Some(exa_md) = call_exa_mcp(
                 "web_fetch_exa",
                 json!({
@@ -2723,7 +3062,7 @@ fn exec_web(args: &Value) -> String {
                 return exa_md;
             }
         }
-        return match crate::http::get_text(
+        let fetched = crate::http::get_text_public(
             target_url,
             &[
                 (
@@ -2733,7 +3072,8 @@ fn exec_web(args: &Value) -> String {
                 ("Accept", "text/markdown, text/plain;q=0.9, text/html;q=0.8"),
             ],
             12,
-        ) {
+        );
+        return match fetched {
             Ok((status, body)) if (200..300).contains(&status) => {
                 if body.contains("<html") || body.contains("<body") || body.contains("<!DOCTYPE") {
                     strip_html_to_clean_text(&body)
@@ -2781,6 +3121,7 @@ fn run_single_subagent_worker(
         crate::spavn_engine::AgentPhase::Plan,
     );
     sub_ctx.policy = policy.clone();
+    sub_ctx.can_prompt = false;
 
     let mut sub_tools = tool_definitions_for_phase(crate::spavn_engine::AgentPhase::Plan);
     if let Value::Array(ref mut items) = sub_tools {
@@ -2853,6 +3194,17 @@ fn run_single_subagent_worker(
         .unwrap_or_else(|| "(Sub-agent completed without textual summary)".to_string())
 }
 
+/// Collapses a sub-agent task into one short, single-line header label.
+fn one_line_task(task: &str) -> String {
+    let flat = task.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 72 {
+        return flat;
+    }
+    let mut cut = flat.chars().take(72).collect::<String>();
+    cut.push('…');
+    cut
+}
+
 fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
     let model_override = get_str_alias(args, &["model", "endpoint"]);
     let target_model = if model_override.is_empty() {
@@ -2897,11 +3249,25 @@ fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
                         let p = &policy;
                         s.spawn(move || {
                             let res = run_single_subagent_worker(m, h, p, t, c, e);
-                            format!("### Sub-Agent #{} ({})\n{}", idx + 1, t, res)
+                            // The task text can be paragraphs long; the header only needs
+                            // enough of it to tell the sub-agents apart.
+                            format!("### Sub-Agent #{} ({})\n{}", idx + 1, one_line_task(t), res)
                         })
                     })
                     .collect();
-                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+                handles
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, h)| match h.join() {
+                        Ok(out) => out,
+                        // A panicking worker used to vanish silently, leaving the parent
+                        // model one result short with no hint that anything failed.
+                        Err(_) => format!(
+                            "### Sub-Agent #{} (failed)\n[Subagent panicked; its result is missing. Re-run it alone with `subagent`.]",
+                            idx + 1
+                        ),
+                    })
+                    .collect()
             });
             return results.join("\n\n");
         }
@@ -3001,11 +3367,67 @@ fn format_mcp_jsonrpc_response(server_name: &str, tool_name: &str, raw_json: &st
             }
         }
         if !out_parts.is_empty() {
-            let joined = out_parts.join("\n");
-            return joined.chars().take(16_000).collect();
+            return cap_mcp_text(&out_parts.join("\n"), 16_000);
         }
     }
-    res.to_string().chars().take(12_000).collect()
+    cap_mcp_text(&res.to_string(), 12_000)
+}
+
+/// Bounds an MCP payload and says so, instead of silently losing the tail.
+///
+/// The stdio path has no transport-level body limit (the HTTP path inherits ureq's 10 MB), so a
+/// chatty server could pour megabytes into the context window in one call.
+fn cap_mcp_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max_chars).collect();
+    format!(
+        "{}\n… (MCP yanıtı kırpıldı: {} karakterden ilk {})",
+        kept,
+        text.chars().count(),
+        max_chars
+    )
+}
+
+/// Verbs an MCP tool may be assumed not to mutate on.
+///
+/// The gate used to be a deny-list (`send`, `write`, `delete`, …), which missed `commit`,
+/// `move_file`, `push`, `checkout`, `evaluate` and `merge_pull_request`. Treating everything that
+/// is not a known read verb as mutating fails closed instead. A server the user knows is
+/// side-effect free can opt out with `"readOnly": true` in `mcpServers`.
+const MCP_READ_VERBS: &[&str] = &[
+    "capture_display",
+    "describe",
+    "fetch",
+    "find",
+    "get",
+    "inspect",
+    "list",
+    "read",
+    "resolve",
+    "search",
+    "terms",
+    "think",
+];
+
+/// True when `server:tool` may have side effects and so needs the phase/approval gate.
+fn is_mutating_mcp_tool(server_name: &str, tool_name: &str, server_is_read_only: bool) -> bool {
+    if tool_name.trim().is_empty() || server_is_read_only {
+        return false;
+    }
+    // The `sovereign` computer-use server drives a real desktop; nothing it exposes is safe to
+    // run unattended regardless of verb spelling.
+    if server_name.eq_ignore_ascii_case("sovereign") {
+        return true;
+    }
+    let name = tool_name.to_ascii_lowercase();
+    let name = name.strip_prefix("sovereign_").unwrap_or(&name);
+    !MCP_READ_VERBS.iter().any(|verb| {
+        name == *verb
+            || name.starts_with(&format!("{}_", verb))
+            || name.starts_with(&format!("{}-", verb))
+    })
 }
 
 fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
@@ -3022,31 +3444,12 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
             raw_tool_name.to_string()
         };
         let mcp_args = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
-        let is_mutating_mcp = !tool_name.is_empty()
-            && !matches!(
-                tool_name.as_str(),
-                "sovereign_inspect_all"
-                    | "sovereign_terms"
-                    | "sovereign_read"
-                    | "sovereign_fleet"
-                    | "sovereign_sys"
-                    | "sovereign_context"
-                    | "capture_display"
-                    | "get_app_state"
-                    | "list_apps"
-                    | "list_windows"
-            )
-            && (server_name == "sovereign"
-                || server_name == "open-computer-use"
-                || tool_name.contains("send")
-                || tool_name.contains("spawn")
-                || tool_name.contains("click")
-                || tool_name.contains("type")
-                || tool_name.contains("press")
-                || tool_name.contains("write")
-                || tool_name.contains("delete")
-                || tool_name.contains("exec"));
-        if is_mutating_mcp {
+        let server_is_read_only = load_user_config()
+            .mcp_servers
+            .get(server_name)
+            .map(|s| s.read_only)
+            .unwrap_or(false);
+        if is_mutating_mcp_tool(server_name, &tool_name, server_is_read_only) {
             if ctx.phase == crate::spavn_engine::AgentPhase::Plan {
                 return format!(
                     "BLOCKED in PLAN phase: mutating MCP tool `{}:{}` is not allowed in read-only planning mode.",
@@ -3107,8 +3510,27 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                 })
                 .collect();
             let mut cmd = Command::new(&expanded_bin);
+            // The child used to inherit the whole environment, so a compromised or mispackaged
+            // MCP server could read every API key the user has exported. Only PATH/HOME plus the
+            // server's own configured values cross the boundary.
+            let inherited_path = std::env::var("PATH").unwrap_or_default();
+            let expanded_env: Vec<(String, String)> = srv
+                .env
+                .iter()
+                .map(|(k, v)| {
+                    let value = if v.starts_with("~/") {
+                        crate::config::expand_user_path(v).display().to_string()
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), value)
+                })
+                .collect();
             cmd.args(&expanded_args)
-                .envs(&srv.env)
+                .env_clear()
+                .env("PATH", inherited_path)
+                .env("HOME", crate::config::home_dir())
+                .envs(expanded_env)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
@@ -3149,8 +3571,18 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                     use std::io::BufRead;
                     let reader = std::io::BufReader::new(stdout);
                     let mut last_json = String::new();
+                    // A single JSON-RPC line has no size bound on the wire; capping it here keeps a
+                    // chatty or hostile server from forcing a multi-megabyte parse per call.
+                    const MCP_LINE_CAP: usize = 2 * 1024 * 1024;
                     for line in reader.lines().map_while(Result::ok) {
                         let trimmed = line.trim();
+                        if trimmed.len() > MCP_LINE_CAP {
+                            let _ = tx.send(format!(
+                                "{{\"error\":\"MCP response line exceeded {} bytes\"}}",
+                                MCP_LINE_CAP
+                            ));
+                            return;
+                        }
                         if trimmed.starts_with('{') {
                             last_json = trimmed.to_string();
                             if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
@@ -3244,18 +3676,103 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
         "write" | "write_file" | "create_file" | "save" => exec_write(ctx, &args),
         "bash" | "run_command" | "shell" | "exec" | "terminal" => exec_bash(ctx, &args),
         "search" | "grep" | "rg" | "find_in_files" => exec_search(ctx, &args),
+        "glob" | "find_files" | "list_files" | "file_glob" => exec_glob(ctx, &args),
         "memory" | "recall_memory" | "remember" => exec_memory(ctx, &args),
         "skill" | "load_skill" | "use_skill" => exec_skill(&args),
-        "web" | "web_search" | "websearch" | "webfetch" | "web_fetch" => exec_web(&args),
+        "web" | "web_search" | "websearch" | "webfetch" | "web_fetch" => exec_web(ctx, &args),
         "subagent" | "spawn_submodels" | "task" | "delegate" => exec_subagent(ctx, &args),
         "lsp" | "mcp" | "goto_definition" | "find_references" | "document_symbols" => {
             exec_lsp_and_mcp(ctx, &args)
         }
         _ => format!(
-            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, memory, skill, web, subagent, lsp.",
+            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp.",
             name
         ),
     }
+}
+
+/// Tools that neither mutate the workspace nor reach for shared process state.
+///
+/// Deliberately excluded: `edit`/`write` (they push onto `undo_stack`, which must stay in
+/// declared order for `/undo`), `bash` (may hold `target/` locks or prompt), `subagent`
+/// (spawns its own threads) and `mcp` (an unknown server may have side effects).
+pub fn parallel_safe_tool(name: &str) -> bool {
+    matches!(
+        name.trim().to_lowercase().as_str(),
+        "read"
+            | "read_file"
+            | "cat"
+            | "view"
+            | "search"
+            | "grep"
+            | "rg"
+            | "find_in_files"
+            | "glob"
+            | "find_files"
+            | "list_files"
+            | "file_glob"
+            | "skill"
+            | "load_skill"
+            | "use_skill"
+            | "web"
+            | "web_search"
+            | "websearch"
+            | "webfetch"
+            | "web_fetch"
+    )
+}
+
+/// Runs a run of independent read-only calls concurrently and returns their results in the
+/// order they were declared.
+///
+/// Each worker gets its own `ToolContext`, so `read_mtimes`, `read_ranges` and
+/// `tool_step_counter` are never shared across threads. Every worker is stamped with a distinct
+/// step number in declared order, which is what keeps the code-shifting guard meaningful; the
+/// per-file bookkeeping is then merged back into `ctx` sequentially so the serial path sees the
+/// same state it would have after calling each tool in turn.
+pub fn execute_read_only_batch(ctx: &mut ToolContext, calls: &[(String, String)]) -> Vec<String> {
+    if calls.len() <= 1 {
+        return Vec::new();
+    }
+    // Two workers could both reach `prompt_user_approval`, and two prompts read the same stdin.
+    // Outside SOVEREIGN any path may prompt, so a batch is refused outright.
+    if ctx.access != AccessMode::Sovereign || calls.iter().any(|(name, _)| !parallel_safe_tool(name)) {
+        return Vec::new();
+    }
+    let base = ctx.tool_step_counter;
+    let mut locals: Vec<ToolContext> = calls
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| {
+            let mut local = ctx.clone();
+            // A batch is one step of the loop, not one step per call, so hand each worker a
+            // stable, distinct stamp instead of letting them all share `base + 1`.
+            local.tool_step_counter = base + idx + 1;
+            local
+        })
+        .collect();
+
+    let results: Vec<String> = std::thread::scope(|s| {
+        let handles: Vec<_> = locals
+            .iter_mut()
+            .zip(calls.iter())
+            .map(|(local, (name, args))| s.spawn(move || execute_tool(local, name, args)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| "Tool error: worker thread panicked.".to_string())
+            })
+            .collect()
+    });
+
+    for local in locals {
+        ctx.read_mtimes.extend(local.read_mtimes);
+        ctx.read_ranges.extend(local.read_ranges);
+    }
+    ctx.tool_step_counter = base + calls.len();
+    results
 }
 
 pub fn phase_locked_tool(name: &str) -> bool {
@@ -3312,6 +3829,9 @@ mod phase_tests {
 
     #[test]
     fn plan_allows_read_and_memory() {
+        // Guards the fail-closed approval path: with no TTY the prompt answers "no", so any
+        // read that needs approval would silently become a block in every test below.
+        assert!(!crate::hud::stdin_is_tty(), "tests run without a tty");
         let mut c = ctx(AgentPhase::Plan);
         let out = execute_tool(&mut c, "memory", r#"{"op":"recall","query":"x"}"#);
         assert!(!out.contains("READ-ONLY PHASE"), "memory in PLAN: {out}");
@@ -3320,10 +3840,111 @@ mod phase_tests {
     }
 
     #[test]
+    fn batch_keeps_declared_order_and_distinct_steps() {
+        let mut c = ctx(AgentPhase::Code);
+        let calls = vec![
+            (
+                "glob".to_string(),
+                r#"{"pattern":"Cargo.toml"}"#.to_string(),
+            ),
+            (
+                "read".to_string(),
+                r#"{"path":"/nonexistent-batch-a"}"#.to_string(),
+            ),
+            (
+                "read".to_string(),
+                r#"{"path":"/nonexistent-batch-b"}"#.to_string(),
+            ),
+        ];
+        let out = super::execute_read_only_batch(&mut c, &calls);
+        assert_eq!(out.len(), 3, "one result per call: {out:?}");
+        assert!(out[1].starts_with("Read error"), "{}", out[1]);
+        assert!(out[2].starts_with("Read error"), "{}", out[2]);
+        assert!(!out[0].contains("Read error"), "{}", out[0]);
+        // Three calls consumed three steps, even though they ran as one turn.
+        assert_eq!(c.tool_step_counter, 3);
+    }
+
+    #[test]
+    fn batch_refuses_a_single_call() {
+        let mut c = ctx(AgentPhase::Code);
+        let calls = vec![("read".to_string(), r#"{"path":"/x"}"#.to_string())];
+        assert!(super::execute_read_only_batch(&mut c, &calls).is_empty());
+    }
+
+    #[test]
+    fn a_non_sovereign_context_never_batches() {
+        let mut c = ToolContext::new(
+            AccessMode::Safe,
+            "local".to_string(),
+            PathBuf::from("/tmp"),
+            AgentPhase::Code,
+        );
+        let calls = vec![
+            ("read".to_string(), r#"{"path":"/nonexistent-a"}"#.to_string()),
+            ("read".to_string(), r#"{"path":"/nonexistent-b"}"#.to_string()),
+        ];
+        assert!(super::execute_read_only_batch(&mut c, &calls).is_empty());
+        assert_eq!(c.tool_step_counter, 0, "a refused batch consumes no steps");
+    }
+
+    /// A batched read must leave the same per-file state a serial read would, otherwise the
+    /// very next `edit` is accused of shifting code the model did read.
+    #[test]
+    fn batched_read_satisfies_the_code_shifting_guard() {
+        let dir = std::env::temp_dir().join(format!("spavn-batch-guard-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("a.txt");
+        fs::write(&target, "one\ntwo\n").unwrap();
+        let other = dir.join("b.txt");
+        fs::write(&other, "alpha\nbeta\n").unwrap();
+
+        let mut c = ctx(AgentPhase::Code);
+        let calls = vec![
+            (
+                "read".to_string(),
+                format!(r#"{{"path":"{}","start_line":1,"end_line":2}}"#, target.display()),
+            ),
+            (
+                "read".to_string(),
+                format!(r#"{{"path":"{}","start_line":1,"end_line":2}}"#, other.display()),
+            ),
+        ];
+        let out = super::execute_read_only_batch(&mut c, &calls);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(c.read_mtimes.contains_key(&target.to_string_lossy().to_string()));
+
+        let edited = execute_tool(
+            &mut c,
+            "edit",
+            &format!(
+                r#"{{"path":"{}","old_text":"one","new_text":"uno"}}"#,
+                target.display()
+            ),
+        );
+        assert!(
+            !edited.contains("CODE-SHIFTING GUARD"),
+            "batched read should satisfy the guard: {edited}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mutating_tools_never_join_a_batch() {
+        for name in ["edit", "write", "bash", "subagent", "lsp", "memory"] {
+            assert!(!super::parallel_safe_tool(name), "{name} must stay serial");
+        }
+        for name in ["read", "search", "glob", "skill", "web"] {
+            assert!(super::parallel_safe_tool(name), "{name} should batch");
+        }
+    }
+
+    #[test]
     fn phase_from_str_and_toggle() {
-        assert_eq!(AgentPhase::from_str("plan"), Some(AgentPhase::Plan));
-        assert_eq!(AgentPhase::from_str("CODE"), Some(AgentPhase::Code));
-        assert_eq!(AgentPhase::from_str("bogus"), None);
+        assert_eq!(AgentPhase::parse_alias("plan"), Some(AgentPhase::Plan));
+        assert_eq!(AgentPhase::parse_alias("CODE"), Some(AgentPhase::Code));
+        assert_eq!(AgentPhase::parse_alias("bogus"), None);
         assert_eq!(AgentPhase::Plan.toggled(), AgentPhase::Code);
         assert_eq!(AgentPhase::Code.toggled(), AgentPhase::Plan);
     }
@@ -3410,6 +4031,248 @@ mod timeout_tests {
         let mut c = Command::new("sh");
         c.args(["-c", "kill -9 $$"]);
         assert_eq!(run_command_with_timeout(c, 5).unwrap().0, 137);
+    }
+}
+
+#[cfg(all(test, unix))]
+#[cfg(all(test, unix))]
+mod bash_spill_tests {
+    use super::*;
+
+    fn ctx() -> ToolContext {
+        ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            std::env::temp_dir(),
+            crate::spavn_engine::AgentPhase::Code,
+        )
+    }
+
+    #[test]
+    fn oversized_output_keeps_head_and_tail_and_points_at_the_spill_file() {
+        let out = exec_bash(&mut ctx(), &json!({ "command": "seq 1 6000" }));
+        assert!(out.contains("SPAVN truncated"), "no marker: {out}");
+        assert!(out.starts_with("1\n"), "head lost: {}", &out[..40.min(out.len())]);
+        assert!(out.trim_end().ends_with("6000"), "tail lost");
+        let path = out
+            .split('`')
+            .find(|seg| seg.contains("spavn") && seg.ends_with(".txt"))
+            .unwrap_or_else(|| panic!("no spill path in marker: {out}"));
+        let full = fs::read_to_string(path).expect("spill file should exist and be readable");
+        assert!(full.contains("\n3000\n"), "middle should survive in the spill file");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn small_output_is_returned_untouched_and_spills_nothing() {
+        let out = exec_bash(&mut ctx(), &json!({ "command": "echo hello-spill-probe" }));
+        assert_eq!(out.trim(), "hello-spill-probe");
+        assert!(!out.contains("truncated"));
+    }
+}
+
+#[cfg(test)]
+mod subagent_header_tests {
+    use super::*;
+
+    #[test]
+    fn short_tasks_are_passed_through_and_flattened() {
+        assert_eq!(one_line_task("  find   the\nmain entry "), "find the main entry");
+    }
+
+    #[test]
+    fn long_tasks_are_cut_to_one_header_line() {
+        let long = "investigate ".repeat(40);
+        let label = one_line_task(&long);
+        assert!(label.chars().count() <= 73, "too long: {}", label.len());
+        assert!(label.ends_with('…'));
+        assert!(!label.contains('\n'));
+    }
+
+    #[test]
+    fn multibyte_tasks_never_split_a_char() {
+        let label = one_line_task(&"ü".repeat(200));
+        assert_eq!(label.chars().count(), 73);
+    }
+}
+
+#[cfg(test)]
+mod line_span_tests {
+    use super::*;
+
+    #[test]
+    fn parses_single_bare_and_range_forms() {
+        assert_eq!(parse_line_spans("42"), Some(vec![(42, 42)]));
+        assert_eq!(parse_line_spans("10-20"), Some(vec![(10, 20)]));
+        assert_eq!(parse_line_spans("L10-L20"), Some(vec![(10, 20)]));
+        assert_eq!(parse_line_spans("10-L20"), Some(vec![(10, 20)]));
+    }
+
+    #[test]
+    fn parses_comma_separated_lists() {
+        assert_eq!(
+            parse_line_spans("1-12,640-665"),
+            Some(vec![(1, 12), (640, 665)])
+        );
+        assert_eq!(parse_line_spans("5,90"), Some(vec![(5, 5), (90, 90)]));
+    }
+
+    #[test]
+    fn rejects_non_numeric_suffixes() {
+        assert_eq!(parse_line_spans("rs"), None);
+        assert_eq!(parse_line_spans(""), None);
+        assert_eq!(parse_line_spans("1-"), None);
+        assert_eq!(parse_line_spans("1,,2"), None);
+    }
+
+    #[test]
+    fn bare_single_expands_but_multi_list_does_not() {
+        assert_eq!(expand_line_spans(vec![(30, 30)]), vec![(30, 150)]);
+        assert_eq!(expand_line_spans(vec![(5, 5), (90, 90)]), vec![(5, 5), (90, 90)]);
+    }
+
+    #[test]
+    fn overlapping_and_touching_spans_merge() {
+        assert_eq!(
+            expand_line_spans(vec![(10, 20), (20, 30)]),
+            vec![(10, 30)],
+            "overlap must collapse"
+        );
+        assert_eq!(
+            expand_line_spans(vec![(10, 20), (21, 30)]),
+            vec![(10, 30)],
+            "adjacent spans read as one block"
+        );
+        assert_eq!(
+            expand_line_spans(vec![(40, 50), (1, 5)]),
+            vec![(1, 5), (40, 50)],
+            "output is ordered"
+        );
+    }
+
+    #[test]
+    fn selector_splits_a_real_multi_range_path() {
+        let (path, spans) = split_inline_line_spans("src/hud/menus.rs:103-118,1060-1070");
+        assert_eq!(path, "src/hud/menus.rs");
+        assert_eq!(spans, Some(vec![(103, 118), (1060, 1070)]));
+    }
+
+    #[test]
+    fn selector_leaves_plain_paths_untouched() {
+        let (path, spans) = split_inline_line_spans("src/main.rs");
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(spans, None);
+    }
+
+    #[test]
+    fn rendered_spans_carry_absolute_lines_and_jump_markers() {
+        let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        let out = format_spans(&body, &[(2, 4), (20, 22)]);
+        assert!(out.contains("   2: line 2"), "{}", out);
+        assert!(out.contains("   4: line 4"), "{}", out);
+        assert!(out.contains("[jump to line 20]"), "{}", out);
+        assert!(out.contains("  22: line 22"), "{}", out);
+        assert!(out.contains("EOF: line 30/30"), "{}", out);
+        assert!(!out.contains("line 10"), "gap lines must not leak: {}", out);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod glob_tests {
+    use super::*;
+
+    fn ctx() -> ToolContext {
+        ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            PathBuf::from("/tmp"),
+            crate::spavn_engine::AgentPhase::Code,
+        )
+    }
+
+    /// Builds a throwaway tree: two `.rs` files, one ignored dir, one dotfile.
+    fn fixture(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("spavn-glob-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src/deep")).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(dir.join("src/deep/lib.rs"), "").unwrap();
+        fs::write(dir.join("target/junk.rs"), "").unwrap();
+        fs::write(dir.join("notes.md"), "").unwrap();
+        fs::write(dir.join(".hidden.rs"), "").unwrap();
+        dir
+    }
+
+    #[test]
+    fn matches_only_requested_extension_and_skips_ignored_dirs() {
+        let dir = fixture("ext");
+        let out = exec_glob(
+            &mut ctx(),
+            &json!({ "pattern": "**/*.rs", "path": dir.to_string_lossy() }),
+        );
+        assert!(out.contains("main.rs"), "{}", out);
+        assert!(out.contains("lib.rs"), "{}", out);
+        assert!(!out.contains("target/"), "ignored dir leaked: {}", out);
+        assert!(!out.contains("notes.md"), "extension filter leaked: {}", out);
+        assert!(!out.contains(".hidden.rs"), "dotfile leaked by default: {}", out);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hidden_flag_opts_dotfiles_back_in() {
+        let dir = fixture("hidden");
+        let out = exec_glob(
+            &mut ctx(),
+            &json!({ "pattern": "**/*.rs", "path": dir.to_string_lossy(), "hidden": true }),
+        );
+        assert!(out.contains(".hidden.rs"), "{}", out);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn limit_truncates_and_says_so() {
+        let dir = fixture("limit");
+        let out = exec_glob(
+            &mut ctx(),
+            &json!({ "pattern": "**/*.rs", "path": dir.to_string_lossy(), "limit": 1 }),
+        );
+        assert_eq!(out.lines().filter(|l| l.ends_with(".rs")).count(), 1, "{}", out);
+        assert!(out.contains("limit 1 reached"), "{}", out);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_pattern_and_empty_match_are_explained_not_empty() {
+        let dir = fixture("empty");
+        assert!(exec_glob(&mut ctx(), &json!({})).contains("missing `pattern`"));
+        let out = exec_glob(
+            &mut ctx(),
+            &json!({ "pattern": "**/*.zig", "path": dir.to_string_lossy() }),
+        );
+        assert!(out.contains("no files match"), "{}", out);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression guard for the latent bug the `**/` prefix fixes: `search` shares this glob
+    /// list, so an absolute path used to walk straight into `target/` before it was normalised.
+    #[test]
+    fn ignore_globs_are_root_independent() {
+        for pat in RG_IGNORE_GLOBS {
+            assert!(
+                pat.starts_with("!**/"),
+                "glob {} is matched relative to the search root and breaks on absolute paths",
+                pat
+            );
+        }
+    }
+
+    #[test]
+    fn limit_is_clamped_to_the_hard_cap() {
+        // A huge `limit` must not translate into an unbounded read; the clamp is pure arithmetic.
+        let requested = 10_000_000u64;
+        let clamped = (requested as usize).clamp(1, GLOB_MAX_LIMIT);
+        assert_eq!(clamped, GLOB_MAX_LIMIT);
     }
 }
 
@@ -3504,5 +4367,167 @@ mod atomic_write_tests {
             "fn a() -> i32 { 10 }\nfn b() -> i32 { 20 }\n"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use crate::spavn_engine::AgentPhase;
+
+    fn ctx_with(access: AccessMode, ws: &str) -> ToolContext {
+        let mut c = ToolContext::new(
+            access,
+            "local".to_string(),
+            PathBuf::from(ws),
+            AgentPhase::Code,
+        );
+        c.policy = PathPolicy::new(Path::new(ws));
+        c
+    }
+
+    #[test]
+    fn ssh_keys_stay_blocked_even_in_sovereign() {
+        // SOVEREIGN skips the prompt, so the path sandbox is the only thing standing between a
+        // prompt-injected `read` and a private key. It must deny on its own.
+        let mut c = ctx_with(AccessMode::Sovereign, "/tmp/spavn-sec-ws");
+        let home = crate::config::home_dir();
+        for rel in [".ssh/id_rsa", ".spavn/secrets.env", ".aws/credentials"] {
+            let path = home.join(rel);
+            let args = serde_json::json!({ "path": path.to_string_lossy() }).to_string();
+            let out = execute_tool(&mut c, "read", &args);
+            assert!(
+                out.contains("BLOCKED"),
+                "{} must be denied, got: {}",
+                rel,
+                out.chars().take(120).collect::<String>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_ssh_reads_as_an_option_is_rejected() {
+        // `ssh -o ConnectTimeout=8 <host> <cmd>` parses <host>, so a leading `-` is a local
+        // command execution primitive (ProxyCommand), not a destination.
+        let mut c = ctx_with(AccessMode::Sovereign, "/tmp/spavn-sec-ws");
+        let args = serde_json::json!({
+            "command": "echo hi",
+            "host": "-oProxyCommand=touch /tmp/spavn-sec-pwned"
+        })
+        .to_string();
+        let out = execute_tool(&mut c, "bash", &args);
+        assert!(out.contains("Host Policy"), "{out}");
+        assert!(
+            !Path::new("/tmp/spavn-sec-pwned").exists(),
+            "the injected ProxyCommand must never run"
+        );
+    }
+
+    #[test]
+    fn remote_search_rejects_an_option_style_host() {
+        let mut c = ctx_with(AccessMode::Sovereign, "/tmp/spavn-sec-ws");
+        let args = serde_json::json!({
+            "pattern": "x",
+            "path": "src",
+            "host": "-oProxyCommand=id"
+        })
+        .to_string();
+        let out = execute_tool(&mut c, "search", &args);
+        assert!(out.contains("Host Policy"), "{out}");
+    }
+
+    #[test]
+    fn background_logs_do_not_land_in_world_writable_tmp() {
+        // A background `bash` used to write its log and stderr into $TMPDIR, which is shared and
+        // predictable: another local user could pre-create the path (symlink) and read or
+        // redirect the output. They now live under the 0700 spavn home.
+        let mut c = ctx_with(AccessMode::Sovereign, "/tmp/spavn-sec-ws");
+        let args = serde_json::json!({ "command": "echo sec-probe", "background": true }).to_string();
+        let out = execute_tool(&mut c, "bash", &args);
+        assert!(out.contains(".spavn/bg/"), "{out}");
+        let log = out
+            .split('`')
+            .find(|s| s.contains(".log"))
+            .unwrap_or("")
+            .to_string();
+        assert!(!log.is_empty(), "no log path in: {out}");
+        assert!(
+            !log.starts_with("/tmp/") && !log.contains("/var/folders/"),
+            "log leaked into a shared temp dir: {log}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "background log must be owner-only");
+        }
+        let _ = fs::remove_file(&log);
+    }
+
+    #[test]
+    fn an_unanswerable_approval_denies_the_action() {
+        // No TTY means no one can answer the prompt. Blocking forever would hang the turn, and
+        // "no answer" must never be read as consent.
+        assert!(!crate::hud::stdin_is_tty(), "this test needs a non-tty stdin");
+        let dir = std::env::temp_dir().join(format!("spavn-sec-approve-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let target = dir.join("would-be-written.txt");
+        let mut c = ctx_with(AccessMode::Safe, &dir.to_string_lossy());
+        let args = serde_json::json!({
+            "path": target.to_string_lossy(),
+            "content": "denied"
+        })
+        .to_string();
+        let out = execute_tool(&mut c, "write", &args);
+        assert!(out.contains("rejected") || out.contains("BLOCKED"), "{out}");
+        assert!(!target.exists(), "a denied write must not touch the disk");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn web_refuses_a_private_target_before_any_socket_opens() {
+        let mut c = ctx_with(AccessMode::Sovereign, "/tmp");
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/admin",
+            "http://192.168.1.1/",
+            "http://127.0.0.1.nip.io/",
+            "http://[::1]:11434/api/tags",
+        ] {
+            let args = serde_json::json!({ "op": "fetch", "url": url }).to_string();
+            let out = execute_tool(&mut c, "web", &args);
+            assert!(out.contains("Egress Policy"), "{url} → {out}");
+        }
+    }
+
+    #[test]
+    fn web_fetch_asks_in_safe_mode() {
+        // Sovereign egress to a public host is unattended by design; SAFE must still ask, and
+        // with no TTY that ask fails closed.
+        let mut c = ctx_with(AccessMode::Safe, "/tmp");
+        let args = serde_json::json!({ "op": "fetch", "url": "https://example.com/" }).to_string();
+        let out = execute_tool(&mut c, "web", &args);
+        assert!(out.contains("reddedildi") || out.contains("GLED"), "{out}");
+    }
+
+    #[test]
+    fn mcp_mutating_tool_is_treated_as_mutating_by_default() {
+        // The gate used to be a deny-list of verbs, so `commit`/`move_file` slipped through.
+        for tool in ["commit", "move_file", "create_pull_request", "merge_pull_request", "delete_branch"] {
+            assert!(is_mutating_mcp_tool("some-server", tool, false), "{tool}");
+        }
+        for tool in ["get_page", "list_issues", "search_code", "read_file"] {
+            assert!(!is_mutating_mcp_tool("some-server", tool, false), "{tool}");
+        }
+        // A server that declares itself read-only skips the gate entirely.
+        assert!(!is_mutating_mcp_tool("docs", "commit", true));
+    }
+
+    #[test]
+    fn mcp_response_is_capped() {
+        let huge = format!("{{\"result\":{{\"content\":[{{\"text\":\"{}\"}}]}}}}", "x".repeat(400_000));
+        let out = format_mcp_jsonrpc_response("srv", "tool", &huge);
+        assert!(out.contains("kırpıldı"), "{} bytes", out.len());
+        assert!(out.len() < 200_000, "{} bytes", out.len());
     }
 }

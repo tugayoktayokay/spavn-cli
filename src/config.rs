@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-fn set_owner_only_mode(path: &Path, mode: u32) {
+pub fn set_owner_only_mode(path: &Path, mode: u32) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -164,6 +164,10 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub env: HashMap<String, String>,
     pub url: Option<String>,
+    /// Claims the server has no side effects, so its tools skip the mutating-tool gate.
+    /// Opt-in only: the default treats every unlisted tool as a mutator.
+    #[serde(default, rename = "readOnly", alias = "read_only")]
+    pub read_only: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -641,6 +645,57 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
                     badge: "🪟 Microsoft Research".to_string(),
                     desc: "Microsoft Phi-4 Reasoning".to_string(),
                     context_window: Some(128_000),
+                },
+            ],
+        },
+        ProviderGroupConfig {
+            id: "opencode-zen".to_string(),
+            title: "⚫ OpenCode Zen / Go (BYOK)".to_string(),
+            base_url: "https://opencode.ai/zen/go/v1".to_string(),
+            api_key_env: "OPENCODE_API_KEY".to_string(),
+            is_local: false,
+            protocol: None,
+            context_window: Some(1_050_000),
+            models: vec![
+                ModelConfigEntry {
+                    key: "zen:gpt-6-luna".to_string(),
+                    model_id: "gpt-6-luna".to_string(),
+                    label: "OpenCode GPT-6 Luna".to_string(),
+                    badge: "⚫ Zen".to_string(),
+                    desc: "OpenCode Go GPT-6 Luna".to_string(),
+                    context_window: Some(1_050_000),
+                },
+                ModelConfigEntry {
+                    key: "zen:gpt-5.6-luna".to_string(),
+                    model_id: "gpt-5.6-luna".to_string(),
+                    label: "OpenCode GPT-5.6 Luna".to_string(),
+                    badge: "⚫ Zen".to_string(),
+                    desc: "OpenCode Go GPT-5.6 Luna".to_string(),
+                    context_window: Some(1_050_000),
+                },
+                ModelConfigEntry {
+                    key: "zen:deepseek-v4.1-flash".to_string(),
+                    model_id: "deepseek-v4.1-flash".to_string(),
+                    label: "OpenCode DeepSeek V4.1 Flash".to_string(),
+                    badge: "⚫ Zen".to_string(),
+                    desc: "OpenCode Go DeepSeek V4.1 Flash".to_string(),
+                    context_window: Some(1_000_000),
+                },
+                ModelConfigEntry {
+                    key: "zen:grok-4.7".to_string(),
+                    model_id: "grok-4.7".to_string(),
+                    label: "OpenCode Grok 4.7".to_string(),
+                    badge: "⚫ Zen".to_string(),
+                    desc: "OpenCode Go Grok 4.7".to_string(),
+                    context_window: Some(1_000_000),
+                },
+                ModelConfigEntry {
+                    key: "zen:glm-5.3".to_string(),
+                    model_id: "glm-5.3".to_string(),
+                    label: "OpenCode GLM-5.3".to_string(),
+                    badge: "⚫ Zen".to_string(),
+                    desc: "OpenCode Go GLM-5.3".to_string(),
+                    context_window: Some(1_000_000),
                 },
             ],
         },

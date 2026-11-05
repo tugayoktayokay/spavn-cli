@@ -223,7 +223,7 @@ fn collect_symbol_map(dir: &Path, root: &Path, out: &mut Vec<String>, depth: usi
 }
 
 const FULL_CONSTITUTION: &str = r#"# Engineering Constitution (High-Signal Rules)
-1. **Targeted Discovery (No Blind Grepping):** Use the Turn-0 `Workspace Files` and `Symbol Map` (with `L<line>` anchors) above to jump straight to `read(path, start_line, end_line)` or `search(pattern, path)`. Never run `ls`/`find` for files already listed above, and never re-read a file right after editing it (`edit`/`write` already confirms the state).
+1. **Targeted Discovery (No Blind Grepping):** Use the Turn-0 `Workspace Files` and `Symbol Map` (with `L<line>` anchors) above to jump straight to `read(path, start_line, end_line)` or `search(pattern, path)`. `read` also takes a span spec — `read(path="src/x.rs:97-112,1066-1076")` — which is the ONLY correct way to fetch several line ranges at once; never shell out to `sed -n`/`awk`/`head`/`tail`/`cat` via `bash` for file inspection (one `read` replaces several round trips and keeps line numbers absolute). Never run `ls`/`find` for files already listed above, and never re-read a file right after editing it (`edit`/`write` already confirms the state).
 2. **Reuse Existing Architecture:** Before writing code, inspect neighboring functions/types in the target file. Match the repository's existing naming, error handling, imports, and state patterns. Never invent a parallel convention or leave dead code behind.
 3. **High-Precision Surgical Edits:**
    - Prefer `edit` (`path`, `old_text`, `new_text`) over `write` for existing files.
@@ -233,15 +233,17 @@ const FULL_CONSTITUTION: &str = r#"# Engineering Constitution (High-Signal Rules
 5. **Non-Interactive Shell & Verification Gate:**
    - In `bash`, always pass non-interactive flags (`-y`, `--no-pager`, `CI=1`) and avoid blocking pagers/editors (`less`, `vim`, `git log` without `-n`).
    - After any code modification, MUST run a real verification check via `bash` (`cargo check`/`cargo test`, `pytest`, `npm test`, `node --check`, etc.) and confirm it passes before yielding to the user.
-6. **Remote Host Symmetry:** All file tools (`read`, `edit`, `write`, `search`) accept `<host>:/path` prefixes configured in `~/.spavn/config.json` alongside `bash(host="<host>")`."#;
+6. **Remote Host Symmetry:** All file tools (`read`, `edit`, `write`, `search`) accept `<host>:/path` prefixes configured in `~/.spavn/config.json` alongside `bash(host="<host>")`.
+7. **Batch Independent Lookups:** Every tool call is a full model round trip. When a step needs several *independent* lookups, emit them together as multiple `tool_calls` in ONE assistant message — never one per turn. Never batch a write with a read of the file it is about to change."#;
 
 const COMPACT_CONSTITUTION: &str = r#"# Rules
-1. Use the Workspace Files and Symbol Map above; go straight to `read(path, start_line, end_line)` or `search`. No `ls`/`find` for listed files. Do not re-read a file after `edit`/`write`.
+1. Use the Workspace Files and Symbol Map above; go straight to `read(path, start_line, end_line)` or `search`. Several ranges at once: `read(path="src/x.rs:97-112,1066-1076")`. Never inspect files via `bash sed/awk/head/tail/cat`. No `ls`/`find` for listed files. Do not re-read a file after `edit`/`write`.
 2. Match the neighboring code's naming, errors and imports. No dead code, no parallel conventions.
 3. Prefer `edit` over `write`. `old_text` = exact snippet plus 2-4 unchanged lines so it is unique; never include `123:` line-number prefixes. If `edit` warns, fix it next step.
 4. Finish fully: no TODO, stubs or mocks; update every caller and import.
 5. `bash` is non-interactive: pass `-y`, `--no-pager`, `CI=1`; no pagers or editors. After any code change run a real check (`cargo check`/`cargo test`, `pytest`, `npm test`) and confirm it passes before replying.
-6. File tools and `bash(host=...)` accept `<host>:/path` for hosts in `~/.spavn/config.json`."#;
+6. File tools and `bash(host=...)` accept `<host>:/path` for hosts in `~/.spavn/config.json`.
+7. Batch independent `read`/`search`/`glob` lookups into ONE message: each separate turn is a full model round trip."#;
 
 /// Max chars of the Turn-0 symbol map; keeps the prompt small for local models.
 const SYMBOL_MAP_BUDGET: usize = 2000;
@@ -255,6 +257,40 @@ fn clip(s: &str, max: usize) -> String {
 const PROFILE_BUDGET_COMPACT: usize = 500;
 
 /// `compact` = local/small-context models: same rules, fewer words, smaller map.
+/// Session-stable wrapper around [`build_system_prompt`].
+///
+/// The prompt embeds `git status`, which changes after *every* edit. Rebuilding it each turn
+/// makes the first message differ from the previous request, so providers cannot reuse their
+/// cached prefix and re-prefill the whole conversation instead — the dominant latency cost on
+/// long sessions. Caching once per `(cwd, compact)` keeps the prefix byte-identical until the
+/// session is compacted or reset, which is when [`invalidate_system_prompt_cache`] runs.
+static SYSTEM_PROMPT_CACHE: std::sync::Mutex<Option<(String, bool, String)>> =
+    std::sync::Mutex::new(None);
+
+pub fn cached_system_prompt(cwd: &str, compact: bool) -> String {
+    let mut slot = match SYSTEM_PROMPT_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some((cached_cwd, cached_compact, text)) = slot.as_ref() {
+        if cached_cwd == cwd && *cached_compact == compact {
+            return text.clone();
+        }
+    }
+    let built = build_system_prompt(cwd, compact);
+    *slot = Some((cwd.to_string(), compact, built.clone()));
+    built
+}
+
+/// Drops the cached prompt so the next turn rebuilds branch/status/file map from scratch.
+pub fn invalidate_system_prompt_cache() {
+    let mut slot = match SYSTEM_PROMPT_CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *slot = None;
+}
+
 pub fn build_system_prompt(cwd: &str, compact: bool) -> String {
     let repo_map = build_workspace_repo_map(cwd, compact);
     let profile_budget = if compact {
@@ -298,6 +334,36 @@ mod tests {
         let sym = p.split("## Symbol Map").nth(1).unwrap_or("");
         let sym = sym.split("\n#").next().unwrap_or("");
         assert!(sym.len() <= super::SYMBOL_MAP_BUDGET + 120, "{}", sym.len());
+    }
+
+    #[test]
+    fn cached_prompt_is_byte_identical_until_invalidated() {
+        super::invalidate_system_prompt_cache();
+        let a = super::cached_system_prompt(".", true);
+        let b = super::cached_system_prompt(".", true);
+        assert_eq!(a, b, "repeat call must not rebuild");
+        // A different mode is a different key, not a stale hit.
+        let c = super::cached_system_prompt(".", false);
+        assert_ne!(a, c);
+        super::invalidate_system_prompt_cache();
+        assert_eq!(super::cached_system_prompt(".", true), a, "rebuild is deterministic");
+        super::invalidate_system_prompt_cache();
+    }
+
+    #[test]
+    fn both_constitutions_teach_tool_batching() {
+        assert!(super::FULL_CONSTITUTION.contains("Batch Independent Lookups"));
+        assert!(super::COMPACT_CONSTITUTION.contains("Batch independent"));
+    }
+
+    #[test]
+    fn both_constitutions_route_line_ranges_through_read_not_bash() {
+        // The span syntax only pays off if the model knows it; without this rule it keeps
+        // shelling out to `sed -n`, which costs an extra round trip and loses line anchors.
+        for rules in [super::FULL_CONSTITUTION, super::COMPACT_CONSTITUTION] {
+            assert!(rules.contains(":97-112,1066-1076"), "span example missing");
+            assert!(rules.contains("sed"), "the bash-inspection ban is missing");
+        }
     }
 }
 
