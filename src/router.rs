@@ -1266,6 +1266,8 @@ fn recover_inline_tool_calls(text: &str) -> Vec<ToolCall> {
         "task",
         "lsp",
         "mcp",
+        "computer",
+        "computer_use",
     ];
     let mut search_from = 0;
     while let Some(start) = text[search_from..].find("<tool_call>") {

@@ -411,7 +411,41 @@ pub fn tool_definitions() -> Value {
                     "required": ["op"]
                 }
             }
-        }
+        },
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "computer",
+                "description": "Native host desktop capture, accessibility tree, and input (SOVEREIGN Computer Use). Control macOS apps (WhatsApp, Chrome, Finder), inspect windows, take screenshots, click, type, press keys, read semantic accessibility tree.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "snapshot", "batch", "windows", "apps", "focus",
+                                "screenshot", "click", "double_click", "right_click",
+                                "mouse_move", "type", "key", "scroll", "ocr", "ocr_click"
+                            ],
+                            "description": "Action to perform"
+                        },
+                        "app": { "type": "string", "description": "Application name (e.g. WhatsApp, Google Chrome, Finder)" },
+                        "target": { "type": "string", "description": "Target window title, app name, or query" },
+                        "coordinate": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "[x, y] coordinates"
+                        },
+                        "text": { "type": "string", "description": "Text to type" },
+                        "key": { "type": "string", "description": "Key or key combination to press (e.g. Return, Escape, cmd+v)" },
+                        "element": { "type": "integer", "description": "Accessibility element index" },
+                        "path": { "type": "string", "description": "Screenshot destination path" },
+                        "calls": { "type": "array", "description": "Batch calls array for batch action" }
+                    },
+                    "required": ["action"]
+                }
+            }
+        })
     ])
 }
 
@@ -725,6 +759,21 @@ fn kill_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Turns a spawn failure into something the model can act on.
+///
+/// `search` and `glob` shell out to `rg`; when it is missing, `io::Error` says only "No such file
+/// or directory", which reads like a path bug and sends the model hunting for the wrong thing.
+fn spawn_error_message(cmd: &Command, err: &std::io::Error) -> String {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        let program = cmd.get_program().to_string_lossy().to_string();
+        return format!(
+            "`{}` is not installed or not on PATH; install it, or use `read`/`bash` instead",
+            program
+        );
+    }
+    err.to_string()
+}
+
 fn run_command_with_timeout(
     mut cmd: Command,
     timeout_sec: u64,
@@ -736,7 +785,7 @@ fn run_command_with_timeout(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = cmd.spawn().map_err(|e| spawn_error_message(&cmd, &e))?;
     let out_handle = capture_capped(child.stdout.take());
     let err_handle = capture_capped(child.stderr.take());
 
@@ -2543,12 +2592,17 @@ fn push_ignore_globs(cmd: &mut Command) {
     }
 }
 
+/// Locates `rg`, preferring PATH so any install manager works.
+///
+/// Homebrew puts `rg` in a prefix that is not always on the PATH of a GUI-launched process, which
+/// is why the absolute locations are tried at all; they are a fallback, never the first guess.
 fn rg_binary() -> &'static str {
-    if Path::new("/opt/homebrew/bin/rg").exists() {
-        "/opt/homebrew/bin/rg"
-    } else {
-        "rg"
+    for candidate in ["/opt/homebrew/bin/rg", "/usr/local/bin/rg", "/usr/bin/rg"] {
+        if Path::new(candidate).exists() {
+            return candidate;
+        }
     }
+    "rg"
 }
 
 fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
@@ -3585,7 +3639,7 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                     let mut last_json = String::new();
                     // A single JSON-RPC line has no size bound on the wire; capping it here keeps a
                     // chatty or hostile server from forcing a multi-megabyte parse per call.
-                    const MCP_LINE_CAP: usize = 2 * 1024 * 1024;
+                    const MCP_LINE_CAP: usize = 32 * 1024 * 1024; // 32MB for high-res Computer Use screenshots
                     for line in reader.lines().map_while(Result::ok) {
                         let trimmed = line.trim();
                         if trimmed.len() > MCP_LINE_CAP {
@@ -3672,6 +3726,186 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
     )
 }
 
+fn exec_computer(_ctx: &mut ToolContext, args: &Value) -> String {
+    let action_raw = get_str_alias(args, &["action", "op", "cmd", "action_type"]);
+    let action = action_raw.trim().to_lowercase();
+    let app = get_str_alias(args, &["app", "application", "bundle_id"]);
+    let target_raw = get_str_alias(args, &["target", "window", "title", "query"]);
+    let target = if target_raw.is_empty() {
+        app
+    } else {
+        target_raw
+    };
+    let text = get_str_alias(args, &["text", "string", "input"]);
+    let key = get_str_alias(args, &["key", "combination", "keys"]);
+    let path = get_str_alias(args, &["path", "file", "dest", "destination"]);
+
+    let (coord_x, coord_y) = if let Some(arr) = args.get("coordinate").and_then(|v| v.as_array()) {
+        if arr.len() >= 2 {
+            (arr[0].as_i64(), arr[1].as_i64())
+        } else {
+            (None, None)
+        }
+    } else {
+        let x = args.get("x").and_then(|v| v.as_i64());
+        let y = args.get("y").and_then(|v| v.as_i64());
+        (x, y)
+    };
+
+    let element = args.get("element").and_then(|v| v.as_i64());
+    let sov_path = home_dir().join("bin").join("sov");
+
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(&sov_path).arg("gui");
+
+    match action.as_str() {
+        "snapshot" | "elements" | "tree" | "cua-snapshot" => {
+            cmd.arg("cua-snapshot");
+            if !target.is_empty() {
+                cmd.arg(target);
+            }
+        }
+        "batch" | "cua-batch" => {
+            cmd.arg("cua-batch");
+            let calls_str = if let Some(calls) = args.get("calls") {
+                calls.to_string()
+            } else if let Some(calls) = args.get("batch") {
+                calls.to_string()
+            } else {
+                "[]".to_string()
+            };
+            cmd.arg(calls_str);
+        }
+        "windows" => {
+            cmd.arg("windows");
+        }
+        "apps" => {
+            cmd.arg("apps");
+        }
+        "focus" | "activate" => {
+            cmd.arg("focus");
+            cmd.arg(target);
+        }
+        "screenshot" | "shot" => {
+            let out_path = if path.is_empty() {
+                "/tmp/spavn_screenshot.png".to_string()
+            } else {
+                path.to_string()
+            };
+            if !target.is_empty() {
+                cmd.arg("shot").arg(target).arg(&out_path);
+            } else {
+                let res = std::process::Command::new("screencapture")
+                    .arg("-x")
+                    .arg(&out_path)
+                    .output();
+                match res {
+                    Ok(o) if o.status.success() => {
+                        return serde_json::json!({
+                            "status": "ok",
+                            "path": out_path,
+                            "type": "screenshot"
+                        })
+                        .to_string();
+                    }
+                    Ok(o) => {
+                        return format!(
+                            "screencapture failed: {}",
+                            String::from_utf8_lossy(&o.stderr)
+                        );
+                    }
+                    Err(e) => return format!("screencapture error: {e}"),
+                }
+            }
+        }
+        "click" | "left_click" => {
+            if let Some(elem) = element {
+                let batch = serde_json::json!([
+                    {"tool": "click", "args": {"element": elem}}
+                ]);
+                cmd.arg("cua-batch").arg(batch.to_string());
+            } else if let (Some(x), Some(y)) = (coord_x, coord_y) {
+                cmd.arg("click").arg(x.to_string()).arg(y.to_string());
+            } else if !target.is_empty() {
+                cmd.arg("ocr-click").arg(target);
+            } else {
+                return "computer click requires either coordinate [x, y], element index, or target text".to_string();
+            }
+        }
+        "double_click" => {
+            if let (Some(x), Some(y)) = (coord_x, coord_y) {
+                cmd.arg("double-click")
+                    .arg(x.to_string())
+                    .arg(y.to_string());
+            } else {
+                return "computer double_click requires coordinate [x, y]".to_string();
+            }
+        }
+        "right_click" => {
+            if let (Some(x), Some(y)) = (coord_x, coord_y) {
+                cmd.arg("right-click").arg(x.to_string()).arg(y.to_string());
+            } else {
+                return "computer right_click requires coordinate [x, y]".to_string();
+            }
+        }
+        "mouse_move" | "move" => {
+            if let (Some(x), Some(y)) = (coord_x, coord_y) {
+                cmd.arg("move").arg(x.to_string()).arg(y.to_string());
+            } else {
+                return "computer mouse_move requires coordinate [x, y]".to_string();
+            }
+        }
+        "type" | "type_text" => {
+            cmd.arg("type").arg(text);
+        }
+        "key" | "press_key" | "key_combination" | "hotkey" => {
+            cmd.arg("key").arg(key);
+        }
+        "scroll" => {
+            let dx = coord_x.unwrap_or(0);
+            let dy = coord_y.unwrap_or(0);
+            cmd.arg("scroll").arg(dx.to_string()).arg(dy.to_string());
+        }
+        "ocr" => {
+            cmd.arg("ocr");
+            if !target.is_empty() {
+                cmd.arg(target);
+            }
+        }
+        "ocr_click" => {
+            cmd.arg("ocr-click").arg(target);
+            if !text.is_empty() {
+                cmd.arg(text);
+            }
+        }
+        _ => {
+            return format!(
+                "Unknown computer action '{action}'. Valid actions: snapshot, batch, windows, apps, focus, screenshot, click, double_click, right_click, mouse_move, type, key, scroll, ocr, ocr_click"
+            );
+        }
+    }
+
+    match cmd.output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if !stdout.is_empty() {
+                stdout
+            } else if !stderr.is_empty() {
+                stderr
+            } else if out.status.success() {
+                serde_json::json!({"status": "ok", "action": action}).to_string()
+            } else {
+                format!(
+                    "computer action '{action}' failed with exit code {:?}",
+                    out.status.code()
+                )
+            }
+        }
+        Err(e) => format!("failed to execute sovereign computer engine (~/bin/sov): {e}"),
+    }
+}
+
 pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> String {
     ctx.tool_step_counter += 1;
     let args = parse_args_resilient(args_json);
@@ -3696,8 +3930,11 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
         "lsp" | "mcp" | "goto_definition" | "find_references" | "document_symbols" => {
             exec_lsp_and_mcp(ctx, &args)
         }
+        "computer" | "computer_use" | "open_computer_use" => {
+            exec_computer(ctx, &args)
+        }
         _ => format!(
-            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp.",
+            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp, computer.",
             name
         ),
     }
@@ -4221,6 +4458,19 @@ mod line_span_tests {
 #[cfg(all(test, unix))]
 mod glob_tests {
     use super::*;
+
+    /// `search` and `glob` shell out to `rg`. When it is absent the raw `io::Error` ("No such file
+    /// or directory") reads like a bad path and sends the model chasing the wrong thing, so the
+    /// missing binary has to be named.
+    #[test]
+    fn a_missing_binary_is_named_in_the_error() {
+        let mut cmd = Command::new("spavn-definitely-not-installed");
+        let err = cmd.output().unwrap_err();
+        let msg = spawn_error_message(&cmd, &err);
+        assert!(msg.contains("spavn-definitely-not-installed"), "{}", msg);
+        assert!(msg.contains("not installed"), "{}", msg);
+        assert!(msg.contains("read"), "{}", msg);
+    }
 
     fn ctx() -> ToolContext {
         ToolContext::new(

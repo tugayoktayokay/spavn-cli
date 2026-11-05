@@ -262,23 +262,27 @@ const PROFILE_BUDGET_COMPACT: usize = 500;
 /// The prompt embeds `git status`, which changes after *every* edit. Rebuilding it each turn
 /// makes the first message differ from the previous request, so providers cannot reuse their
 /// cached prefix and re-prefill the whole conversation instead — the dominant latency cost on
-/// long sessions. Caching once per `(cwd, compact)` keeps the prefix byte-identical until the
-/// session is compacted or reset, which is when [`invalidate_system_prompt_cache`] runs.
-static SYSTEM_PROMPT_CACHE: std::sync::Mutex<Option<(String, bool, String)>> =
+/// long sessions. Caching once per `(cwd, compact, language)` keeps the prefix byte-identical
+/// until the session is compacted or reset, which is when [`invalidate_system_prompt_cache`] runs.
+///
+/// The language is part of the key, not ambient state: `/lang` changes it process-wide, and
+/// without it in the key a switch would keep serving the previous language's prompt.
+static SYSTEM_PROMPT_CACHE: std::sync::Mutex<Option<(String, bool, bool, String)>> =
     std::sync::Mutex::new(None);
 
 pub fn cached_system_prompt(cwd: &str, compact: bool) -> String {
+    let en = crate::config::is_en();
     let mut slot = match SYSTEM_PROMPT_CACHE.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if let Some((cached_cwd, cached_compact, text)) = slot.as_ref() {
-        if cached_cwd == cwd && *cached_compact == compact {
+    if let Some((cached_cwd, cached_compact, cached_en, text)) = slot.as_ref() {
+        if cached_cwd == cwd && *cached_compact == compact && *cached_en == en {
             return text.clone();
         }
     }
-    let built = build_system_prompt(cwd, compact);
-    *slot = Some((cwd.to_string(), compact, built.clone()));
+    let built = build_prompt(cwd, compact, en);
+    *slot = Some((cwd.to_string(), compact, en, built.clone()));
     built
 }
 
@@ -292,6 +296,11 @@ pub fn invalidate_system_prompt_cache() {
 }
 
 pub fn build_system_prompt(cwd: &str, compact: bool) -> String {
+    build_prompt(cwd, compact, crate::config::is_en())
+}
+
+/// Builds the prompt for an explicit language, so the bytes are a pure function of the inputs.
+fn build_prompt(cwd: &str, compact: bool, en: bool) -> String {
     let repo_map = build_workspace_repo_map(cwd, compact);
     let profile_budget = if compact {
         PROFILE_BUDGET_COMPACT
@@ -304,7 +313,7 @@ pub fn build_system_prompt(cwd: &str, compact: bool) -> String {
             format!("\n# User Profile (~/.spavn/PROFILE.md)\n{}\n", p)
         })
         .unwrap_or_default();
-    let lang_rule = if crate::config::is_en() {
+    let lang_rule = if en {
         "- Language: Respond in concise, evidence-first English."
     } else {
         "- Dil: Türkçe, doğrudan, kanıt odaklı ve net yanıt ver; gereksiz giriş/özet cümleleri kurma."
@@ -346,10 +355,20 @@ mod tests {
         let c = super::cached_system_prompt(".", false);
         assert_ne!(a, c);
         super::invalidate_system_prompt_cache();
-        assert_eq!(
-            super::cached_system_prompt(".", true),
-            a,
-            "rebuild is deterministic"
+        // Determinism belongs to the inputs. `is_en()` is process-global and other tests flip it
+        // mid-run, so pin the language instead of reading it twice and racing them.
+        for en in [false, true] {
+            assert_eq!(
+                super::build_prompt(".", true, en),
+                super::build_prompt(".", true, en),
+                "same inputs must build the same bytes (en={})",
+                en
+            );
+        }
+        assert_ne!(
+            super::build_prompt(".", true, false),
+            super::build_prompt(".", true, true),
+            "the language must be part of the prompt"
         );
         super::invalidate_system_prompt_cache();
     }
