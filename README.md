@@ -452,7 +452,7 @@ Two invariants keep the code honest:
 
 ```sh
 cargo build --release
-cargo test                    # 193 tests: 190 library, 3 binary
+cargo test                    # 194 tests: 191 library, 3 binary
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
@@ -470,6 +470,18 @@ Design constraints for contributions:
 - No secrets, tokens, or personal absolute paths in the tree.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist.
+
+---
+
+## Troubleshooting
+
+**`spavn` dies instantly with `[1] killed` (exit 137) on macOS.** Apple Silicon refuses to exec an
+arm64 binary without a valid code signature, so `amfid` SIGKILLs it before `main()` runs. This
+happens when a binary is replaced *in place* (same inode) and its cached signature no longer
+matches — the kernel has no output stream to explain itself, hence the bare `killed`. Reinstall
+with `sh install.sh --local target/release/spavn`, which stages a fresh inode, ad-hoc signs it,
+and probes `--version` before reporting success. `/reload bin` does the same and refuses to exec a
+path that fails the probe.
 
 ---
 

@@ -6,7 +6,8 @@ INSTALL_DIR="${SPAVN_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Replacing a binary in place (cp over the same inode) leaves a stale code-signature
 # in the macOS kernel cache and amfid SIGKILLs the process on execve. Always stage a
-# fresh inode, ad-hoc sign it, then atomically rename it into place.
+# fresh inode, ad-hoc sign it, then atomically rename it into place, and prove the
+# installed path actually runs before claiming success.
 install_binary() {
   _src="$1"
   _tmp="$INSTALL_DIR/.spavn.tmp.$$"
@@ -18,6 +19,12 @@ install_binary() {
   xattr -c "$_tmp" >/dev/null 2>&1 || true
   mv -f "$_tmp" "$INSTALL_DIR/spavn"
   ln -sf "$INSTALL_DIR/spavn" "$INSTALL_DIR/spvn"
+  if ! "$INSTALL_DIR/spavn" --version >/dev/null 2>&1; then
+    echo "Error: $INSTALL_DIR/spavn does not run (killed on execve)." >&2
+    echo "       The staged signature is unusable. Re-run this installer, or move the" >&2
+    echo "       binary to a new path with: cp $INSTALL_DIR/spavn /tmp/spavn && /tmp/spavn --version" >&2
+    exit 1
+  fi
 }
 
 LOCAL_BIN=""
