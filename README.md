@@ -64,7 +64,7 @@ $ spavn "refactor the spill module, then run the suite"
 
 ### The dock, live
 
-<img src="assets/shots/spavn-hero-tui.png" alt="SPAVN TUI: dock, streaming answer, tool cards" width="100%">
+<img src="https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/assets/shots/spavn-hero-tui.png" alt="SPAVN TUI: dock, streaming answer, tool cards" width="100%">
 
 The bottom dock is a live status bar, not decoration:
 
@@ -82,13 +82,13 @@ Streaming answers render inline; tool calls collapse into **tool cards** with a 
 
 ### `/model` — BYOK cloud plus local workstations
 
-<img src="assets/shots/spavn-models-fleet.png" alt="SPAVN /model picker: credit balance, local workstations, provider catalog" width="100%">
+<img src="https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/assets/shots/spavn-models-fleet.png" alt="SPAVN /model picker: credit balance, local workstations, provider catalog" width="100%">
 
 One picker for four sources, resolved in this order: **local models → BYOK credits → provider catalog → free tier**. `byokCatalog: false` drops the built-in catalog entirely and runs the list from your own `providers`.
 
 ### `/bench` and `/fleet`
 
-<img src="assets/shots/spavn-bench-fleet.png" alt="SPAVN /bench tournament and /fleet host panel" width="100%">
+<img src="https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/assets/shots/spavn-bench-fleet.png" alt="SPAVN /bench tournament and /fleet host panel" width="100%">
 
 `/bench` runs the same prompt across every candidate model and prints PASS / FAIL per tool-call format — `JSON`, `⚠️ NO TOOL CALL`, `⚠️ MALFORMED`. A model that looks fine on paper fails exactly here. `/fleet` probes each host in `hosts[]` (`ssh -o ConnectTimeout=3` for remote targets) and prints reachability with round-trip latency (`🟢 ONLINE (38ms)`) plus the host's uptime line.
 
@@ -111,9 +111,9 @@ Four bets, each visible in the source rather than the marketing:
 
 | Item | Value |
 | :--- | :--- |
-| **Rust** | `1.75+` (edition 2021) — only to build from source |
+| **Rust** | `1.80+` (`rust-version`; `LazyLock` in `state.rs` is the floor) — only to build from source |
 | **Binary** | Self-contained; no runtime, no interpreter, no Node |
-| **OS** | macOS (arm64, x64), Linux (x64), Windows (x64, MSVC) |
+| **OS** | macOS (arm64, x64), Linux (arm64, x64), Windows (x64, MSVC) |
 | **`ripgrep`** | Required for the `search` tool; CI installs it explicitly |
 | **Network** | Only to the provider endpoint **you** configure |
 
@@ -122,6 +122,13 @@ Four bets, each visible in the source rather than the marketing:
 ## ⬇️ Install
 
 Four ways in. Pick one.
+
+| Channel | Command | Updates via |
+| :--- | :--- | :--- |
+| **Homebrew** (macOS, Linux) | `brew install tugayoktayokay/tap/spavn` | `brew upgrade` |
+| **Install script** | `curl … \| sh` | re-run it |
+| **crates.io** | `cargo install spavn` | `cargo install --force` |
+| **Archive / source** | release tarball, or `cargo build --release` | manual |
 
 ### 1️⃣ One line (macOS, Linux)
 
@@ -138,12 +145,13 @@ SPAVN_INSTALL_DIR=/usr/local/bin sh install.sh   # override target dir
 ### 2️⃣ Cargo
 
 ```sh
-cargo install --git https://github.com/tugayoktayokay/spavn-cli
+cargo install spavn                                  # from crates.io
+cargo install --git https://github.com/tugayoktayokay/spavn-cli   # track main
 ```
 
 ### 3️⃣ Prebuilt archive
 
-From [Releases](https://github.com/tugayoktayokay/spavn-cli/releases): `tar.gz` for the three Unix targets, `.zip` for Windows, **SHA-256 sidecar on every `v*` tag**.
+From [Releases](https://github.com/tugayoktayokay/spavn-cli/releases): `tar.gz` for the four Unix targets, `.zip` for Windows, **SHA-256 sidecar on every `v*` tag**.
 
 ```sh
 gh release download --repo tugayoktayokay/spavn-cli --pattern '*x86_64-apple-darwin*'
@@ -576,9 +584,12 @@ The single ignored test (`real_open_computer_use_lists_tools`) needs a live MCP 
 | `aarch64-apple-darwin` | `tar.gz` |
 | `x86_64-apple-darwin` | `tar.gz` |
 | `x86_64-unknown-linux-gnu` | `tar.gz` |
+| `aarch64-unknown-linux-gnu` | `tar.gz` |
 | `x86_64-pc-windows-msvc` | `zip` |
 
-Every `v*` tag publishes the archives plus SHA-256 sidecars.
+Every `v*` tag publishes the archives plus SHA-256 sidecars, and the same tag is the source for the
+crates.io publish (`cargo publish`) and the Homebrew formula (`packaging/homebrew/Formula/spavn.rb`).
+Nothing is rebuilt per channel: one tag, three distribution paths.
 
 ### Design constraints for contributions
 

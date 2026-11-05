@@ -2,10 +2,19 @@
 name = "spavn"
 version = "0.1.0"
 edition = "2021"
-description = "SPAVN v0.1 (spavn.dev) — High-performance native Rust coding agent and harness"
+description = "Terminal-native coding agent that ships as one Rust binary: no async runtime, three direct dependencies"
 license = "MIT"
-authors = ["Tugay Oktay Okay"]
+homepage = "https://spavn.dev"
+documentation = "https://github.com/tugayoktayokay/spavn-cli#readme"
 repository = "https://github.com/tugayoktayokay/spavn-cli"
+readme = "README.md"
+rust-version = "1.80"
+keywords = ["ai", "agent", "cli", "tui", "coding-agent"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["Tugay Oktay Okay"]
+# The screenshots and CI config stay on GitHub. The README links them by absolute URL, so
+# crates.io and docs.rs render the same page from a ~90 KiB crate.
+exclude = ["assets/", ".github/", "packaging/"]
 
 [[bin]]
 name = "spavn"
