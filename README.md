@@ -441,7 +441,8 @@ and every mutation is snapshotted for `/undo`.
 | `skill` | Load domain instructions on demand. | `~/.spavn/skills`, `~/.claude/skills`. |
 | `web` | Search or fetch a URL as Markdown. | Egress-classified; redirects re-validated per hop. |
 | `subagent` | Delegate isolated read-only investigations with their own context. | One task, or up to four in parallel. |
-| `lsp` | Symbol navigation (`definition`, `references`, `symbols`) and a generic MCP client. | MCP servers come from config only. |
+| `lsp` | Symbol navigation (`definition`, `references`, `symbols`) and a generic MCP client (`op: "mcp"`). | MCP servers come from config only. `op: "mcp"`, `server: "<name>"` lists that server's tools; add `tool` + `arguments` to call one. |
+| *(MCP)* | Anything an `mcpServers` entry exposes. | Not a builtin: discovered per server, gated like a mutating tool unless the entry sets `readOnly: true`. |
 
 The task bar in the dock is not a tool: it tracks the `- [ ]` checklist items the model writes
 into its own text, so progress advances as steps are completed without an extra round trip.
@@ -449,6 +450,29 @@ into its own text, so progress advances as steps are completed without an extra 
 Oversized `bash` output is truncated in the middle for the context window, but the dropped bytes
 are spilled to `~/.spavn/tool-output/` so the model can page them back in instead of re-running
 the command. Spills are capped at 8 MiB each, `0600`, and the 40 newest are kept.
+
+### MCP servers
+
+There is no builtin desktop-control tool and no hardcoded path to one. Anything with an MCP server
+is wired in through `mcpServers` in `~/.spavn/config.json`, and the model reaches it through the
+`lsp` tool:
+
+```jsonc
+"mcpServers": {
+  "desktop": { "command": "/usr/local/bin/open-computer-use", "args": ["mcp"] }
+}
+```
+
+```jsonc
+// list what the server exposes
+{ "op": "mcp", "server": "desktop" }
+// call one of its tools
+{ "op": "mcp", "server": "desktop", "tool": "click", "arguments": { "x": 640, "y": 320 } }
+```
+
+Every configured server name is listed in the `lsp` tool description, so the model can find them
+without a second prompt. Servers not marked `readOnly` pass the mutation gate, and `command` is
+config-only — the model can never supply or change it.
 
 ### Parallel tool calls
 
@@ -555,6 +579,7 @@ non-local alias is never silently trusted.
   ],
   "mcpServers": {
     "memory": { "command": "noospire-memory", "args": ["--stdio"], "readOnly": true },
+    "desktop": { "command": "/usr/local/bin/open-computer-use", "args": ["mcp"], "readOnly": false },
     "remote": { "url": "https://mcp.internal/sse", "readOnly": false }
   }
 }
@@ -579,6 +604,8 @@ non-local alias is never silently trusted.
 | `hosts[].ssh_target` | `ssh` destination; `local` means "never remote". |
 | `hosts[].sensitive` | Require approval in `auto` mode; remote hosts are sensitive even without the flag. |
 | `mcpServers[].command` | Launch command, config-only — the model can never supply or alter it. |
+| `mcpServers[].args` / `env` | Extra argv and environment for a stdio server; `~` is expanded, `PATH`/`HOME` are inherited. |
+| `mcpServers[].url` | Streamable-HTTP server instead of a subprocess. |
 | `mcpServers[].readOnly` | Claims no side effects; without it, calls pass the mutation gate. |
 
 Profile and rules live beside it in `~/.spavn/PROFILE.md`; skills in `~/.spavn/skills/`.
@@ -672,7 +699,7 @@ Two invariants keep the code honest:
 
 ```sh
 cargo build --release
-cargo test                    # 198 tests: 195 library, 3 binary
+cargo test                    # 203 tests: 199 library + 1 opt-in, 3 binary
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
