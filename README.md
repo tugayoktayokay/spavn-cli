@@ -126,12 +126,15 @@ Four bets, each visible in the source rather than the marketing:
 | **Install script** | `curl -fsSL https://spavn.dev/install.sh \| sh` | re-run it |
 | **Homebrew** (macOS, Linux) | `brew install tugayoktayokay/tap/spavn` | `brew upgrade spavn` |
 | **Cargo (git)** | `cargo install --git https://github.com/tugayoktayokay/spavn-cli` | re-run it |
-| **crates.io** | `cargo install spavn` | `cargo install --force spavn` |
+| **crates.io** | `cargo install spavn` (pending the first publish) | `cargo install --force spavn` |
 | **Archive / source** | release tarball, or `cargo build --release` | manual |
 
 `spavn --version` answers `spavn v0.1.0 (macos/aarch64)`. `/update` then tells you when a newer tag
 exists and prints the upgrade command that matches **the channel you installed from** — `brew upgrade`
 for a Homebrew install, `cargo install --force` for a cargo one, the script otherwise.
+
+The crate name `spavn` is reserved and `cargo publish --dry-run` is clean; until the first publish
+lands, use the git channel above — it builds the same source.
 
 ### 1️⃣ One line (macOS, Linux)
 
