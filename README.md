@@ -3,6 +3,8 @@
 **The terminal-native coding agent that ships as one Rust binary.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/tugayoktayokay/spavn-cli?label=release)](https://github.com/tugayoktayokay/spavn-cli/releases)
+[![CI](https://github.com/tugayoktayokay/spavn-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/tugayoktayokay/spavn-cli/actions/workflows/ci.yml)
 [![Rust 2021](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](Cargo.toml)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
 [![Dependencies](https://img.shields.io/badge/dependencies-3-success.svg)](Cargo.toml)
@@ -123,9 +125,16 @@ Download from [Releases](https://github.com/tugayoktayokay/spavn-cli/releases), 
 ```sh
 # macOS Apple Silicon
 curl -fsSLO https://github.com/tugayoktayokay/spavn-cli/releases/latest/download/spavn-aarch64-apple-darwin.tar.gz
+curl -fsSLO https://github.com/tugayoktayokay/spavn-cli/releases/latest/download/spavn-aarch64-apple-darwin.tar.gz.sha256
 shasum -a 256 -c spavn-aarch64-apple-darwin.tar.gz.sha256
-tar -xzf spavn-aarch64-apple-darwin.tar.gz && ./install.sh --local ./spavn
+tar -xzf spavn-aarch64-apple-darwin.tar.gz
+mv spavn "$HOME/.local/bin/spavn" && ln -sf "$HOME/.local/bin/spavn" "$HOME/.local/bin/spvn"
+spavn --version
 ```
+
+The archive contains the bare `spavn` binary — no installer inside it. If you would rather have the
+staged-inode-plus-signature path, extract first and hand the file to the installer:
+`sh install.sh --local ./spavn` (run from a checkout, not from the archive).
 
 | Platform | Archive |
 | --- | --- |
@@ -138,8 +147,9 @@ tar -xzf spavn-aarch64-apple-darwin.tar.gz && ./install.sh --local ./spavn
 Each Unix archive ships with a `.sha256` sibling. Windows has no installer script — unzip and run
 `spavn.exe`.
 
-> Until the first `v*` tag is pushed the Releases page is empty, so the one-liner silently falls
-> back to `cargo install` when Cargo is on `PATH`. That is the intended path, not a failure.
+The current release is [`v0.1.0`](https://github.com/tugayoktayokay/spavn-cli/releases/tag/v0.1.0). When
+an archive exists for your platform the one-liner uses it; otherwise it falls back to
+`cargo install`. Both paths end in the same signed, probed binary.
 
 ### 4. From source
 
@@ -662,7 +672,7 @@ Two invariants keep the code honest:
 
 ```sh
 cargo build --release
-cargo test                    # 194 tests: 191 library, 3 binary
+cargo test                    # 198 tests: 195 library, 3 binary
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
