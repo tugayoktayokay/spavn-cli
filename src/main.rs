@@ -1140,8 +1140,10 @@ fn main() {
             }
             "-h" | "--help" => {
                 println!(
-                    "SPAVN v{} ({}/{}) — Native Rust Coding Agent\n\
+                    "SPAVN v{} ({}/{}) — Native Rust Coding Agent & Harness\n\
                      Usage: spavn [options] [prompt...]\n\n\
+                     Run without arguments to open the interactive TUI. A prompt is executed\n\
+                     headless, then the TUI opens only when -i/--interactive is given.\n\n\
                      Options:\n\
                      \x20 -m, --model <key>           Select model (default: {})\n\
                      \x20 -a, --access <mode>         Access mode: safe | auto | sovereign\n\
@@ -1156,7 +1158,29 @@ fn main() {
                      \x20 -q, --quiet                 Quiet/headless output mode\n\
                      \x20 -j, --json                  Structured JSON output mode\n\
                      \x20 -V, --version               Print version and exit\n\
-                     \x20 -h, --help                  Print this help message",
+                     \x20 -h, --help                  Print this help message\n\n\
+                     Examples:\n\
+                     \x20 spavn                                  Open the interactive TUI\n\
+                     \x20 spavn \"explain src/router.rs\"           One headless turn, then exit\n\
+                     \x20 spavn -a safe -m local \"fix the tests\"  Explicit mode, model, prompt\n\
+                     \x20 spavn -c                               Continue the latest session\n\
+                     \x20 spavn -s fork:session-17938104.jsonl    Fork a session and keep history\n\n\
+                     Paths:\n\
+                     \x20 config    ~/.spavn/config.json      (override the root with SPAVN_HOME)\n\
+                     \x20 sessions  ~/.spavn/sessions/         resumable JSONL, mode 0600\n\
+                     \x20 audit     ~/.spavn/audit/            HMAC-chained action ledger\n\n\
+                     Environment:\n\
+                     \x20 SPAVN_MODEL, SPAVN_HOME, SPAVN_LANG, SPAVN_SHELL\n\
+                     \x20 SPAVN_LOCAL_MODELS_URL, SPAVN_LOCAL_BASE_URL, SPAVN_FORCE_ANTHROPIC\n\
+                     \x20 OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY,\n\
+                     \x20 DEEPSEEK_API_KEY, GROQ_API_KEY, XAI_API_KEY, SPAVN_API_KEY, SPAVN_BASE_URL\n\n\
+                     Files:\n\
+                     \x20 ~/.spavn/PROFILE.md               user profile injected into the prompt\n\
+                     \x20 ~/.spavn/skills/                  on-demand domain instructions\n\
+                     \x20 ~/.spavn/tool-output/             spilled tool output, newest 40 kept\n\
+                     \x20 ~/.spavn/audit.key                HMAC key for the audit chain\n\n\
+                     Inside the TUI: /help lists every slash command, / lists the menu.\n\
+                     Docs: https://github.com/tugayoktayokay/spavn-cli#readme",
                     env!("CARGO_PKG_VERSION"),
                     std::env::consts::OS,
                     std::env::consts::ARCH,
