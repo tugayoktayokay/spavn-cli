@@ -3017,17 +3017,13 @@ fn strip_html_to_clean_text(html: &str) -> String {
 
 /// Endpoint the `web` tool posts its MCP calls to.
 ///
-/// Ships with the hosted default so first runs work unconfigured, but the value is config-driven
-/// (`web_search_url`) so operators can point it at their own bridge or switch it off entirely.
-const DEFAULT_WEB_SEARCH_URL: &str = "https://mcp.exa.ai/mcp";
-
+/// There is no built-in host. Shipping one would send queries to a third party nobody chose, so
+/// the endpoint comes only from `web_search_url` or `SPAVN_WEB_SEARCH_URL`; unset or empty leaves
+/// the HTTP backend off and the caller reports how to switch it on.
 fn web_search_endpoint() -> Option<String> {
     let configured = crate::config::load_user_config().web_search_url;
-    let raw = configured
-        .or_else(|| std::env::var("SPAVN_WEB_SEARCH_URL").ok())
-        .unwrap_or_else(|| DEFAULT_WEB_SEARCH_URL.to_string());
+    let raw = configured.or_else(|| std::env::var("SPAVN_WEB_SEARCH_URL").ok())?;
     let trimmed = raw.trim();
-    // An empty value is a deliberate "no search backend"; callers fall back to plain fetching.
     if trimmed.is_empty() {
         return None;
     }
@@ -3075,13 +3071,21 @@ fn resolve_web_search_target(
     Ok(Some((server.to_string(), tool.to_string())))
 }
 
-/// Tool name the HTTP backend serves for one operation, honouring the config override.
-fn web_http_tool(configured: Option<&str>, default: &str) -> String {
+/// Shown when `web` search has nowhere to go. Since no endpoint is baked in, this doubles as the
+/// setup note instead of silently reaching for some vendor host.
+const NO_SEARCH_BACKEND: &str = "Web search error: no search backend configured. Point \
+`webSearchServer` + `webSearchTool` at an `mcpServers` entry, or `webSearchUrl` + \
+`webSearchHttpTool` at an HTTP MCP endpoint.";
+
+/// Tool name the HTTP backend serves for one operation.
+///
+/// Nothing is assumed about the endpoint's catalogue, so an unset name means "this operation is
+/// not wired up" and the caller skips the HTTP path instead of calling a guessed tool.
+fn web_http_tool(configured: Option<&str>) -> Option<String> {
     configured
         .map(str::trim)
         .filter(|tool| !tool.is_empty())
-        .unwrap_or(default)
-        .to_string()
+        .map(str::to_string)
 }
 
 /// Posts one MCP call to the configured HTTP search backend.
@@ -3097,13 +3101,15 @@ fn call_web_http(tool_name: &str, arguments: Value) -> Option<String> {
         .map(str::trim)
         .filter(|header| !header.is_empty())
         .unwrap_or("x-api-key");
-    let env_name = cfg
+    // No key is sent unless the operator names the env var: a guessed name would leak an
+    // unrelated secret to whatever host the endpoint points at.
+    let api_key = cfg
         .web_search_api_key_env
         .as_deref()
         .map(str::trim)
         .filter(|env_name| !env_name.is_empty())
-        .unwrap_or("EXA_API_KEY");
-    let api_key = std::env::var(env_name).unwrap_or_default();
+        .and_then(|env_name| std::env::var(env_name).ok())
+        .unwrap_or_default();
     call_http_search_mcp(&endpoint, tool_name, arguments, &api_key, header)
 }
 
@@ -3210,16 +3216,17 @@ fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
                 Ok(None) => {
                     let tool = web_http_tool(
                         crate::config::load_user_config().web_fetch_http_tool.as_deref(),
-                        "web_fetch_exa",
                     );
-                    if let Some(markdown) = call_web_http(
-                        &tool,
-                        json!({
-                            "urls": [target_url],
-                            "maxCharacters": 9000
-                        }),
-                    ) {
-                        return markdown;
+                    if let Some(tool) = tool {
+                        if let Some(markdown) = call_web_http(
+                            &tool,
+                            json!({
+                                "urls": [target_url],
+                                "maxCharacters": 9000
+                            }),
+                        ) {
+                            return markdown;
+                        }
                     }
                 }
                 Err(message) => return message,
@@ -3260,9 +3267,9 @@ fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
         "query": query,
         "numResults": 6
     });
+    let cfg = crate::config::load_user_config();
     match web_search_server_tool() {
         Ok(Some((server, tool))) => {
-            let cfg = crate::config::load_user_config();
             let Some(srv) = cfg.mcp_servers.get(&server) else {
                 return format!("Web search error: MCP server `{}` disappeared.", server);
             };
@@ -3271,10 +3278,14 @@ fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
         Ok(None) => {}
         Err(message) => return message,
     }
-    let tool = web_http_tool(
-        crate::config::load_user_config().web_search_http_tool.as_deref(),
-        "web_search_exa",
-    );
+    let Some(tool) = web_http_tool(cfg.web_search_http_tool.as_deref()) else {
+        return NO_SEARCH_BACKEND.to_string();
+    };
+    // A tool name without an endpoint has nothing to call; say so instead of reporting an empty
+    // result set the caller would read as "nothing matched".
+    if web_search_endpoint().is_none() {
+        return NO_SEARCH_BACKEND.to_string();
+    }
     if let Some(results) = call_web_http(&tool, search_args) {
         return results;
     }
@@ -4793,19 +4804,19 @@ mod security_tests {
 
     #[test]
     fn web_http_backend_honours_tool_overrides() {
-        // A self-hosted bridge names its own tools; unset or blank keeps the hosted default.
-        assert_eq!(
-            web_http_tool(None, "web_search_exa"),
-            "web_search_exa".to_string()
-        );
-        assert_eq!(
-            web_http_tool(Some("   "), "web_fetch_exa"),
-            "web_fetch_exa".to_string()
-        );
-        assert_eq!(
-            web_http_tool(Some(" search "), "web_search_exa"),
-            "search".to_string()
-        );
+        // A self-hosted bridge names its own tools; unset or blank means "not wired up", never a
+        // guessed name borrowed from some hosted vendor's catalogue.
+        assert_eq!(web_http_tool(None), None);
+        assert_eq!(web_http_tool(Some("   ")), None);
+        assert_eq!(web_http_tool(Some(" search ")), Some("search".to_string()));
+    }
+
+    #[test]
+    fn missing_search_backend_names_both_ways_to_wire_it_up() {
+        // Nothing is baked in, so the refusal is the onboarding text: it has to point at the stdio
+        // route and the HTTP route instead of implying a hidden default host.
+        assert!(NO_SEARCH_BACKEND.contains("webSearchServer"), "{NO_SEARCH_BACKEND}");
+        assert!(NO_SEARCH_BACKEND.contains("webSearchUrl"), "{NO_SEARCH_BACKEND}");
     }
 
     #[test]

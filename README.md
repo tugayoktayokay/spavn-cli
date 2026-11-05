@@ -459,7 +459,7 @@ is wired in through `mcpServers` in `~/.spavn/config.json`, and the model reache
 
 ```jsonc
 "mcpServers": {
-  "desktop": { "command": "/usr/local/bin/open-computer-use", "args": ["mcp"] }
+  "desktop": { "command": "~/bin/open-computer-use", "args": ["mcp"] }
 }
 ```
 
@@ -579,7 +579,7 @@ non-local alias is never silently trusted.
   ],
   "mcpServers": {
     "memory": { "command": "noospire-memory", "args": ["--stdio"], "readOnly": true },
-    "desktop": { "command": "/usr/local/bin/open-computer-use", "args": ["mcp"], "readOnly": false },
+    "desktop": { "command": "~/bin/open-computer-use", "args": ["mcp"], "readOnly": false },
     "remote": { "url": "https://mcp.internal/sse", "readOnly": false }
   }
 }
@@ -603,14 +603,14 @@ non-local alias is never silently trusted.
 | `hosts[].key` | Alias used by `-H`/`--host` and `bash(host=...)`. |
 | `hosts[].ssh_target` | `ssh` destination; `local` means "never remote". |
 | `hosts[].sensitive` | Require approval in `auto` mode; remote hosts are sensitive even without the flag. |
-| `mcpServers[].command` | Launch command, config-only — the model can never supply or alter it. |
+| `mcpServers[].command` | Launch command, config-only — the model can never supply or alter it. `~` is expanded. |
 | `mcpServers[].args` / `env` | Extra argv and environment for a stdio server; `~` is expanded, `PATH`/`HOME` are inherited. |
 | `mcpServers[].url` | Streamable-HTTP server instead of a subprocess. |
 | `mcpServers[].readOnly` | Claims no side effects; without it, calls pass the mutation gate. |
-| `webSearchServer` / `webSearchTool` | Run `web` search through that `mcpServers` entry instead of any built-in endpoint. |
+| `webSearchServer` / `webSearchTool` | Run `web` search through that `mcpServers` entry. Required unless the HTTP pair below is set. |
 | `webFetchTool` | Tool used for page fetch on `webSearchServer`; unset keeps the built-in fetch path. |
-| `webSearchUrl` | HTTP MCP endpoint for `web`. Empty string disables it; unset uses the hosted default. |
-| `webSearchHttpTool` / `webFetchHttpTool` | Tool names your endpoint serves, if they differ from the hosted defaults. |
+| `webSearchUrl` | HTTP MCP endpoint for `web`. Empty or unset means no HTTP backend. |
+| `webSearchHttpTool` / `webFetchHttpTool` | Tool names your endpoint serves; both are required to talk to it. |
 | `webSearchApiKeyHeader` / `webSearchApiKeyEnv` | Header and env var carrying the endpoint's key. |
 | `byokCatalog` | `false` serves the provider list purely from `providers`. |
 
@@ -625,6 +625,7 @@ Profile and rules live beside it in `~/.spavn/PROFILE.md`; skills in `~/.spavn/s
 | `SPAVN_BASE_URL`, `SPAVN_API_KEY` | Fallback endpoint when no provider resolves. |
 | `SPAVN_FORCE_ANTHROPIC` | Force the Anthropic Messages protocol for a custom proxy. |
 | `SPAVN_LOCAL_MODELS_URL`, `SPAVN_LOCAL_BASE_URL` | Override local discovery / local base URL. |
+| `SPAVN_WEB_SEARCH_URL` | HTTP MCP endpoint for `web`, when `webSearchUrl` is unset. |
 | `SPAVN_SHELL` | Shell for the `bash` tool. |
 | `SPAVN_LANG` | `en` or `tr`. |
 | `SPAVN_INSTALL_DIR` | Installer target directory. |

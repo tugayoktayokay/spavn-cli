@@ -182,8 +182,8 @@ pub struct SpavnUserConfig {
     pub language: String, // "tr" | "en"
     pub local_discovery_url: Option<String>,
     pub local_base_url: Option<String>,
-    /// MCP endpoint the `web` tool posts search calls to. `None` falls back to the hosted
-    /// default; an empty string disables it.
+    /// MCP endpoint the `web` tool posts search calls to. Unset or an empty string leaves the HTTP
+    /// backend off; nothing is baked in, so no external host is reached unless this is set.
     #[serde(default)]
     pub web_search_url: Option<String>,
     /// Name of an entry in `mcpServers` that serves web search. When set, `web` goes through
@@ -199,12 +199,14 @@ pub struct SpavnUserConfig {
     /// Header the hosted web-search backend expects the API key in. Unset uses `x-api-key`.
     #[serde(default, rename = "webSearchApiKeyHeader")]
     pub web_search_api_key_header: Option<String>,
-    /// Env var holding the hosted web-search API key. Unset uses `EXA_API_KEY`.
+    /// Env var holding the web-search API key. Unset sends no key at all; the name is never
+    /// guessed, so an unrelated secret cannot leak to the configured endpoint.
     #[serde(default, rename = "webSearchApiKeyEnv")]
     pub web_search_api_key_env: Option<String>,
-    /// Tool names on `web_search_url`. Unset keeps the hosted backend's names.
+    /// Tool name on `web_search_url` serving search. Unset means search over HTTP is not wired up.
     #[serde(default, rename = "webSearchHttpTool")]
     pub web_search_http_tool: Option<String>,
+    /// Tool name on `web_search_url` serving fetch. Unset falls back to the plain GET path.
     #[serde(default, rename = "webFetchHttpTool")]
     pub web_fetch_http_tool: Option<String>,
     /// Serve the built-in BYOK provider catalog alongside `providers`.
