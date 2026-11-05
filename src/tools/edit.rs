@@ -481,7 +481,198 @@ pub(crate) fn run_instant_syntax_check(raw_path: &str, content: &str) -> String 
     }
 }
 
+/// Extracts the primary declared identifier from a structural signature line
+/// (e.g. `pub fn foo(`, `const handleSend = async () =>`, `export function bar(`).
+fn extract_declared_symbol_name(line: &str) -> Option<String> {
+    if !is_structural_outline_line(line) {
+        return None;
+    }
+    let trimmed = line.trim();
+    for kw in [
+        "fn ",
+        "def ",
+        "func ",
+        "function ",
+        "class ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "interface ",
+        "const ",
+        "let ",
+    ] {
+        if let Some(pos) = trimmed.find(kw) {
+            let after = trimmed[pos + kw.len()..].trim_start();
+            let ident: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if ident.len() >= 4
+                && !matches!(
+                    ident.as_str(),
+                    "main" | "test" | "new" | "default" | "from" | "into" | "drop"
+                )
+            {
+                return Some(ident);
+            }
+        }
+    }
+    None
+}
+
+/// Scans sibling source files in the workspace for external call-sites of symbols modified in
+/// `old_text` / `new_text`, returning a 1-line Impact Graph hint when external callers exist.
+fn compute_caller_impact_hint(
+    ctx: &ToolContext,
+    raw_path: &str,
+    old_text: &str,
+    new_text: &str,
+) -> String {
+    if split_remote_prefix(raw_path).is_some() {
+        return String::new();
+    }
+    let mut modified_syms: Vec<String> = Vec::new();
+    for line in old_text.lines().chain(new_text.lines()) {
+        if let Some(sym) = extract_declared_symbol_name(line) {
+            if !modified_syms.contains(&sym) {
+                modified_syms.push(sym);
+                if modified_syms.len() >= 3 {
+                    break;
+                }
+            }
+        }
+    }
+    if modified_syms.is_empty() {
+        return String::new();
+    }
+    let edited_canon = expand_tilde(raw_path);
+    let root = &ctx.policy.cwd;
+    let mut callers: Vec<String> = Vec::new();
+    fn scan_dir(
+        base: &Path,
+        cur: &Path,
+        depth: usize,
+        edited: &Path,
+        syms: &[String],
+        out: &mut Vec<String>,
+    ) {
+        if depth > 4 || out.len() >= 6 {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(cur) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            if out.len() >= 6 {
+                return;
+            }
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_ignored_dir_name(&name, false) {
+                continue;
+            }
+            if p.is_dir() {
+                scan_dir(base, &p, depth + 1, edited, syms, out);
+            } else if p != edited {
+                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !matches!(
+                    ext,
+                    "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "cs" | "java"
+                ) {
+                    continue;
+                }
+                let Ok(meta) = fs::metadata(&p) else {
+                    continue;
+                };
+                if meta.len() > 256 * 1024 {
+                    continue;
+                }
+                let Ok(text) = fs::read_to_string(&p) else {
+                    continue;
+                };
+                for (idx, line) in text.lines().enumerate() {
+                    if syms.iter().any(|s| line.contains(s.as_str())) {
+                        let rel = p
+                            .strip_prefix(base)
+                            .unwrap_or(&p)
+                            .to_string_lossy()
+                            .to_string();
+                        out.push(format!("{}:{}", rel, idx + 1));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    scan_dir(root, root, 0, &edited_canon, &modified_syms, &mut callers);
+    if callers.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n[SPAVN Impact Graph: Modified symbol(s) `{}` referenced in: {} — verify callers match the updated contract]",
+            modified_syms.join(", "),
+            callers.join(", ")
+        )
+    }
+}
+
 pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
+    if let Some(files_arr) = args.get("files").and_then(|v| v.as_array()) {
+        if !files_arr.is_empty() {
+            let mut snapshots: Vec<(String, String)> = Vec::new();
+            let mut applied_outputs: Vec<String> = Vec::new();
+            let mut touched_paths: Vec<String> = Vec::new();
+            for (idx, item) in files_arr.iter().enumerate() {
+                let f_path = get_str_alias(item, &["path", "file_path", "file", "filepath"]);
+                if f_path.is_empty() {
+                    for (p, orig) in snapshots.iter().rev() {
+                        let _ = write_target_file(p, orig);
+                    }
+                    return format!(
+                        "Cross-file atomic edit failed at entry #{}: missing `path` (all prior edits rolled back)",
+                        idx + 1
+                    );
+                }
+                if let Err(blocked) = ctx.enforce_path(f_path, true, "edit") {
+                    for (p, orig) in snapshots.iter().rev() {
+                        let _ = write_target_file(p, orig);
+                    }
+                    return blocked;
+                }
+                if !snapshots.iter().any(|(p, _)| p == f_path) {
+                    if let Ok(orig) = read_target_file(f_path) {
+                        snapshots.push((f_path.to_string(), orig));
+                    }
+                }
+                let out = exec_edit_single(ctx, item);
+                if !out.starts_with("Successfully ") {
+                    for (p, orig) in snapshots.iter().rev() {
+                        let _ = write_target_file(p, orig);
+                    }
+                    for _ in 0..idx {
+                        let _ = ctx.undo_stack.pop();
+                    }
+                    return format!(
+                        "Cross-file atomic edit failed at entry #{} ({}) — atomic rollback restored all {} modified file(s) to pre-edit state: {}",
+                        idx + 1,
+                        f_path,
+                        snapshots.len(),
+                        out
+                    );
+                }
+                if !touched_paths.iter().any(|p| p == f_path) {
+                    touched_paths.push(f_path.to_string());
+                }
+                applied_outputs.push(format!("- {}", out));
+            }
+            return format!(
+                "Successfully edited {} file(s) atomically ({}):\n{}",
+                touched_paths.len(),
+                touched_paths.join(", "),
+                applied_outputs.join("\n")
+            );
+        }
+    }
     let raw_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
     if let Err(blocked) = ctx.enforce_path(raw_path, true, "edit") {
         return blocked;
@@ -661,9 +852,10 @@ pub(crate) fn exec_edit_single(ctx: &mut ToolContext, args: &Value) -> String {
             &ctx.current_prompt,
         );
         let diag = run_instant_syntax_check(raw_path, &updated);
+        let impact = compute_caller_impact_hint(ctx, raw_path, old_text, new_text);
         return format!(
-            "Successfully edited {} (exact match — file state is current in context, no need to re-read){}{}",
-            raw_path, mtime_warn, diag
+            "Successfully edited {} (exact match — file state is current in context, no need to re-read){}{}{}",
+            raw_path, mtime_warn, diag, impact
         );
     }
 
@@ -923,4 +1115,3 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
         Err(e) => e,
     }
 }
-

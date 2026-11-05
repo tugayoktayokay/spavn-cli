@@ -721,6 +721,9 @@ impl LiveSpinner {
             state.partial_shown = false;
             state.thinking_box_open = false;
             state.thinking_chars = 0;
+            state.thinking_pending.clear();
+            state.last_think_flush = None;
+            state.last_render_at = None;
             if state.steer_mode.is_none() {
                 state.steer_mode = Some(load_user_config().busy_input_mode != "queue");
             }
@@ -1349,29 +1352,39 @@ impl LiveSpinner {
 
                 if let Ok(mut state) = SPINNER_SCREEN.lock() {
                     if state.active && !state.paused {
-                        rebuild_spinner_dock_lines(&mut state, &status_hdr, cols);
-                        let dock_up = state.dock_lines.len().saturating_sub(1).max(1);
-                        let mut out = String::from("\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J");
-                        let up_rows = if !state.partial_line.is_empty() {
-                            let (preview, _) = truncate_ansi_to_width(
-                                &state.partial_line,
-                                max_w.saturating_sub(2),
-                            );
-                            out.push_str(&preview);
-                            out.push_str("\x1b[0m\n");
-                            state.partial_shown = true;
-                            dock_up + 1
-                        } else {
-                            state.partial_shown = false;
-                            dock_up
-                        };
-                        out.push_str(&format!(
-                            "{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
-                            state.dock_lines.join("\n"),
-                            up_rows
-                        ));
-                        print!("{}", out);
-                        let _ = io::stdout().flush();
+                        if !state.thinking_pending.is_empty() {
+                            flush_pending_thinking_locked(&mut state);
+                        }
+                        let recently_rendered = state
+                            .last_render_at
+                            .map(|t| t.elapsed() < Duration::from_millis(55))
+                            .unwrap_or(false);
+                        if !recently_rendered {
+                            rebuild_spinner_dock_lines(&mut state, &status_hdr, cols);
+                            let dock_up = state.dock_lines.len().saturating_sub(1).max(1);
+                            let mut out = String::from("\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J");
+                            let up_rows = if !state.partial_line.is_empty() {
+                                let (preview, _) = truncate_ansi_to_width(
+                                    &state.partial_line,
+                                    max_w.saturating_sub(2),
+                                );
+                                out.push_str(&preview);
+                                out.push_str("\x1b[0m\n");
+                                state.partial_shown = true;
+                                dock_up + 1
+                            } else {
+                                state.partial_shown = false;
+                                dock_up
+                            };
+                            out.push_str(&format!(
+                                "{}\x1b[{}A\r\x1b[?7h\x1b[?2026l",
+                                state.dock_lines.join("\n"),
+                                up_rows
+                            ));
+                            print!("{}", out);
+                            let _ = io::stdout().flush();
+                            state.last_render_at = Some(Instant::now());
+                        }
                     }
                 }
                 thread::sleep(Duration::from_millis(80));

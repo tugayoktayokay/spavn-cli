@@ -2,6 +2,7 @@ mod turn;
 use turn::*;
 
 use spavn::config::{load_user_config, tr_en};
+use spavn::hud;
 use spavn::hud::{
     draw_bottom_dock, fetch_quick_quota_line, interactive_select_session,
     interactive_select_slash_command, read_bottom_dock_input, render_welcome_header,
@@ -21,7 +22,6 @@ use spavn::spavn_engine::{
 };
 use spavn::state::{install_sigint_handler, push_queued_message, queued_message_count};
 use spavn::tools::{AccessMode, ToolContext};
-use spavn::hud;
 use std::path::PathBuf;
 
 const CYAN: &str = "\x1b[36m";
@@ -668,4 +668,3 @@ fn main() {
         draw_bottom_dock(&endpoint, ctx.access, &ctx.default_host, &quota_badge, "");
     }
 }
-

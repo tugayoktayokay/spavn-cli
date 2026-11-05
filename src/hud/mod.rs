@@ -12,12 +12,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod cards;
+mod dock;
 mod edit;
 mod input;
 mod keys;
 mod menus;
-mod cards;
-mod dock;
 mod pickers;
 pub mod toolcard;
 
@@ -32,7 +32,8 @@ pub use menus::{
 
 pub(crate) static LAST_TERM_ROWS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static LAST_TERM_COLS: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static STICKY_DOCK_STATUS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+pub(crate) static STICKY_DOCK_STATUS: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
 pub(crate) static SPINNER_PAUSED: AtomicBool = AtomicBool::new(false);
 pub(crate) static IDLE_RECAP_ENABLED: AtomicBool = AtomicBool::new(true);
 pub(crate) static USED_CONTEXT_TOKENS: AtomicUsize = AtomicUsize::new(1_200);
@@ -272,21 +273,24 @@ pub fn effective_quota_badge(endpoint: &ModelEndpoint, quota_badge: &str) -> Str
 }
 
 pub(crate) struct SpinnerScreenState {
-    active: bool,
-    paused: bool,
-    label: String,
-    started_at: Option<Instant>,
-    dock_lines: Vec<String>,
-    partial_line: String,
-    partial_prefix: String,
-    partial_shown: bool,
-    thinking_box_open: bool,
-    thinking_chars: usize,
-    typing_buf: Vec<char>,
-    typing_cursor: usize,
-    typing_sel_anchor: Option<usize>,
-    is_typing: bool,
-    steer_mode: Option<bool>,
+    pub(crate) active: bool,
+    pub(crate) paused: bool,
+    pub(crate) label: String,
+    pub(crate) started_at: Option<Instant>,
+    pub(crate) dock_lines: Vec<String>,
+    pub(crate) partial_line: String,
+    pub(crate) partial_prefix: String,
+    pub(crate) partial_shown: bool,
+    pub(crate) thinking_box_open: bool,
+    pub(crate) thinking_chars: usize,
+    pub(crate) thinking_pending: String,
+    pub(crate) last_think_flush: Option<Instant>,
+    pub(crate) last_render_at: Option<Instant>,
+    pub(crate) typing_buf: Vec<char>,
+    pub(crate) typing_cursor: usize,
+    pub(crate) typing_sel_anchor: Option<usize>,
+    pub(crate) is_typing: bool,
+    pub(crate) steer_mode: Option<bool>,
 }
 
 pub(crate) static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
@@ -301,6 +305,9 @@ pub(crate) static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
         partial_shown: false,
         thinking_box_open: false,
         thinking_chars: 0,
+        thinking_pending: String::new(),
+        last_think_flush: None,
+        last_render_at: None,
         typing_buf: Vec::new(),
         typing_cursor: 0,
         typing_sel_anchor: None,
@@ -308,7 +315,11 @@ pub(crate) static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
         steer_mode: None,
     });
 
-pub(crate) fn rebuild_spinner_dock_lines(state: &mut SpinnerScreenState, status_hdr: &str, cols: usize) {
+pub(crate) fn rebuild_spinner_dock_lines(
+    state: &mut SpinnerScreenState,
+    status_hdr: &str,
+    cols: usize,
+) {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let max_w = cols.saturating_sub(6).max(20);
     let elapsed = state
@@ -567,11 +578,36 @@ pub(crate) fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
                 let should_wrap = if is_table_box_line {
                     vw >= cols.saturating_sub(2).max(20)
                 } else {
-                    (ch == ' ' && vw >= max_w.saturating_sub(10)) || vw >= max_w
+                    (ch == ' ' && vw >= max_w.saturating_sub(8)) || vw >= max_w
                 };
                 if should_wrap {
+                    let pfx_len = if state.thinking_box_open {
+                        state.partial_prefix.len().min(state.partial_line.len())
+                    } else {
+                        0
+                    };
+                    // Word-boundary wrap: never slice a word in half when wrapping prose/thinking
+                    if !is_table_box_line && ch != ' ' {
+                        if let Some(rel_sp) = state.partial_line[pfx_len..].rfind(' ') {
+                            if rel_sp > 8 {
+                                let split_at = pfx_len + rel_sp;
+                                let carry = state.partial_line[split_at + 1..].to_string();
+                                out.push_str("\x1b[?7h");
+                                out.push_str(&state.partial_line[..split_at]);
+                                out.push_str("\x1b[0m\n");
+                                state.partial_line.clear();
+                                if !state.partial_prefix.is_empty() {
+                                    state.partial_line.push_str(&state.partial_prefix);
+                                } else {
+                                    state.partial_line.push_str("  ");
+                                }
+                                state.partial_line.push_str(&carry);
+                                continue;
+                            }
+                        }
+                    }
                     out.push_str("\x1b[?7h");
-                    out.push_str(&state.partial_line);
+                    out.push_str(state.partial_line.trim_end());
                     out.push_str("\x1b[0m\n");
                     state.partial_line.clear();
                     if !state.partial_prefix.is_empty() {
@@ -603,14 +639,27 @@ pub(crate) fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
     ));
     print!("{}", out);
     let _ = io::stdout().flush();
+    state.last_render_at = Some(Instant::now());
+}
+
+pub(crate) fn flush_pending_thinking_locked(state: &mut SpinnerScreenState) {
+    if state.thinking_pending.is_empty() {
+        return;
+    }
+    let pending = std::mem::take(&mut state.thinking_pending);
+    state.last_think_flush = Some(Instant::now());
+    let formatted = pending.replace('\n', &format!("\n{}{}│ ", DIM, CYAN));
+    spinner_print_locked(state, &formatted);
 }
 
 pub(crate) fn close_thinking_box_locked(state: &mut SpinnerScreenState) {
+    flush_pending_thinking_locked(state);
     state.thinking_chars = 0;
+    state.last_think_flush = None;
     if state.thinking_box_open {
         state.thinking_box_open = false;
         let pfx = std::mem::take(&mut state.partial_prefix);
-        if !pfx.is_empty() && state.partial_line == pfx {
+        if !pfx.is_empty() && state.partial_line.trim_end() == pfx.trim_end() {
             state.partial_line.clear();
             spinner_print_locked(state, &format!("{}╰─{}\n", DIM, RESET));
         } else {
@@ -657,9 +706,18 @@ pub fn stream_thinking_delta(think_delta: &str, show_thinking: bool) {
                     CYAN
                 );
                 spinner_print_locked(&mut state, &hdr);
+                state.last_think_flush = Some(Instant::now());
             }
-            let formatted = think_delta.replace('\n', &format!("\n{}{}│ ", DIM, CYAN));
-            spinner_print_locked(&mut state, &formatted);
+            state.thinking_pending.push_str(think_delta);
+            let should_flush = state.thinking_pending.contains('\n')
+                || state.thinking_pending.len() >= 36
+                || state
+                    .last_think_flush
+                    .map(|t| t.elapsed() >= Duration::from_millis(32))
+                    .unwrap_or(true);
+            if should_flush {
+                flush_pending_thinking_locked(&mut state);
+            }
         }
     }
 }
@@ -792,4 +850,3 @@ pub use crate::ansi::{
     truncate_ansi_to_width_ellipsis, truncate_ansi_to_width_middle, visible_width,
     wrap_input_lines_with_cursor, BOLD, CYAN, DIM, GREEN, MAGENTA, RED, RESET, YELLOW,
 };
-

@@ -54,7 +54,11 @@ pub(crate) fn check_bash_gate(
 /// prompt can make it safe, and it is where cloud credentials live. `Loopback` needs an explicit
 /// `allow_local` from the caller. `Public` asks in SAFE, or in PLAN where the phase must stay
 /// read-only for the workspace.
-pub(crate) fn check_egress_gate(ctx: &mut ToolContext, url: &str, allow_local: bool) -> Option<String> {
+pub(crate) fn check_egress_gate(
+    ctx: &mut ToolContext,
+    url: &str,
+    allow_local: bool,
+) -> Option<String> {
     use crate::guard::{classify_egress, EgressTarget};
     match classify_egress(url)? {
         EgressTarget::Private => Some(format!(
@@ -84,10 +88,10 @@ pub(crate) fn check_egress_gate(ctx: &mut ToolContext, url: &str, allow_local: b
     }
 }
 
-/// OMP-style Bash Interceptor: blocks standalone shell commands (`grep -rn`, `find`, `cat`,
+/// Bash Interceptor: blocks standalone shell commands (`grep -rn`, `find`, `cat`,
 /// `sed -n`, `head`, `tail`) when the dedicated built-in tool (`search`, `glob`, `read`)
 /// handles the request faster, respects ignore globs (`node_modules`, `target`, `.git`),
-/// and never stalls the turn for 120s.
+/// and avoids multi-minute shell timeouts.
 pub(crate) fn intercept_shell_anti_pattern(cmd: &str) -> Option<String> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
@@ -244,6 +248,33 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
         }
         if !path_parts.is_empty() {
             c.env("PATH", path_parts.join(":"));
+        }
+        for (k, v) in [
+            ("PAGER", "cat"),
+            ("GIT_PAGER", "cat"),
+            ("MANPAGER", "cat"),
+            ("GH_PAGER", "cat"),
+            ("HOMEBREW_PAGER", "cat"),
+            ("BAT_PAGER", "cat"),
+            ("DELTA_PAGER", "cat"),
+            ("LESS", "FRX"),
+            ("GIT_EDITOR", "true"),
+            ("VISUAL", "true"),
+            ("EDITOR", "true"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("CI", "true"),
+            ("npm_config_yes", "true"),
+            ("npm_config_update_notifier", "false"),
+            ("npm_config_fund", "false"),
+            ("npm_config_audit", "false"),
+            ("PIP_NO_INPUT", "1"),
+            ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
+            ("GH_PROMPT_DISABLED", "1"),
+            ("CARGO_TERM_PROGRESS_WHEN", "never"),
+            ("PYTHONUNBUFFERED", "1"),
+            ("DEBIAN_FRONTEND", "noninteractive"),
+        ] {
+            c.env(k, v);
         }
         if let Some(dir) = cwd {
             let expanded = expand_tilde(dir);

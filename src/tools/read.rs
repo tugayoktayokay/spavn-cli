@@ -3,7 +3,12 @@ use super::*;
 pub(crate) fn is_structural_outline_line(line: &str) -> bool {
     let trimmed = line.trim_start();
     let indent = line.len().saturating_sub(trimmed.len());
-    if indent > 8 || trimmed.starts_with("//") || trimmed.starts_with('#') {
+    if indent > 12
+        || trimmed.starts_with("//")
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+    {
         return false;
     }
     const PREFIXES: &[&str] = &[
@@ -37,16 +42,46 @@ pub(crate) fn is_structural_outline_line(line: &str) -> bool {
         "def ",
         "async def ",
         "class ",
+        "func ",
         "export function ",
         "export async function ",
         "export default function ",
         "export class ",
         "export interface ",
         "export type ",
+        "export const ",
         "function ",
         "interface ",
     ];
-    PREFIXES.iter().any(|p| trimmed.starts_with(p))
+    if PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+    // React / TS / JS arrow functions & hooks (`const handleSend = async () => {`, `const Screen: FC =`)
+    if (trimmed.starts_with("const ") || trimmed.starts_with("let "))
+        && (trimmed.contains("=>")
+            || trimmed.contains("= async")
+            || trimmed.contains(": FC")
+            || trimmed.contains("React.memo(")
+            || trimmed.contains(" forwardRef("))
+    {
+        return true;
+    }
+    // C# / Java / Kotlin / Swift class & method declarations
+    const OO_MODIFIERS: &[&str] = &[
+        "public ",
+        "private ",
+        "protected ",
+        "internal ",
+        "override ",
+        "@objc ",
+    ];
+    if OO_MODIFIERS.iter().any(|m| trimmed.starts_with(m))
+        && (trimmed.contains('(') || trimmed.contains("class ") || trimmed.contains("interface "))
+        && !trimmed.ends_with(';')
+    {
+        return true;
+    }
+    false
 }
 
 /// One `N-M` (or bare `N`) span from a `path:N-M,K-L` selector.
@@ -189,7 +224,11 @@ pub(crate) fn format_spans(content: &str, spans: &[LineSpan]) -> String {
     out
 }
 
-pub(crate) fn format_lines(content: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+pub(crate) fn format_lines(
+    content: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
     let s = start_line.unwrap_or(1).max(1);
@@ -261,27 +300,36 @@ pub(crate) fn format_lines(content: &str, start_line: Option<usize>, end_line: O
     }
     if e == total {
         out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
-    } else if s == 1 && total > e + 30 {
+    } else if total > e + 20 {
         let tail_start = total.saturating_sub(15).max(e);
         out.push_str(&format!(
-            "... [Showing lines 1..{} of {} total; Structural Outline of {}..{} + final 15 lines below] ...\n",
+            "... [Showing lines {}..{} of {} total; Structural Outline of remaining lines {}..{} below — jump directly with start_line/end_line] ...\n",
+            s,
             e,
             total,
             e + 1,
             tail_start
         ));
+        let mut shown_syms = 0usize;
         for (idx, line) in lines.iter().enumerate().take(tail_start).skip(e) {
             if is_structural_outline_line(line) {
                 out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+                shown_syms += 1;
+                if shown_syms >= 45 {
+                    out.push_str("  .. [remaining symbols elided] ..\n");
+                    break;
+                }
             }
         }
-        out.push_str(&format!(
-            "... [Final lines {}..{}] ...\n",
-            tail_start + 1,
-            total
-        ));
-        for (idx, line) in lines.iter().enumerate().skip(tail_start) {
-            out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+        if s == 1 {
+            out.push_str(&format!(
+                "... [Final lines {}..{}] ...\n",
+                tail_start + 1,
+                total
+            ));
+            for (idx, line) in lines.iter().enumerate().skip(tail_start) {
+                out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+            }
         }
         out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
     } else {
@@ -304,7 +352,7 @@ pub(crate) fn get_str_alias<'a>(args: &'a Value, keys: &[&str]) -> &'a str {
     ""
 }
 
-/// Guards context against accidental reads of compiled JS bundles (`dist/index.android.bundle`),
+/// Guards context against accidental reads of compiled JS bundles (`dist/app.bundle.js`),
 /// source maps, or minified artifacts that blow up the context window and derail investigation.
 pub(crate) fn check_compiled_artifact_shield(raw_path: &str, content: &str) -> Option<String> {
     let norm = raw_path.replace('\\', "/");
@@ -319,7 +367,8 @@ pub(crate) fn check_compiled_artifact_shield(raw_path: &str, content: &str) -> O
             && (lower.ends_with(".js") || lower.ends_with(".cjs") || lower.ends_with(".mjs")));
     let total_lines = content.lines().count();
     let max_line_chars = content.lines().take(50).map(|l| l.len()).max().unwrap_or(0);
-    let is_minified_giant = content.len() > 200_000 && (total_lines > 8_000 || max_line_chars > 2_500);
+    let is_minified_giant =
+        content.len() > 200_000 && (total_lines > 8_000 || max_line_chars > 2_500);
     if is_bundle_path && (content.len() > 60_000 || total_lines > 2_000 || max_line_chars > 1_500)
         || is_minified_giant
     {
@@ -488,4 +537,3 @@ pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
         }
     }
 }
-

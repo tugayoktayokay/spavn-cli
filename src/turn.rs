@@ -88,7 +88,13 @@ pub(crate) fn extract_file_op_key(tool_name: &str, raw_args: &str) -> Option<(St
         return None;
     }
     let (base_path, inline_span) = match raw_path.rsplit_once(':') {
-        Some((b, s)) if !b.is_empty() && s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) => {
+        Some((b, s))
+            if !b.is_empty()
+                && s.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false) =>
+        {
             (b.trim(), s.trim())
         }
         _ => (raw_path, ""),
@@ -113,12 +119,9 @@ pub(crate) fn compact_messages_for_model(
     is_local: bool,
     max_ctx_tokens: usize,
 ) -> Vec<ChatMessage> {
+    let _ = max_ctx_tokens;
     let raw_tok = hud::estimate_messages_tokens(messages);
-    let prune_old_tools = if is_local {
-        raw_tok >= 16_000
-    } else {
-        raw_tok >= 48_000.min((max_ctx_tokens * 40) / 100)
-    };
+    let prune_old_tools = raw_tok >= 16_000;
     let len = messages.len();
     let last_user_idx = messages
         .iter()
@@ -156,7 +159,7 @@ pub(crate) fn compact_messages_for_model(
         String::new()
     };
     let keep_reasoning_from = if is_local { turn_anchor } else { last_user_idx };
-    // OMP-style Supersede Pruning: identify `read` tool calls before `turn_anchor` whose target
+    // Supersede Pruning: identify `read` tool calls before `turn_anchor` whose target
     // file/region was later re-read or mutated (`edit`/`write`). Anchored to `turn_anchor` so
     // the KV-cache prefix stays byte-identical between anchor steps.
     let supersede_cutoff = if is_local {
@@ -350,8 +353,7 @@ pub(crate) fn run_agent_turn(
         &ctx.default_host,
         quota_badge.unwrap_or("aktif"),
     );
-    let tools_spec =
-        tools::tool_definitions_for_turn(ctx.phase, endpoint.is_local(), &ctx.current_prompt);
+    let tools_spec = tools::tool_definitions_for_phase(ctx.phase);
     let mut last_tool_sig = String::new();
     let mut repeat_count = 0usize;
     let mut unverified_edits = false;
@@ -367,10 +369,13 @@ pub(crate) fn run_agent_turn(
     let mut premature_stop_retries = 0usize;
     let mut last_observed_total_tokens = 0usize;
     let mut consecutive_investigation_steps = 0usize;
+    let mut total_turn_steps = 0usize;
     let mut focus_gate_nudged = false;
+    let mut file_read_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let cfg = load_user_config();
-    // OMP-style Unpaired Tool-Call Recovery: if the last message in history is an assistant
-    // message with tool_calls (e.g. from an interrupted session), execute/resolve them before calling LLM.
+    // Unpaired Tool-Call Recovery: if the last message in history is an assistant
+    // message with tool_calls (e.g. from an interrupted session), resolve them before calling LLM.
     if let Some(last_msg) = messages.last().cloned() {
         if last_msg.role == "assistant" {
             if let Some(pending_tcs) = last_msg.tool_calls {
@@ -387,8 +392,8 @@ pub(crate) fn run_agent_turn(
         }
     }
 
-    // OMP-style Unbounded Turn Loop (`while (true)`): continues until all tool calls,
-    // verification gates, recovery retries, and queued steering/follow-up messages settle.
+    // Unbounded Turn Loop: continues until all tool calls, verification gates,
+    // recovery retries, and queued steering/follow-up messages settle.
     loop {
         if is_interrupted() {
             if !quiet {
@@ -432,8 +437,12 @@ pub(crate) fn run_agent_turn(
             compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
         let mut view_tok = hud::estimate_messages_tokens(&view_messages);
         let effective_tok = view_tok.max(last_observed_total_tokens);
-        let compact_threshold = ((max_ctx_tokens * 80) / 100).min(120_000);
-        if effective_tok >= compact_threshold && messages.len() > 6 {
+        let is_free_or_flash = step_endpoint.model.contains("free")
+            || step_endpoint.model.contains("flash")
+            || step_endpoint.key.contains("free");
+        let token_cap = if is_free_or_flash { 48_000 } else { 120_000 };
+        let compact_threshold = ((max_ctx_tokens * 80) / 100).min(token_cap);
+        if (effective_tok >= compact_threshold || messages.len() > 96) && messages.len() > 6 {
             let raw_before_tok = hud::estimate_messages_tokens(messages).max(effective_tok);
             perform_manual_compact(&step_endpoint, messages, None);
             rewrite_session(session_file, messages);
@@ -465,31 +474,12 @@ pub(crate) fn run_agent_turn(
         let content_chars = std::cell::Cell::new(0usize);
         let partial_content = RefCell::new(String::new());
         let md_renderer = RefCell::new(MarkdownStreamRenderer::new());
-        let hard_inv_cap = if step_endpoint.is_local() { 12 } else { 19 };
-        let step_tools_spec = if consecutive_investigation_steps >= hard_inv_cap {
-            // Hard cap reached: strip read/search/glob so a stubborn model cannot ignore the
-            // Focus Gate and keep exploring forever; only edit/write/bash remain available.
-            if let serde_json::Value::Array(items) = &tools_spec {
-                let only_action: Vec<serde_json::Value> = items
-                    .iter()
-                    .filter(|it| {
-                        let n = it["function"]["name"].as_str().unwrap_or("");
-                        matches!(n, "edit" | "write" | "bash")
-                    })
-                    .cloned()
-                    .collect();
-                serde_json::Value::Array(only_action)
-            } else {
-                tools_spec.clone()
-            }
-        } else {
-            tools_spec.clone()
-        };
-
+        total_turn_steps += 1;
+        let _ = total_turn_steps;
         let result = match stream_chat_completion(
             &step_endpoint,
             &view_messages,
-            &step_tools_spec,
+            &tools_spec,
             |think_delta| {
                 if !quiet {
                     hud::stream_thinking_delta(think_delta, show_thinking);
@@ -712,20 +702,26 @@ pub(crate) fn run_agent_turn(
         };
 
         if let Some(tool_calls) = assistant_msg.tool_calls {
-            let has_mutating_edit = tool_calls.iter().any(|tc| {
-                matches!(
-                    tc.function.name.trim(),
-                    "edit" | "edit_file" | "replace" | "patch" | "write" | "write_file"
-                )
-            });
-            if has_mutating_edit {
-                consecutive_investigation_steps = 0;
-                focus_gate_nudged = false;
-            } else {
-                consecutive_investigation_steps += 1;
-            }
+            consecutive_investigation_steps += 1;
             let mut local_read_count = 0usize;
-            // results are consumed by index below, so rendering, bookkeeping and message order
+            let mut batch_sigs: Vec<String> = tool_calls
+                .iter()
+                .map(|tc| {
+                    format!(
+                        "{}:{}",
+                        tc.function.name.trim(),
+                        tc.function.arguments.trim()
+                    )
+                })
+                .collect();
+            batch_sigs.sort();
+            let turn_batch_sig = batch_sigs.join("||");
+            if turn_batch_sig == last_tool_sig {
+                repeat_count += 1;
+            } else {
+                last_tool_sig = turn_batch_sig;
+                repeat_count = 0;
+            }
             // stay exactly as they were in the serial path.
             let batch_calls: Vec<(String, String)> = tool_calls
                 .iter()
@@ -772,6 +768,27 @@ pub(crate) fn run_agent_turn(
             }
             for (idx, tc) in tool_calls.into_iter().enumerate() {
                 let tool_name = tc.function.name.trim().to_string();
+                if is_read_tool_name(&tool_name) {
+                    if let Some((base_path, _)) =
+                        extract_file_op_key(&tool_name, &tc.function.arguments)
+                    {
+                        let count = file_read_counts.entry(base_path.clone()).or_insert(0);
+                        *count += 1;
+                        if *count > 3 {
+                            let tool_msg = ChatMessage::tool_result(
+                                tc.id,
+                                tool_name,
+                                format!(
+                                    "[SPAVN FILE-READ CAP]: You have already read `{}` 3 times in this turn and its Structural Outline is in your context. Stop paging through this file; use `search` with `context: 3` or proceed to your edit/answer.",
+                                    base_path
+                                ),
+                            );
+                            append_message(session_file, &tool_msg);
+                            messages.push(tool_msg);
+                            continue;
+                        }
+                    }
+                }
                 if endpoint.is_local()
                     && is_read_tool_name(&tool_name)
                     && local_read_count >= LOCAL_READ_BUDGET
@@ -790,13 +807,6 @@ pub(crate) fn run_agent_turn(
                 }
                 if endpoint.is_local() && is_read_tool_name(&tool_name) {
                     local_read_count += 1;
-                }
-                let sig = format!("{}:{}", tool_name, tc.function.arguments.trim());
-                if sig == last_tool_sig {
-                    repeat_count += 1;
-                } else {
-                    last_tool_sig = sig;
-                    repeat_count = 0;
                 }
 
                 let summary_for_task =
@@ -866,6 +876,8 @@ pub(crate) fn run_agent_turn(
                     )
                 {
                     if tool_output.starts_with("Successfully ") {
+                        consecutive_investigation_steps = 0;
+                        focus_gate_nudged = false;
                         unverified_edits = true;
                         compiler_verified_in_edit = tool_output
                             .contains("[Compiler Check: cargo check OK]")
@@ -873,13 +885,28 @@ pub(crate) fn run_agent_turn(
                         if let Ok(v) =
                             serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                         {
+                            let mut touched = Vec::new();
                             if let Some(p) = v
                                 .get("path")
                                 .or_else(|| v.get("file_path"))
                                 .or_else(|| v.get("file"))
                                 .and_then(|s| s.as_str())
                             {
-                                let p_str = p.trim().to_string();
+                                touched.push(p.trim().to_string());
+                            }
+                            if let Some(files_arr) = v.get("files").and_then(|a| a.as_array()) {
+                                for item in files_arr {
+                                    if let Some(fp) = item
+                                        .get("path")
+                                        .or_else(|| item.get("file_path"))
+                                        .and_then(|s| s.as_str())
+                                    {
+                                        touched.push(fp.trim().to_string());
+                                    }
+                                }
+                            }
+                            for p_str in touched {
+                                file_read_counts.remove(&p_str);
                                 if !p_str.is_empty() && !modified_files_in_turn.contains(&p_str) {
                                     modified_files_in_turn.push(p_str);
                                 }
@@ -972,7 +999,7 @@ pub(crate) fn run_agent_turn(
                 append_message(session_file, &tool_msg);
                 messages.push(tool_msg);
             }
-            let inv_budget = if step_endpoint.is_local() { 8 } else { 15 };
+            let inv_budget = if step_endpoint.is_local() { 6 } else { 10 };
             if consecutive_investigation_steps >= inv_budget && !focus_gate_nudged {
                 focus_gate_nudged = true;
                 if let Some(last_tool_msg) = messages.last_mut() {
@@ -1007,7 +1034,7 @@ pub(crate) fn run_agent_turn(
             }
             continue;
         }
-        // 1. Max-Tokens (`finish_reason == "length"`) Auto-Continuation (OMP `length-stop-retry`)
+        // 1. Max-Tokens (`finish_reason == "length"`) Auto-Continuation
         if result.finish_reason.as_deref() == Some("length") && length_stop_retries < 3 {
             length_stop_retries += 1;
             if !quiet {
@@ -1024,7 +1051,7 @@ pub(crate) fn run_agent_turn(
             continue;
         }
 
-        // 2. Empty Assistant Stop Recovery (OMP `empty-stop-retry`)
+        // 2. Empty Assistant Stop Recovery
         let text_trimmed = assistant_msg.content.as_deref().unwrap_or("").trim();
         let reasoning_trimmed = assistant_msg
             .reasoning_content
@@ -1073,7 +1100,7 @@ pub(crate) fn run_agent_turn(
             continue;
         }
 
-        // 3. Premature Action-Announcement Stop Recovery (OMP `unexpected-stop-retry`)
+        // 3. Premature Action-Announcement Stop Recovery
         let looks_like_premature_stop = is_premature_stop(text_trimmed);
         if looks_like_premature_stop && premature_stop_retries < 2 {
             premature_stop_retries += 1;
@@ -1162,7 +1189,6 @@ pub(crate) fn run_agent_turn(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod premature_stop_tests {
@@ -1302,10 +1328,18 @@ mod premature_stop_tests {
         let msgs = vec![
             ChatMessage::system("sys".to_string()),
             ChatMessage::user("first turn".to_string()),
-            call("c1", "read", r#"{"path":"src/foo.rs","start_line":1,"end_line":50}"#),
+            call(
+                "c1",
+                "read",
+                r#"{"path":"src/foo.rs","start_line":1,"end_line":50}"#,
+            ),
             ChatMessage::tool_result("c1", "read", "old file body".repeat(100)),
             ChatMessage::user("second turn".to_string()),
-            call("c2", "edit", r#"{"path":"src/foo.rs","old_text":"a","new_text":"b"}"#),
+            call(
+                "c2",
+                "edit",
+                r#"{"path":"src/foo.rs","old_text":"a","new_text":"b"}"#,
+            ),
             ChatMessage::tool_result("c2", "edit", "Successfully edited src/foo.rs".to_string()),
         ];
         let compacted = super::compact_messages_for_model(&msgs, true, 131_072);

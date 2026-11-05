@@ -1023,9 +1023,20 @@ mod harness_intelligence_tests {
         assert!(globbed.contains("Billing.tsx"), "{globbed}");
         assert!(!globbed.contains("node_modules"), "{globbed}");
 
-        let searched = native_search_fallback(&dir, "UploadInboxFile\\|uploadInboxFile");
+        let searched =
+            native_search_fallback(&dir, "UploadInboxFile\\|uploadInboxFile", "*.tsx", 1);
         assert!(searched.contains("Billing.tsx:2:"), "{searched}");
+        assert!(
+            searched.contains("Billing.tsx-1-const x = 1;"),
+            "{searched}"
+        );
         assert!(!searched.contains("node_modules"), "{searched}");
+        assert!(is_structural_outline_line(
+            "  const handleSendRequest = async () => {"
+        ));
+        assert!(is_structural_outline_line(
+            "    private String getMimeType(String url) {"
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1053,13 +1064,17 @@ mod harness_intelligence_tests {
 
     #[test]
     fn local_model_micro_schema_prunes_domain_tools_until_requested() {
-        let default_local = tool_definitions_for_turn(AgentPhase::Code, true, "fix the bug in main.rs");
+        let default_local =
+            tool_definitions_for_turn(AgentPhase::Code, true, "fix the bug in main.rs");
         let arr = default_local.as_array().unwrap();
         let names: Vec<&str> = arr
             .iter()
             .filter_map(|v| v["function"]["name"].as_str())
             .collect();
-        assert_eq!(names, vec!["read", "edit", "write", "bash", "search", "glob"]);
+        assert_eq!(
+            names,
+            vec!["read", "edit", "write", "bash", "search", "glob"]
+        );
 
         let with_mem_and_web = tool_definitions_for_turn(
             AgentPhase::Code,
@@ -1074,5 +1089,78 @@ mod harness_intelligence_tests {
             .collect();
         assert!(names2.contains(&"memory"));
         assert!(names2.contains(&"web"));
+    }
+
+    #[test]
+    fn cross_file_atomic_edit_applies_and_rolls_back_on_error_with_impact_graph() {
+        let dir = std::env::temp_dir().join(format!("spavn-xfile-edit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let api_file = dir.join("api.ts");
+        let screen_file = dir.join("Screen.tsx");
+        fs::write(
+            &api_file,
+            "export const uploadInvoice = async (id: string) => {\n  return id;\n};\n",
+        )
+        .unwrap();
+        fs::write(
+            &screen_file,
+            "import { uploadInvoice } from './api';\nexport function renderScreen() {\n  return uploadInvoice('1');\n}\n",
+        )
+        .unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        // 1. Failing 2nd file rolls back 1st file atomically
+        let bad_tx = json!({
+            "files": [
+                {
+                    "path": api_file.to_string_lossy(),
+                    "old_text": "return id;",
+                    "new_text": "return id.trim();"
+                },
+                {
+                    "path": screen_file.to_string_lossy(),
+                    "old_text": "NON_EXISTENT_ANCHOR",
+                    "new_text": "x"
+                }
+            ]
+        });
+        let err_out = exec_edit(&mut c, &bad_tx);
+        assert!(err_out.contains("atomic rollback"), "{err_out}");
+        assert!(
+            fs::read_to_string(&api_file)
+                .unwrap()
+                .contains("return id;\n"),
+            "api.ts was not rolled back!"
+        );
+
+        // 2. Valid cross-file edit succeeds and emits Impact Graph hint for `uploadInvoice`
+        let ok_tx = json!({
+            "files": [
+                {
+                    "path": api_file.to_string_lossy(),
+                    "old_text": "export const uploadInvoice = async (id: string) => {",
+                    "new_text": "export const uploadInvoice = async (id: string, token?: string) => {"
+                },
+                {
+                    "path": screen_file.to_string_lossy(),
+                    "old_text": "return uploadInvoice('1');",
+                    "new_text": "return uploadInvoice('1', 'tok');"
+                }
+            ]
+        });
+        let ok_out = exec_edit(&mut c, &ok_tx);
+        assert!(
+            ok_out.starts_with("Successfully edited 2 file(s) atomically"),
+            "{ok_out}"
+        );
+        assert!(ok_out.contains("SPAVN Impact Graph"), "{ok_out}");
+        assert!(ok_out.contains("Screen.tsx"), "{ok_out}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

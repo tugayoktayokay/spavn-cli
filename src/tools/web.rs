@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(crate) fn strip_html_to_clean_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len().min(12_000));
     let lower = html.to_lowercase();

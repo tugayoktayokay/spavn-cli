@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub fn base64_encode_bytes(data: &[u8]) -> String {
     base64_encode(data)
 }
@@ -50,8 +49,8 @@ pub fn register_read_image(path_key: &str, img: DraggedImage) {
     }
 }
 
-/// Collapses any dragged local image file paths inside `input` into compact OMP-style
-/// `[🖼️ Screenshot.png (136KB)]` tokens and caches their `DraggedImage` payload for submission!
+/// Collapses any dragged local image file paths inside `input` into compact
+/// `[🖼️ Screenshot.png (136KB)]` tokens and caches their `DraggedImage` payload for submission.
 pub fn collapse_pasted_image_paths(input: &str) -> (String, bool) {
     let found = extract_dragged_images_raw(input);
     if found.is_empty() {
@@ -196,6 +195,9 @@ pub(crate) fn sanitize_messages_for_openai_jinja(messages: &[ChatMessage]) -> Ve
         }
         let mut clean = m.clone();
         if let Some(ref mut tcs) = clean.tool_calls {
+            // Drop malformed tool calls with an empty function name (e.g. GLM/DeepSeek glitch)
+            // which otherwise wedge the session in HTTP 400 validation errors on every turn.
+            tcs.retain(|tc| !tc.function.name.trim().is_empty());
             for tc in tcs.iter_mut() {
                 if serde_json::from_str::<Value>(&tc.function.arguments)
                     .map(|v| !v.is_object())
@@ -204,10 +206,56 @@ pub(crate) fn sanitize_messages_for_openai_jinja(messages: &[ChatMessage]) -> Ve
                     tc.function.arguments = "{}".to_string();
                 }
             }
+            if tcs.is_empty() {
+                clean.tool_calls = None;
+            }
         }
         out.push(clean);
     }
-    out
+
+    // Guarantee strict 1-to-1 pairing between `assistant.tool_calls` and immediately following
+    // `role == "tool"` messages so strict OpenAI/DeepSeek gateways never throw HTTP 400 on
+    // missing or orphaned `tool_call_id`s.
+    let mut paired: Vec<ChatMessage> = Vec::with_capacity(out.len() + 2);
+    let mut i = 0usize;
+    while i < out.len() {
+        if out[i].role == "assistant" {
+            if let Some(tcs) = out[i].tool_calls.clone() {
+                if !tcs.is_empty() {
+                    paired.push(out[i].clone());
+                    i += 1;
+                    let mut provided_tools: Vec<ChatMessage> = Vec::new();
+                    while i < out.len() && out[i].role == "tool" {
+                        provided_tools.push(out[i].clone());
+                        i += 1;
+                    }
+                    for tc in &tcs {
+                        if let Some(pos) = provided_tools
+                            .iter()
+                            .position(|tm| tm.tool_call_id.as_deref() == Some(tc.id.as_str()))
+                        {
+                            paired.push(provided_tools.remove(pos));
+                        } else {
+                            paired.push(ChatMessage::tool_result(
+                                tc.id.clone(),
+                                tc.function.name.clone(),
+                                "[Tool result omitted]".to_string(),
+                            ));
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        if out[i].role == "tool" {
+            // Orphan tool message not preceded by an assistant(tool_calls): drop it
+            i += 1;
+            continue;
+        }
+        paired.push(out[i].clone());
+        i += 1;
+    }
+    paired
 }
 
 pub(crate) fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
@@ -292,4 +340,3 @@ pub(crate) fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Va
     }
     out_vals
 }
-

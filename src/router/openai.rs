@@ -199,35 +199,28 @@ where
     let mut usage = TokenUsage::default();
     let mut raw_error_lines = Vec::new();
     let mut finish_reason: Option<String> = None;
-    let mut last_chunk_at = Instant::now();
-    let ttft_stall_limit =
-        std::time::Duration::from_secs(if endpoint.is_local() { 90 } else { 50 });
-    let inter_token_stall_limit = std::time::Duration::from_secs(35);
+    let mut stream_hold_buf = String::new();
+    let mut in_inline_tool_block = false;
+    const INLINE_TOOL_OPEN_TAGS: &[&str] = &[
+        "<｜DSML｜",
+        "<|DSML|",
+        "<｜tool",
+        "<|tool_calls_section_begin|>",
+        "<|tool_call_begin|>",
+        "<minimax:tool_call",
+        "<invoke ",
+        "<tool_call>",
+        "<function=",
+    ];
     loop {
         if crate::is_interrupted() {
             return Err("İşlem kullanıcı tarafından (Esc / Ctrl+C) iptal edildi.".to_string());
         }
         let line = match rx.recv_timeout(std::time::Duration::from_millis(150)) {
-            Ok(StreamEvent::Line(line)) => {
-                last_chunk_at = Instant::now();
-                line
-            }
+            Ok(StreamEvent::Line(line)) => line,
             Ok(StreamEvent::Failed(err)) => return Err(err),
             Ok(StreamEvent::End) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let limit = if ttft_ms == 0 {
-                    ttft_stall_limit
-                } else {
-                    inter_token_stall_limit
-                };
-                if last_chunk_at.elapsed() >= limit {
-                    return Err(format!(
-                        "Upstream request failed: stream stalled for {}s without data",
-                        limit.as_secs()
-                    ));
-                }
-                continue;
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let trimmed = line.trim();
@@ -296,7 +289,6 @@ where
                 message_signature = Some(sig.to_string());
             }
         }
-
         if let Some(think) = delta
             .get("reasoning_content")
             .or_else(|| delta.get("thinking"))
@@ -311,7 +303,40 @@ where
         if let Some(txt) = delta.get("content").and_then(|v| v.as_str()) {
             if !txt.is_empty() {
                 content.push_str(txt);
-                on_content(txt);
+                if !in_inline_tool_block {
+                    stream_hold_buf.push_str(txt);
+                    if let Some(tag_idx) = INLINE_TOOL_OPEN_TAGS
+                        .iter()
+                        .filter_map(|t| stream_hold_buf.find(t))
+                        .min()
+                    {
+                        let before = stream_hold_buf[..tag_idx].trim_end();
+                        if !before.is_empty() {
+                            on_content(before);
+                        }
+                        stream_hold_buf.clear();
+                        in_inline_tool_block = true;
+                        crate::hud::notify_tool_call_streaming("", content.len());
+                    } else {
+                        // Hold back any trailing `<...` suffix that could still complete into
+                        // one of `INLINE_TOOL_OPEN_TAGS` on the next SSE chunk.
+                        let hold_from = stream_hold_buf
+                            .rfind('<')
+                            .filter(|&lt_pos| {
+                                let tail = &stream_hold_buf[lt_pos..];
+                                INLINE_TOOL_OPEN_TAGS
+                                    .iter()
+                                    .any(|tag| tag.starts_with(tail))
+                            })
+                            .unwrap_or(stream_hold_buf.len());
+                        if hold_from > 0 {
+                            on_content(&stream_hold_buf[..hold_from]);
+                            stream_hold_buf.drain(..hold_from);
+                        }
+                    }
+                } else {
+                    crate::hud::notify_tool_call_streaming("", content.len());
+                }
             }
         }
 
@@ -378,6 +403,10 @@ where
         if abort_runaway_tool_stream {
             break;
         }
+    }
+    if !in_inline_tool_block && !stream_hold_buf.is_empty() {
+        on_content(&stream_hold_buf);
+        stream_hold_buf.clear();
     }
 
     if content.is_empty()
@@ -447,14 +476,29 @@ where
 pub(crate) fn strip_recovered_tool_markup(text: &str) -> String {
     let mut out = text.to_string();
     for (open, close) in [
+        ("<minimax:tool_call>", "</minimax:tool_call>"),
         ("<tool_call>", "</tool_call>"),
         ("<function=", "</function>"),
+        ("<invoke ", "</invoke>"),
+        ("<|tool_calls_section_begin|>", "<|tool_calls_section_end|>"),
+        ("<|tool_call_begin|>", "<|tool_call_end|>"),
+        ("<｜DSML｜function_calls>", "</｜DSML｜function_calls>"),
+        ("<|DSML|function_calls>", "</|DSML|function_calls>"),
+        ("<｜DSML｜ calls>", "</｜DSML｜ calls>"),
+        ("<|DSML| calls>", "</|DSML| calls>"),
+        ("<｜DSML｜calls>", "</｜DSML｜calls>"),
+        ("<|DSML|calls>", "</|DSML|calls>"),
+        ("<｜DSML｜ invoke", "</｜DSML｜ invoke>"),
+        ("<|DSML| invoke", "</|DSML| invoke>"),
+        ("<｜DSML｜invoke", "</｜DSML｜invoke>"),
+        ("<|DSML|invoke", "</|DSML|invoke>"),
     ] {
         while let Some(s) = out.find(open) {
             if let Some(e) = out[s..].find(close) {
                 let end_idx = s + e + close.len();
                 out.replace_range(s..end_idx, "");
             } else {
+                out.replace_range(s..out.len(), "");
                 break;
             }
         }
@@ -494,6 +538,10 @@ pub(crate) fn recover_inline_tool_calls(text: &str) -> Vec<ToolCall> {
             let inner = text[abs_start..abs_start + end].trim();
             if let Some(tc) = parse_candidate_tool_json(inner, calls.len(), &valid_names) {
                 calls.push(tc);
+            } else if inner.contains("<arg_key>") {
+                if let Some(glm_tc) = parse_glm_tool_call(inner, calls.len(), &valid_names) {
+                    calls.push(glm_tc);
+                }
             } else {
                 calls.extend(parse_xml_tagged_tool_calls(inner, &valid_names));
             }
@@ -511,7 +559,24 @@ pub(crate) fn recover_inline_tool_calls(text: &str) -> Vec<ToolCall> {
             return xml_calls;
         }
     }
-
+    if text.contains("DSML") && text.contains("invoke") {
+        let dsml_calls = parse_dsml_tool_calls(text, &valid_names);
+        if !dsml_calls.is_empty() {
+            return dsml_calls;
+        }
+    }
+    if text.contains("<invoke ") && text.contains("</invoke>") {
+        let inv_calls = parse_invoke_xml_tool_calls(text, &valid_names);
+        if !inv_calls.is_empty() {
+            return inv_calls;
+        }
+    }
+    if text.contains("<|tool_call_begin|>") && text.contains("<|tool_call_end|>") {
+        let kimi_calls = parse_kimi_tool_calls(text, &valid_names);
+        if !kimi_calls.is_empty() {
+            return kimi_calls;
+        }
+    }
     let mut fence_from = 0;
     while let Some(fstart) = text[fence_from..].find("```") {
         let after_ticks = fence_from + fstart + 3;
@@ -641,7 +706,11 @@ pub(crate) fn repair_unescaped_json_newlines(raw: &str) -> String {
     out
 }
 
-pub(crate) fn parse_candidate_tool_json(raw: &str, idx: usize, valid_names: &[&str]) -> Option<ToolCall> {
+pub(crate) fn parse_candidate_tool_json(
+    raw: &str,
+    idx: usize,
+    valid_names: &[&str],
+) -> Option<ToolCall> {
     let val: Value = serde_json::from_str(raw)
         .or_else(|_| serde_json::from_str(&repair_unescaped_json_newlines(raw)))
         .ok()?;
@@ -745,7 +814,205 @@ pub(crate) fn parse_xml_tagged_tool_calls(text: &str, valid_names: &[&str]) -> V
     calls
 }
 
+/// Parses DeepSeek V4 / V3.2 native `<｜DSML｜invoke name="...">` (or ASCII `<|DSML|invoke name="...">`)
+/// tool-call blocks when an upstream gateway forwards them inside `content` instead of `tool_calls`.
+pub(crate) fn parse_dsml_tool_calls(text: &str, valid_names: &[&str]) -> Vec<ToolCall> {
+    let norm = text
+        .replace("｜", "|")
+        .replace("<|DSML| ", "<|DSML|")
+        .replace("</|DSML| ", "</|DSML|");
+    let mut calls = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(inv_rel) = norm[search_from..].find("<|DSML|invoke") {
+        let inv_start = search_from + inv_rel + "<|DSML|invoke".len();
+        let Some(gt_rel) = norm[inv_start..].find('>') else {
+            break;
+        };
+        let header = &norm[inv_start..inv_start + gt_rel];
+        let raw_name = header
+            .split("name=")
+            .nth(1)
+            .map(|s| {
+                let s = s.trim();
+                let quote = s.chars().next().unwrap_or('"');
+                if quote == '"' || quote == '\'' {
+                    s[1..].split(quote).next().unwrap_or("")
+                } else {
+                    s.split_whitespace().next().unwrap_or("")
+                }
+            })
+            .unwrap_or("")
+            .trim();
+        let body_start = inv_start + gt_rel + 1;
+        let Some(inv_end_rel) = norm[body_start..].find("</|DSML|invoke>") else {
+            break;
+        };
+        let inv_body = &norm[body_start..body_start + inv_end_rel];
+        search_from = body_start + inv_end_rel + "</|DSML|invoke>".len();
+
+        if !valid_names.contains(&raw_name) {
+            continue;
+        }
+        let mut params = serde_json::Map::new();
+        let mut p_from = 0usize;
+        while let Some(p_rel) = inv_body[p_from..].find("<|DSML|parameter") {
+            let p_hdr_start = p_from + p_rel + "<|DSML|parameter".len();
+            let Some(p_gt) = inv_body[p_hdr_start..].find('>') else {
+                break;
+            };
+            let p_hdr = &inv_body[p_hdr_start..p_hdr_start + p_gt];
+            let param_key = p_hdr
+                .split("name=")
+                .nth(1)
+                .map(|s| {
+                    let s = s.trim();
+                    let quote = s.chars().next().unwrap_or('"');
+                    if quote == '"' || quote == '\'' {
+                        s[1..].split(quote).next().unwrap_or("")
+                    } else {
+                        s.split_whitespace().next().unwrap_or("")
+                    }
+                })
+                .unwrap_or("")
+                .trim();
+            let v_start = p_hdr_start + p_gt + 1;
+            let Some(p_end) = inv_body[v_start..].find("</|DSML|parameter>") else {
+                break;
+            };
+            let raw_val = &inv_body[v_start..v_start + p_end];
+            if !param_key.is_empty() {
+                if matches!(
+                    param_key,
+                    "start_line" | "end_line" | "timeout_sec" | "limit" | "context"
+                ) {
+                    if let Ok(n) = raw_val.trim().parse::<u64>() {
+                        params.insert(param_key.to_string(), json!(n));
+                    } else {
+                        params.insert(param_key.to_string(), json!(raw_val));
+                    }
+                } else if matches!(param_key, "background" | "hidden") {
+                    if let Ok(b) = raw_val.trim().parse::<bool>() {
+                        params.insert(param_key.to_string(), json!(b));
+                    } else {
+                        params.insert(param_key.to_string(), json!(raw_val));
+                    }
+                } else {
+                    params.insert(param_key.to_string(), json!(raw_val));
+                }
+            }
+            p_from = v_start + p_end + "</|DSML|parameter>".len();
+        }
+        calls.push(ToolCall {
+            id: format!("dsml_call_{}", calls.len()),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: raw_name.to_string(),
+                arguments: Value::Object(params).to_string(),
+            },
+            thought_signature: None,
+        });
+    }
+    calls
+}
+
+/// Parses GLM-4 / GLM-5 `<tool_call>NAME\n<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>`
+/// inner body into a `ToolCall`.
+pub(crate) fn parse_glm_tool_call(
+    inner: &str,
+    idx: usize,
+    valid_names: &[&str],
+) -> Option<ToolCall> {
+    let key_pos = inner.find("<arg_key>")?;
+    let raw_name = inner[..key_pos].trim();
+    if !valid_names.contains(&raw_name) {
+        return None;
+    }
+    let mut params = serde_json::Map::new();
+    let mut p_from = key_pos;
+    while let Some(k_rel) = inner[p_from..].find("<arg_key>") {
+        let k_start = p_from + k_rel + "<arg_key>".len();
+        let k_end = k_start + inner[k_start..].find("</arg_key>")?;
+        let key = inner[k_start..k_end].trim();
+        let v_tag = k_end + "</arg_key>".len();
+        let v_rel = inner[v_tag..].find("<arg_value>")?;
+        let v_start = v_tag + v_rel + "<arg_value>".len();
+        let v_end = v_start + inner[v_start..].find("</arg_value>")?;
+        let val_raw = inner[v_start..v_end]
+            .strip_prefix('\n')
+            .unwrap_or(&inner[v_start..v_end]);
+        if matches!(
+            key,
+            "start_line" | "end_line" | "timeout_sec" | "limit" | "context"
+        ) {
+            if let Ok(n) = val_raw.trim().parse::<u64>() {
+                params.insert(key.to_string(), json!(n));
+            } else {
+                params.insert(key.to_string(), json!(val_raw));
+            }
+        } else {
+            params.insert(key.to_string(), json!(val_raw));
+        }
+        p_from = v_end + "</arg_value>".len();
+    }
+    Some(ToolCall {
+        id: format!("glm_call_{}", idx),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: raw_name.to_string(),
+            arguments: Value::Object(params).to_string(),
+        },
+        thought_signature: None,
+    })
+}
+
+/// Parses MiniMax / Anthropic XML `<invoke name="NAME"><parameter name="K">V</parameter></invoke>` blocks.
+pub(crate) fn parse_invoke_xml_tool_calls(text: &str, valid_names: &[&str]) -> Vec<ToolCall> {
+    let promoted = text
+        .replace("<invoke ", "<|DSML|invoke ")
+        .replace("</invoke>", "</|DSML|invoke>")
+        .replace("<parameter ", "<|DSML|parameter ")
+        .replace("</parameter>", "</|DSML|parameter>");
+    parse_dsml_tool_calls(&promoted, valid_names)
+}
+
+/// Parses Kimi K2 `<|tool_call_begin|>functions.NAME:0<|tool_call_argument_begin|>{...}<|tool_call_end|>` blocks.
+pub(crate) fn parse_kimi_tool_calls(text: &str, valid_names: &[&str]) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(b_rel) = text[search_from..].find("<|tool_call_begin|>") {
+        let b_start = search_from + b_rel + "<|tool_call_begin|>".len();
+        let Some(arg_rel) = text[b_start..].find("<|tool_call_argument_begin|>") else {
+            break;
+        };
+        let raw_hdr = text[b_start..b_start + arg_rel].trim();
+        let no_prefix = raw_hdr.strip_prefix("functions.").unwrap_or(raw_hdr);
+        let raw_name = no_prefix.split(':').next().unwrap_or(no_prefix).trim();
+        let args_start = b_start + arg_rel + "<|tool_call_argument_begin|>".len();
+        let Some(end_rel) = text[args_start..].find("<|tool_call_end|>") else {
+            break;
+        };
+        let raw_args = text[args_start..args_start + end_rel].trim();
+        search_from = args_start + end_rel + "<|tool_call_end|>".len();
+        if !valid_names.contains(&raw_name) {
+            continue;
+        }
+        calls.push(ToolCall {
+            id: format!("kimi_call_{}", calls.len()),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: raw_name.to_string(),
+                arguments: if raw_args.is_empty() {
+                    "{}".to_string()
+                } else {
+                    raw_args.to_string()
+                },
+            },
+            thought_signature: None,
+        });
+    }
+    calls
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Native Anthropic Messages API (/v1/messages)
 // ─────────────────────────────────────────────────────────────────────────────
-
