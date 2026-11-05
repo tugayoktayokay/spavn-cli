@@ -105,9 +105,7 @@ pub(crate) fn intercept_shell_anti_pattern(cmd: &str) -> Option<String> {
         .unwrap_or(trimmed)
         .trim();
     let tokens: Vec<&str> = first_seg.split_whitespace().collect();
-    let Some(&bin) = tokens.first() else {
-        return None;
-    };
+    let bin = *tokens.first()?;
     match bin {
         "grep" | "egrep" | "fgrep" => {
             let is_recursive = tokens

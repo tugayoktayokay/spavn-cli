@@ -119,9 +119,15 @@ pub(crate) fn compact_messages_for_model(
     is_local: bool,
     max_ctx_tokens: usize,
 ) -> Vec<ChatMessage> {
-    let _ = max_ctx_tokens;
     let raw_tok = hud::estimate_messages_tokens(messages);
-    let prune_old_tools = raw_tok >= 16_000;
+    // Budget-relative, not a flat 16k: on a 200k cloud window the old constant pruned evidence
+    // far too early, and on an 8k local window it never fired at all.
+    let prune_budget = if max_ctx_tokens == 0 {
+        16_000
+    } else {
+        (max_ctx_tokens / 4).clamp(4_000, 64_000)
+    };
+    let prune_old_tools = raw_tok >= prune_budget;
     let len = messages.len();
     let last_user_idx = messages
         .iter()
@@ -353,7 +359,15 @@ pub(crate) fn run_agent_turn(
         &ctx.default_host,
         quota_badge.unwrap_or("aktif"),
     );
-    let tools_spec = tools::tool_definitions_for_phase(ctx.phase);
+    // Non-local endpoints keep the full inventory; local ones get the core six plus whatever the
+    // turn's own prompt calls for (schema.rs). Built once per turn so the step prefix stays stable.
+    let turn_prompt = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.clone())
+        .unwrap_or_default();
+    let tools_spec = tools::tool_definitions_for_turn(ctx.phase, endpoint.is_local(), &turn_prompt);
     let mut last_tool_sig = String::new();
     let mut repeat_count = 0usize;
     let mut unverified_edits = false;
@@ -437,9 +451,7 @@ pub(crate) fn run_agent_turn(
             compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
         let mut view_tok = hud::estimate_messages_tokens(&view_messages);
         let effective_tok = view_tok.max(last_observed_total_tokens);
-        let is_free_or_flash = step_endpoint.model.contains("free")
-            || step_endpoint.model.contains("flash")
-            || step_endpoint.key.contains("free");
+        let is_free_or_flash = step_endpoint.is_low_cost_tier();
         let token_cap = if is_free_or_flash { 48_000 } else { 120_000 };
         let compact_threshold = ((max_ctx_tokens * 80) / 100).min(token_cap);
         if (effective_tok >= compact_threshold || messages.len() > 96) && messages.len() > 6 {

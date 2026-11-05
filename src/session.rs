@@ -270,6 +270,10 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionSummary> {
 /// Headroom for the tool-card header summary (`╭─ ⚡ bash [local] …`).
 pub const SUMMARY_MAX_CHARS: usize = 80;
 
+/// Above this many messages the semantic (LLM) compaction would have to ship a transcript so
+/// long that the summarization round-trip costs more than the context it reclaims.
+pub const LLM_COMPACT_MAX_MESSAGES: usize = 80;
+
 /// Squeezes one summary into a single display line.
 ///
 /// Heredocs, `&&` chains and multi-line regexes all reach us as one argument string, so a
@@ -552,8 +556,23 @@ pub fn perform_manual_compact(
         // is requested). On local models (`endpoint.is_local()`) during auto-compact, skip the LLM
         // summarization round-trip so we never flush the local KV-cache or stall for 20-30s.
         let mut llm_summary: Option<String> = None;
+        let transcript_too_long = messages.len() > LLM_COMPACT_MAX_MESSAGES;
         let use_llm_compact = focus.is_some()
-            || (!endpoint.is_local() && !endpoint.model.contains("free") && messages.len() <= 80);
+            || (!endpoint.is_local() && !endpoint.is_low_cost_tier() && !transcript_too_long);
+        // Never downgrade silently: the template path is markedly coarser than the LLM summary,
+        // and swapping it in without a word is what reads to the user as sudden amnesia.
+        if focus.is_none()
+            && !endpoint.is_local()
+            && !endpoint.is_low_cost_tier()
+            && transcript_too_long
+        {
+            println!(
+                "\n{}🗜️  Transkript {} mesaja ulaştı; LLM özeti atlandı, şablon özet kullanılıyor.{}",
+                DIM,
+                messages.len(),
+                RESET
+            );
+        }
         if !transcript_lines.is_empty() && use_llm_compact {
             let mut spin = LiveSpinner::start(tr_en(
                 "🗜️  Bağlam LLM ile anlamsal olarak özetleniyor",
