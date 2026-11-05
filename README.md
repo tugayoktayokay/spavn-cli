@@ -121,19 +121,22 @@ Four bets, each visible in the source rather than the marketing:
 
 ## ⬇️ Install
 
-Four ways in. Pick one.
-
 | Channel | Command | Updates via |
 | :--- | :--- | :--- |
-| **Homebrew** (macOS, Linux) | `brew install tugayoktayokay/tap/spavn` | `brew upgrade` |
-| **Install script** | `curl … \| sh` | re-run it |
-| **crates.io** | `cargo install spavn` | `cargo install --force` |
+| **Install script** | `curl -fsSL https://spavn.dev/install.sh \| sh` | re-run it |
+| **Homebrew** (macOS, Linux) | `brew install tugayoktayokay/tap/spavn` | `brew upgrade spavn` |
+| **Cargo (git)** | `cargo install --git https://github.com/tugayoktayokay/spavn-cli` | re-run it |
+| **crates.io** | `cargo install spavn` | `cargo install --force spavn` |
 | **Archive / source** | release tarball, or `cargo build --release` | manual |
+
+`spavn --version` answers `spavn v0.1.0 (macos/aarch64)`. `/update` then tells you when a newer tag
+exists and prints the upgrade command that matches **the channel you installed from** — `brew upgrade`
+for a Homebrew install, `cargo install --force` for a cargo one, the script otherwise.
 
 ### 1️⃣ One line (macOS, Linux)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/install.sh | sh
+curl -fsSL https://spavn.dev/install.sh | sh
 ```
 
 Lands in `$HOME/.local/bin/spavn` plus the `spvn` alias, and **executes the binary once** to prove `execve` works — a killed-on-launch download fails loudly instead of silently.
@@ -142,14 +145,27 @@ Lands in `$HOME/.local/bin/spavn` plus the `spvn` alias, and **executes the bina
 SPAVN_INSTALL_DIR=/usr/local/bin sh install.sh   # override target dir
 ```
 
-### 2️⃣ Cargo
+### 2️⃣ Homebrew
 
 ```sh
-cargo install spavn                                  # from crates.io
-cargo install --git https://github.com/tugayoktayokay/spavn-cli   # track main
+brew install tugayoktayokay/tap/spavn
+brew upgrade spavn          # later
 ```
 
-### 3️⃣ Prebuilt archive
+The tap lives in [`tugayoktayokay/homebrew-tap`](https://github.com/tugayoktayokay/homebrew-tap). The
+formula is generated, never hand-edited: `sh packaging/homebrew/sync-tap.sh <version>` re-downloads
+each sidecar checksum, rewrites the formula, and commits it to the tap checkout.
+
+### 3️⃣ Cargo
+
+```sh
+cargo install --git https://github.com/tugayoktayokay/spavn-cli   # tracks main, no release needed
+cargo install spavn                                              # crates.io, once published
+```
+
+`cargo install` produces `spavn` only; the `spvn` alias comes from the install script and the formula.
+
+### 4️⃣ Prebuilt archive
 
 From [Releases](https://github.com/tugayoktayokay/spavn-cli/releases): `tar.gz` for the four Unix targets, `.zip` for Windows, **SHA-256 sidecar on every `v*` tag**.
 
@@ -158,7 +174,7 @@ gh release download --repo tugayoktayokay/spavn-cli --pattern '*x86_64-apple-dar
 shasum -a 256 -c ./*.sha256
 ```
 
-### 4️⃣ From source
+### 5️⃣ From source
 
 ```sh
 git clone https://github.com/tugayoktayokay/spavn-cli && cd spavn-cli

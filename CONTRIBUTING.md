@@ -47,9 +47,14 @@ git commit -am "chore(release): v0.1.1" && git tag v0.1.1 && git push --tags
 # 3. crates.io (needs a token in ~/.cargo/credentials.toml)
 cargo publish
 
-# 4. Homebrew: refresh the three sha256 values in packaging/homebrew/Formula/spavn.rb
-#    from the release's .sha256 assets, then push the file to the tap repo.
+# 4. Homebrew: the release workflow does this for you once TAP_GITHUB_TOKEN is set.
+#    Without the secret, run it by hand against a tap checkout:
+sh packaging/homebrew/sync-tap.sh 0.1.1 /path/to/homebrew-tap
 ```
+
+`sync-tap.sh` downloads each `*.sha256` sidecar, rewrites the formula and commits it, and exits
+non-zero when a hard platform archive is missing — a formula never points at a URL that 404s.
+The tap workflow is a no-op (not a failure) when `TAP_GITHUB_TOKEN` is unset.
 
 `cargo publish` must run **after** the tag pushes cleanly, so the crate's `repository` and the
 README images point at a release that exists.
