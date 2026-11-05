@@ -2,6 +2,12 @@
 
 ## 2026-11-05 — Sürüm denetimi, crates.io & Homebrew paketleme
 
+### Dağıtım kanalları
+- **`spavn.dev/install.sh` canlı sunucuda bayattı**: sitede 04 Kasım'dan kalma 1794 baytlık eski betik duruyordu (atomik `mv` + ad-hoc imza düzeltmesi ve `SPAVN_LOCAL_BIN` desteği yoktu). Repodaki 3204 baytlık sürüm `telya-server:/var/www/spavn.dev/install.sh` üzerine yazıldı (yedek: `install.sh.bak-20261105-183612`); `curl -fsSL https://spavn.dev/install.sh | sh` uçtan uca doğrulandı.
+- **Homebrew tap yayında**: `tugayoktayokay/homebrew-tap` açıldı; `brew install tugayoktayokay/tap/spavn` artık gerçek. Formül elle yazılmıyor: `packaging/homebrew/sync-tap.sh <sürüm> [tap-yolu]` sidecar SHA-256'ları indirip formülü yeniden yazar, tap'e commit eder. Linux arm64 bloğu yalnızca o tag'de arşiv varsa üretilir (`# BEGIN/END linux-arm` bölgesi betiğin sahipliğinde).
+- **Release workflow**: `TAP_GITHUB_TOKEN` tanımlıysa tag sonrası formülü tap'e otomatik iter; tanımlı değilse iş sessizce atlanır, release kırılmaz.
+- Üç indirme kanalının SHA-256'sı arşivlerle karşılaştırıldı: üçü de eşleşti.
+
 ### Sürüm denetimi (`update.rs`, `hud/mod.rs`, `slash_commands.rs`, `main.rs`)
 - **Otomatik güncelleme uyarısı**: Açılışta `updateCheckIntervalHours` (varsayılan 24 saat) aralığıyla tek bir arka plan `GET` yapılır; yeni sürüm varsa karşılama banner'ında `⬆️ YENİ SÜRÜM VAR` kutusu ve **çalıştırılacak komut** yazılır. Hiçbir şey indirilmez veya çalıştırılmaz.
 - **Oturum içi uyarı**: Denetim açılıştan sonra biterse sonuç `PENDING_NOTICE`'a park edilir; giriş döngüsü bir sonraki turunda dock'u silip uyarıyı temiz satıra basar. Aynı sürüm iki kez duyurulmaz (`should_park`).
