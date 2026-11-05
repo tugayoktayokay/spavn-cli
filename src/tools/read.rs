@@ -1,0 +1,491 @@
+use super::*;
+
+pub(crate) fn is_structural_outline_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let indent = line.len().saturating_sub(trimmed.len());
+    if indent > 8 || trimmed.starts_with("//") || trimmed.starts_with('#') {
+        return false;
+    }
+    const PREFIXES: &[&str] = &[
+        "pub fn ",
+        "pub async fn ",
+        "pub const fn ",
+        "pub unsafe fn ",
+        "pub(crate) fn ",
+        "pub(crate) async fn ",
+        "pub(crate) const fn ",
+        "pub(super) fn ",
+        "fn ",
+        "async fn ",
+        "const fn ",
+        "unsafe fn ",
+        "pub struct ",
+        "pub(crate) struct ",
+        "struct ",
+        "pub enum ",
+        "pub(crate) enum ",
+        "enum ",
+        "pub trait ",
+        "pub(crate) trait ",
+        "trait ",
+        "impl ",
+        "impl<",
+        "pub type ",
+        "pub(crate) type ",
+        "pub mod ",
+        "mod ",
+        "def ",
+        "async def ",
+        "class ",
+        "export function ",
+        "export async function ",
+        "export default function ",
+        "export class ",
+        "export interface ",
+        "export type ",
+        "function ",
+        "interface ",
+    ];
+    PREFIXES.iter().any(|p| trimmed.starts_with(p))
+}
+
+/// One `N-M` (or bare `N`) span from a `path:N-M,K-L` selector.
+pub(crate) type LineSpan = (usize, usize);
+
+/// Parses `N-M`, `N`, `L12-L40`, or a comma-separated list of those.
+///
+/// Returns `None` when `suffix` is not purely line ranges, so callers can fall back to
+/// treating the whole argument as a path (e.g. `~/x:y.rs` on a remote host).
+pub(crate) fn parse_line_spans(suffix: &str) -> Option<Vec<LineSpan>> {
+    let mut spans = Vec::new();
+    for part in suffix.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        let part = part.strip_prefix('L').unwrap_or(part);
+        if let Some((s_str, e_str)) = part.split_once('-') {
+            let e_str = e_str.strip_prefix('L').unwrap_or(e_str);
+            let s = s_str.trim().parse::<usize>().ok()?;
+            let e = e_str.trim().parse::<usize>().ok()?;
+            spans.push((s, e));
+        } else {
+            let n = part.parse::<usize>().ok()?;
+            spans.push((n, n));
+        }
+    }
+    if spans.is_empty() {
+        None
+    } else {
+        Some(spans)
+    }
+}
+
+/// Parses the `:ranges` tail of a read selector into merged, ordered spans.
+///
+/// A bare `N` expands to `N..N+120` (rg-style peek) *only* when it is the sole span; inside a
+/// multi-range list it means exactly line `N`, so `path:5,90` does not silently swallow 120
+/// lines twice.
+pub(crate) fn expand_line_spans(spans: Vec<LineSpan>) -> Vec<LineSpan> {
+    let single = spans.len() == 1;
+    let mut out: Vec<LineSpan> = spans
+        .into_iter()
+        .map(|(s, e)| {
+            if single && s == e {
+                (s, s + 120)
+            } else {
+                (s.min(e), s.max(e))
+            }
+        })
+        .collect();
+    out.sort_by_key(|(s, _)| *s);
+    let mut merged: Vec<LineSpan> = Vec::with_capacity(out.len());
+    for (s, e) in out {
+        match merged.last_mut() {
+            // Overlapping or touching spans read as one continuous block.
+            Some((_, prev_e)) if s <= prev_e.saturating_add(1) => {
+                *prev_e = (*prev_e).max(e);
+            }
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
+/// Splits `path:ranges` into the path and the merged, ordered spans.
+///
+/// `read` accepts the shape people already type at `sed -n`: several disjoint regions of one
+/// file in a single call (`src/x.rs:1-12,640-665`). Without it every multi-region look costs
+/// an extra `bash sed` round trip — measured at 53% of all file inspection.
+pub(crate) fn split_inline_line_spans(raw: &str) -> (&str, Option<Vec<LineSpan>>) {
+    if Path::new(raw).exists() || expand_tilde(raw).exists() {
+        return (raw, None);
+    }
+    if let Some((base, suffix)) = raw.rsplit_once(':') {
+        let is_bare_ssh_host = !base.contains(':') && split_remote_prefix(raw).is_some();
+        if !base.is_empty() && !base.ends_with(':') && !is_bare_ssh_host {
+            if let Some(spans) = parse_line_spans(suffix) {
+                return (base, Some(expand_line_spans(spans)));
+            }
+            // rg-style `path:line:col`: the base itself ends with `:line`.
+            if let Some((inner_base, line_str)) = base.rsplit_once(':') {
+                if !inner_base.is_empty() && !inner_base.ends_with(':') {
+                    if let Ok(line_no) = line_str.parse::<usize>() {
+                        return (inner_base, Some(vec![(line_no, line_no + 120)]));
+                    }
+                }
+            }
+        }
+    }
+    (raw, None)
+}
+
+/// Renders several disjoint regions of `content` in one block, the way `sed -n 'a,b;c,d'`
+/// does — but with absolute line numbers and an explicit gap marker per jump.
+pub(crate) fn format_spans(content: &str, spans: &[LineSpan]) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return "[EOF STOP: File is empty (0 lines).]\n".to_string();
+    }
+    let budget: usize = 250;
+    let mut out = String::new();
+    let mut printed = 0usize;
+    let mut shown_any = false;
+    for &(s, e) in spans {
+        let s = s.max(1);
+        if s > total {
+            out.push_str(&format!(
+                "... [requested {}-{} is past EOF ({} lines)] ...\n",
+                s, e, total
+            ));
+            continue;
+        }
+        let e = e.min(total);
+        let take = (e - s + 1).min(budget.saturating_sub(printed).max(1));
+        if shown_any {
+            out.push_str(&format!("... [jump to line {}] ...\n", s));
+        }
+        for (i, line) in lines[(s - 1)..(s - 1 + take)].iter().enumerate() {
+            out.push_str(&format!("{:>4}: {}\n", s + i, line));
+        }
+        printed += take;
+        shown_any = true;
+        if take < e - s + 1 {
+            out.push_str(&format!(
+                "... [{} lines elided; {} line budget reached] ...\n",
+                (e - s + 1) - take,
+                budget
+            ));
+        }
+    }
+    if !shown_any {
+        return format!(
+            "(File has {} lines; none of the requested ranges exist)\n",
+            total
+        );
+    }
+    out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
+    out
+}
+
+pub(crate) fn format_lines(content: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let s = start_line.unwrap_or(1).max(1);
+    if s > total {
+        return format!(
+            "[EOF STOP: File only has {} lines total (1..{}). Requested start_line={} is past EOF — STOP calling read on this file!]",
+            total, total, s
+        );
+    }
+    let default_end = if start_line.is_some() {
+        (s + 199).min(total)
+    } else {
+        total
+    };
+    let e = end_line.unwrap_or(default_end).min(s + 249).min(total);
+    if s > e {
+        return format!(
+            "(File has {} lines; requested range {}..{} is empty)",
+            total, s, e
+        );
+    }
+
+    let slice = &lines[(s - 1)..e];
+    if total > 240 && start_line.is_none() && end_line.is_none() {
+        let mut out = String::new();
+        for (i, line) in lines.iter().take(100).enumerate() {
+            out.push_str(&format!("{:>4}: {}\n", i + 1, line));
+        }
+        let mid_end = total.saturating_sub(60);
+        out.push_str(&format!(
+            "\n... [SPAVN Structural Outline of lines 101..{} ({} total lines) — pass start_line/end_line or path:N-M to read exact function body] ...\n",
+            mid_end, total
+        ));
+        let mut collected_syms: Vec<(usize, &str)> = Vec::new();
+        for (idx, line) in lines.iter().enumerate().take(mid_end).skip(100) {
+            if is_structural_outline_line(line) {
+                collected_syms.push((idx + 1, line));
+            }
+        }
+        let max_syms = 120usize;
+        if collected_syms.len() <= max_syms {
+            for (line_no, line) in collected_syms {
+                out.push_str(&format!("{:>4}: {}\n", line_no, line));
+            }
+        } else {
+            let total_syms = collected_syms.len();
+            for (i, (line_no, line)) in collected_syms.iter().enumerate() {
+                if i < 90 || i + 25 >= total_syms {
+                    out.push_str(&format!("{:>4}: {}\n", line_no, line));
+                } else if i == 90 {
+                    out.push_str(&format!(
+                        "  .. [{} middle symbols elided] ..\n",
+                        total_syms.saturating_sub(115)
+                    ));
+                }
+            }
+        }
+        out.push_str("... [End of Structural Outline; showing final 60 lines] ...\n\n");
+        for (i, line) in lines.iter().enumerate().skip(mid_end) {
+            out.push_str(&format!("{:>4}: {}\n", i + 1, line));
+        }
+        out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
+        return out;
+    }
+
+    let mut out = String::new();
+    for (i, line) in slice.iter().enumerate() {
+        out.push_str(&format!("{:>4}: {}\n", s + i, line));
+    }
+    if e == total {
+        out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
+    } else if s == 1 && total > e + 30 {
+        let tail_start = total.saturating_sub(15).max(e);
+        out.push_str(&format!(
+            "... [Showing lines 1..{} of {} total; Structural Outline of {}..{} + final 15 lines below] ...\n",
+            e,
+            total,
+            e + 1,
+            tail_start
+        ));
+        for (idx, line) in lines.iter().enumerate().take(tail_start).skip(e) {
+            if is_structural_outline_line(line) {
+                out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+            }
+        }
+        out.push_str(&format!(
+            "... [Final lines {}..{}] ...\n",
+            tail_start + 1,
+            total
+        ));
+        for (idx, line) in lines.iter().enumerate().skip(tail_start) {
+            out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+        }
+        out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
+    } else {
+        out.push_str(&format!(
+            "... [Showing lines {}..{} of {} total]\n",
+            s, e, total
+        ));
+    }
+    out
+}
+
+pub(crate) fn get_str_alias<'a>(args: &'a Value, keys: &[&str]) -> &'a str {
+    for k in keys {
+        if let Some(s) = args.get(*k).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    ""
+}
+
+/// Guards context against accidental reads of compiled JS bundles (`dist/index.android.bundle`),
+/// source maps, or minified artifacts that blow up the context window and derail investigation.
+pub(crate) fn check_compiled_artifact_shield(raw_path: &str, content: &str) -> Option<String> {
+    let norm = raw_path.replace('\\', "/");
+    let lower = norm.to_ascii_lowercase();
+    let is_bundle_path = lower.ends_with(".bundle")
+        || lower.ends_with(".bundle.js")
+        || lower.ends_with(".min.js")
+        || lower.ends_with(".min.css")
+        || lower.ends_with(".js.map")
+        || lower.ends_with(".hbc")
+        || ((lower.contains("/dist/") || lower.contains("/build/"))
+            && (lower.ends_with(".js") || lower.ends_with(".cjs") || lower.ends_with(".mjs")));
+    let total_lines = content.lines().count();
+    let max_line_chars = content.lines().take(50).map(|l| l.len()).max().unwrap_or(0);
+    let is_minified_giant = content.len() > 200_000 && (total_lines > 8_000 || max_line_chars > 2_500);
+    if is_bundle_path && (content.len() > 60_000 || total_lines > 2_000 || max_line_chars > 1_500)
+        || is_minified_giant
+    {
+        let kb = content.len() / 1024;
+        return Some(format!(
+            "[SPAVN Artifact Shield: `{}` is a compiled/minified artifact ({} lines, {} KB). Reading compiled bundles wastes context and hides the real bug — inspect the source files under `src/` instead.]",
+            raw_path, total_lines, kb
+        ));
+    }
+    None
+}
+
+pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
+    let raw_input_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
+    let (raw_path, inline_spans) = split_inline_line_spans(raw_input_path);
+    let (inline_start, inline_end) = match inline_spans.as_deref() {
+        // A single span stays on the plain `start_line`/`end_line` path so the existing
+        // head+outline heuristics (and the re-read dedup key) keep working unchanged.
+        Some([(s, e)]) => (Some(*s), Some(*e)),
+        _ => (None, None),
+    };
+    if let Err(blocked) = ctx.enforce_path(raw_path, false, "read") {
+        return blocked;
+    }
+    let start_line = args
+        .get("start_line")
+        .or_else(|| args.get("offset"))
+        .or_else(|| args.get("start"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .or(inline_start);
+    let limit_lines = args
+        .get("limit")
+        .or_else(|| args.get("num_lines"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let end_line = args
+        .get("end_line")
+        .or_else(|| args.get("end"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .or_else(|| limit_lines.map(|lim| start_line.unwrap_or(1).max(1) + lim.saturating_sub(1)))
+        .or(inline_end);
+    if let Some((ssh_host, remote_path)) = split_remote_prefix(raw_path) {
+        let quoted = shell_quote_remote_path(remote_path);
+        let remote_cmd = format!(
+            "if [ -d {q} ]; then ls -1p {q} | head -n 200; else cat -- {q}; fi",
+            q = quoted
+        );
+        let out = Command::new("ssh")
+            .args(["-o", "ConnectTimeout=5", &ssh_host, &remote_cmd])
+            .output();
+        return match out {
+            Ok(o) if o.status.success() => {
+                format_lines(&String::from_utf8_lossy(&o.stdout), start_line, end_line)
+            }
+            Ok(o) => format!(
+                "Remote read error ({}): {}",
+                ssh_host,
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => format!("SSH error: {}", e),
+        };
+    }
+
+    let path = expand_tilde(raw_path);
+    if path.is_dir() {
+        let mut entries = Vec::new();
+        if let Ok(rd) = fs::read_dir(&path) {
+            for entry in rd.flatten().take(200) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                entries.push(if is_dir { format!("{}/", name) } else { name });
+            }
+        }
+        entries.sort();
+        return entries.join("\n");
+    }
+
+    let key = path.to_string_lossy().to_string();
+    if let Some(ext) = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+    {
+        let mime_opt = match ext.as_str() {
+            "png" => Some("image/png"),
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "webp" => Some("image/webp"),
+            "gif" => Some("image/gif"),
+            _ => None,
+        };
+        if let Some(mime) = mime_opt {
+            return match fs::read(&path) {
+                Ok(bytes) => {
+                    if bytes.len() > 15 * 1024 * 1024 {
+                        format!(
+                            "Read error ({}): image exceeds 15MB limit ({} bytes)",
+                            path.display(),
+                            bytes.len()
+                        )
+                    } else {
+                        let kb = (bytes.len() as f64 / 1024.0).max(0.1);
+                        let fname = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| raw_path.to_string());
+                        let b64 = crate::router::base64_encode_bytes(&bytes);
+                        let drag_img = crate::router::DraggedImage {
+                            raw_span: raw_path.to_string(),
+                            path: key.clone(),
+                            filename: fname.clone(),
+                            mime,
+                            size_bytes: bytes.len(),
+                            base64: b64,
+                        };
+                        crate::hud::render_inline_image_preview(&drag_img);
+                        crate::router::register_read_image(&key, drag_img);
+                        format!(
+                            "[SPAVN Vision Image Loaded: {} ({}, {:.1} KB) — multimodal image attached to your visual context]",
+                            key, mime, kb
+                        )
+                    }
+                }
+                Err(e) => {
+                    let hint = suggest_similar_path(raw_path);
+                    format!("Read error ({}): {}{}", path.display(), e, hint)
+                }
+            };
+        }
+    }
+    if let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
+        if let Some(&(prev_mtime, prev_s, prev_e, prev_step)) = ctx.read_ranges.get(&key) {
+            if prev_mtime == mtime
+                && prev_s == start_line
+                && prev_e == end_line
+                && ctx.tool_step_counter.saturating_sub(prev_step) <= 5
+            {
+                return format!(
+                    "[SPAVN Read Dedup: {} is unchanged on disk since your read {} step(s) ago. Its exact content is already in your context — refer to that earlier read result instead of re-reading.]",
+                    raw_path,
+                    ctx.tool_step_counter.saturating_sub(prev_step).max(1)
+                );
+            }
+        }
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            if let Some(shield_msg) = check_compiled_artifact_shield(raw_path, &content) {
+                return shield_msg;
+            }
+            ctx.record_file_mtime(raw_path);
+            if let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
+                ctx.read_ranges
+                    .insert(key, (mtime, start_line, end_line, ctx.tool_step_counter));
+            }
+            match inline_spans.as_deref() {
+                Some(spans) if spans.len() > 1 => format_spans(&content, spans),
+                _ => format_lines(&content, start_line, end_line),
+            }
+        }
+        Err(e) => {
+            let hint = suggest_similar_path(raw_path);
+            format!("Read error ({}): {}{}", path.display(), e, hint)
+        }
+    }
+}
+
