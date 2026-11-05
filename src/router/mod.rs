@@ -258,6 +258,14 @@ impl ModelEndpoint {
             || key.contains("small")
     }
 
+    /// True for the cheap/free tiers where long round-trips (LLM context compaction, rich
+    /// tool schemas) cost more than the tokens they save. Single source of truth: callers used
+    /// to substring-match `"free"` / `"flash"` on the model id in two different files.
+    pub fn is_low_cost_tier(&self) -> bool {
+        let key = self.model.to_lowercase();
+        key.contains("free") || key.contains("flash") || self.key.to_lowercase().contains("free")
+    }
+
     /// True when the endpoint speaks the native Anthropic Messages API
     /// (`/v1/messages`, `x-api-key`) rather than the OpenAI chat-completions
     /// protocol. Auto-detected from an `api.anthropic.com` base URL; the

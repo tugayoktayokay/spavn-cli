@@ -135,13 +135,17 @@ pub(crate) fn native_glob_fallback(
 ) -> String {
     let mut matches: Vec<String> = Vec::new();
     let mut hit_limit = false;
+    /// Immutable knobs shared by every level of the recursion.
+    struct WalkCfg<'a> {
+        pattern: &'a str,
+        limit: usize,
+        hidden: bool,
+    }
     fn walk(
         base: &Path,
         cur: &Path,
         depth: usize,
-        pattern: &str,
-        limit: usize,
-        hidden: bool,
+        cfg: &WalkCfg,
         out: &mut Vec<String>,
         hit_limit: &mut bool,
     ) {
@@ -162,12 +166,12 @@ pub(crate) fn native_glob_fallback(
             let p = entry.path();
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                if is_ignored_dir_name(&name, hidden) {
+                if is_ignored_dir_name(&name, cfg.hidden) {
                     continue;
                 }
-                walk(base, &p, depth + 1, pattern, limit, hidden, out, hit_limit);
+                walk(base, &p, depth + 1, cfg, out, hit_limit);
             } else {
-                if !hidden && name.starts_with('.') {
+                if !cfg.hidden && name.starts_with('.') {
                     continue;
                 }
                 let rel = p
@@ -175,8 +179,8 @@ pub(crate) fn native_glob_fallback(
                     .unwrap_or(&p)
                     .to_string_lossy()
                     .replace('\\', "/");
-                if glob_pattern_matches(pattern, &rel) {
-                    if out.len() >= limit {
+                if glob_pattern_matches(cfg.pattern, &rel) {
+                    if out.len() >= cfg.limit {
                         *hit_limit = true;
                         return;
                     }
@@ -194,16 +198,14 @@ pub(crate) fn native_glob_fallback(
             matches.push(root.to_string_lossy().to_string());
         }
     } else {
-        walk(
-            root,
-            root,
-            0,
+        let cfg = WalkCfg {
             pattern,
             limit,
             hidden,
-            &mut matches,
-            &mut hit_limit,
-        );
+        };
+        let mut st = (matches, hit_limit);
+        walk(root, root, 0, &cfg, &mut st.0, &mut st.1);
+        (matches, hit_limit) = st;
     }
     if matches.is_empty() {
         return format!("(no files match `{}` in {})", pattern, root.display());
