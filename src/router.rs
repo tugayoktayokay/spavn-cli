@@ -191,7 +191,10 @@ pub(crate) fn url_host(base_url: &str) -> String {
         .map(|(_, rest)| rest)
         .unwrap_or(base_url);
     let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or("");
-    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     let host = if let Some(rest) = host_port.strip_prefix('[') {
         // IPv6 literal: keep the brackets so `[::1]` stays unambiguous.
         match rest.split_once(']') {
@@ -199,7 +202,10 @@ pub(crate) fn url_host(base_url: &str) -> String {
             None => host_port,
         }
     } else {
-        host_port.split_once(':').map(|(h, _)| h).unwrap_or(host_port)
+        host_port
+            .split_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
     };
     host.to_lowercase()
 }
@@ -233,9 +239,11 @@ impl ModelEndpoint {
             return true;
         }
         let key = self.model.to_lowercase();
-        key.contains("flash") || key.contains("mini") || key.contains("haiku") || key.contains("small")
+        key.contains("flash")
+            || key.contains("mini")
+            || key.contains("haiku")
+            || key.contains("small")
     }
-
 
     /// True when the endpoint speaks the native Anthropic Messages API
     /// (`/v1/messages`, `x-api-key`) rather than the OpenAI chat-completions
@@ -936,7 +944,13 @@ where
             .header("Authorization", &auth_header)
             .header("api-key", &raw_api_key);
         if request_url.contains("opencode.ai") {
-            let sid = format!("ses_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+            let sid = format!(
+                "ses_{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
             req = req
                 .header("user-agent", "opencode/1.19.0 ai-sdk/provider-utils/4.0.23")
                 .header("x-opencode-client", "cli")

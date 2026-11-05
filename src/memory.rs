@@ -346,7 +346,11 @@ mod tests {
         let c = super::cached_system_prompt(".", false);
         assert_ne!(a, c);
         super::invalidate_system_prompt_cache();
-        assert_eq!(super::cached_system_prompt(".", true), a, "rebuild is deterministic");
+        assert_eq!(
+            super::cached_system_prompt(".", true),
+            a,
+            "rebuild is deterministic"
+        );
         super::invalidate_system_prompt_cache();
     }
 

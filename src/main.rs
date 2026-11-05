@@ -679,8 +679,7 @@ fn run_agent_turn(
 
                 let summary_for_task =
                     summarize_tool_args(&tool_name, &tc.function.arguments, &ctx.default_host);
-                let progress_target =
-                    tool_progress_target(&tool_name, &tc.function.arguments);
+                let progress_target = tool_progress_target(&tool_name, &tc.function.arguments);
                 let mut batched_ms: Option<u128> = None;
                 let (mut tool_output, tool_ms) = if quiet {
                     let t0 = std::time::Instant::now();
@@ -732,7 +731,10 @@ fn run_agent_turn(
                         tool_spinner.stop();
                         res
                     };
-                    (out, batched_ms.unwrap_or_else(|| tool_started.elapsed().as_millis()))
+                    (
+                        out,
+                        batched_ms.unwrap_or_else(|| tool_started.elapsed().as_millis()),
+                    )
                 };
 
                 if ctx.phase == AgentPhase::Code
@@ -828,11 +830,7 @@ fn run_agent_turn(
                         !is_err_tool,
                         // Only echo the output when the body is empty: otherwise the preview
                         // would just repeat the first rail row the reader already sees.
-                        if body.is_empty() {
-                            &preview_line
-                        } else {
-                            ""
-                        },
+                        if body.is_empty() { &preview_line } else { "" },
                         // A diff body is the visible change, not the one-line executor result:
                         // counting `Successfully …` as "1 line" under five drawn rows lies.
                         if is_diff_body {
@@ -1153,6 +1151,7 @@ fn main() {
                      \x20 -c, --continue              Continue latest session\n\
                      \x20 -r, --resume                Interactive session picker\n\
                      \x20 -i, --interactive           Start interactive TUI after initial prompt\n\
+                     \x20 -p, --prompt <text>         Explicit prompt (same as a positional argument)\n\
                      \x20 -t, --think                 Toggle thinking stream display\n\
                      \x20 -q, --quiet                 Quiet/headless output mode\n\
                      \x20 -j, --json                  Structured JSON output mode\n\
@@ -1219,7 +1218,8 @@ fn main() {
             pair
         } else {
             let p = new_session_path();
-            let sys = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
+            let sys =
+                ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
             append_message(&p, &sys);
             (p, vec![sys])
         }
@@ -1230,13 +1230,17 @@ fn main() {
                 (path, loaded)
             } else {
                 let p = new_session_path();
-                let sys = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
+                let sys = ChatMessage::system(cached_system_prompt(
+                    &cwd,
+                    endpoint.wants_compact_prompt(),
+                ));
                 append_message(&p, &sys);
                 (p, vec![sys])
             }
         } else {
             let p = new_session_path();
-            let sys = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
+            let sys =
+                ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
             append_message(&p, &sys);
             (p, vec![sys])
         }
@@ -1365,7 +1369,10 @@ fn main() {
         if let Some(new_model_key) = hud::interactive_provider_login(None) {
             endpoint = resolve_endpoint(&new_model_key);
             if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
-                *first = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
+                *first = ChatMessage::system(cached_system_prompt(
+                    &cwd,
+                    endpoint.wants_compact_prompt(),
+                ));
                 rewrite_session(&session_file, &messages);
             }
         }
@@ -1388,7 +1395,10 @@ fn main() {
                     .to_string();
                 messages = loaded;
                 if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
-                    *first = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
+                    *first = ChatMessage::system(cached_system_prompt(
+                        &cwd,
+                        endpoint.wants_compact_prompt(),
+                    ));
                 }
                 hud::render_session_resume_preview(&session_file, &messages);
             }

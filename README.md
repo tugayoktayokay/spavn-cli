@@ -16,8 +16,8 @@ $ spavn "audit src/guard.rs, then write the missing regression tests"
 
 | | |
 | --- | --- |
-| **One binary** | `cargo build --release` produces a single ~3 MB executable. Nothing to install alongside it. |
-| **Local-first** | LM Studio, Ollama, llama.cpp, vLLM and anything OpenAI-compatible are first-class endpoints, discovered automatically. |
+| **One binary** | `cargo build --release` produces a single ~4 MB executable. Nothing to install alongside it. |
+| **Local-first** | Ollama and LM Studio are built-in providers; any OpenAI-compatible `/v1/models` endpoint you point at becomes a model list. |
 | **Guarded, not just prompted** | Permission and phase gates are enforced in the tool layer, not by asking the model nicely. |
 | **Boring dependencies** | `serde`, `serde_json`, `ureq` (+ rustls). No tokio, no ratatui, no crossterm, no reqwest. |
 | **Everything on disk** | Sessions are JSONL, tool output spills to files, and every AI action lands in an HMAC-chained audit log. |
@@ -28,8 +28,8 @@ $ spavn "audit src/guard.rs, then write the missing regression tests"
 
 - **macOS** (aarch64, x86_64) or **Linux** (x86_64, aarch64). The TUI uses `termios`; Windows builds exist in the release matrix but are untested.
 - **Rust stable**, edition 2021, to build from source.
-- **`rg`** on `PATH` for the `search` tool (falls back to a built-in scanner).
-- Optional: `ssh` for remote host targets, `git` for `/diff` and `/commit`, `node`/`python3` for quota and memory helper scripts.
+- **`rg`** on `PATH` for the `search` tool. Remote targets fall back to `grep -rn`, local ones do not.
+- Optional: `ssh` for remote host targets, `git` for `/diff` and `/commit`, whatever interpreter your quota and memory helper scripts need.
 
 ---
 
@@ -67,21 +67,28 @@ spavn -r                    # interactive session picker
 ### Against a local model
 
 ```sh
-# LM Studio (default probe: http://localhost:1234/v1)
-# Ollama (default probe: http://localhost:11434/v1)
-# llama.cpp server, vLLM, text-generation-webui — any OpenAI-compatible /v1
-spavn --model local/qwen3-coder "refactor the spill module"
+# Built-in Ollama provider (http://127.0.0.1:11434/v1) — works with zero config
+spavn --model ollama:qwen2.5-coder "refactor the spill module"
+
+# Any other OpenAI-compatible server: point discovery at its /v1 root once
+#   LM Studio     http://localhost:1234/v1
+#   llama.cpp     http://localhost:8080/v1
+#   vLLM          http://localhost:8000/v1
+export SPAVN_LOCAL_MODELS_URL=http://localhost:1234/v1
+spavn --model local "refactor the spill module"
 ```
 
-Local endpoints are probed through `local_discovery_url` (or `SPAVN_LOCAL_MODELS_URL`); no API
-key is required and no request ever leaves the machine.
+`local` and `local:<model-id>` resolve against `local_discovery_url`; `local_base_url` pins the
+base URL when the server does not expose `/v1/models`. No API key is sent and nothing leaves the
+machine.
 
 ### Against a hosted model
 
 ```sh
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
-spavn --model claude-sonnet-4.6 "write the migration"
+spavn --model sonnet "write the migration"    # short aliases resolve per provider
+spavn --model gpt-5.4 "write the migration"
 ```
 
 Inside the TUI, `/login`, `/byok`, and `/models` handle keys and base URLs without touching a
@@ -118,8 +125,8 @@ Endpoint resolution is layered; the first hit wins:
 
 1. **Explicit key** — `--model <key>`, `SPAVN_MODEL`, or `default_model` in config.
 2. **User providers** — `providers[]` in `~/.spavn/config.json`, including quota-pooled gateways (`quota_quick_script` / `quota_full_script`).
-3. **Built-in catalog** — OpenAI, Anthropic, Gemini, DeepSeek, Groq, xAI, OpenRouter, GLM, MiniMax, plus local probes.
-4. **Local discovery** — `GET /v1/models` against every `local_discovery_url`; found models become `local/<id>`.
+3. **Built-in catalog** — OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, MiniMax, GLM, Groq, xAI, Microsoft GitHub, OpenCode Zen, and Ollama. Short aliases (`sonnet`, `opus`) resolve inside their provider.
+4. **Local discovery** — `GET /v1/models` against `local_discovery_url`; `local` picks the loaded model, `local:<id>` pins one.
 5. **Fallback** — an env-only endpoint from `SPAVN_BASE_URL` + `SPAVN_API_KEY`.
 
 Two wire protocols are supported:
@@ -140,18 +147,21 @@ derived from `- [ ]` checklist lines, a context-budget meter, and the current mo
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Send. While a turn is running, the message is queued as a live steer. |
+| `Enter` | Submit. While a turn is running, the line is queued or steered live, per `busy_input_mode`. |
 | `Esc` | Cancel the running turn, or close the open menu. |
-| `Tab` | Cycle the input mode. |
+| `Tab` | Accept the highlighted `/command` or `@file` suggestion; press again to cycle. |
 | `Shift+Tab` | Cycle access mode (`safe` → `auto` → `sovereign`). |
 | `\` | Toggle phase (`plan` ↔ `code`) — only when the input is empty. |
 | `↑` | Recall a queued message for editing. |
 | `Ctrl+X` | Drop the newest queued message. |
 | `Ctrl+U` | Clear the input. |
-| `Ctrl+W` | Delete the previous word. |
+| `Ctrl+W` | Delete the previous word (or the selection). |
 | `Ctrl+K` | Delete from the cursor to the end of the input. |
+| `Ctrl+S` | Open the skill picker. |
+| `Ctrl+R` | Reload prompt, config, and skills. |
 | `Shift+←` / `Shift+→` | Extend or shrink the selection. |
-| `Ctrl+C`, `Ctrl+Q` | Leave the input loop. `Ctrl+D` exits when the buffer is empty. |
+| `Ctrl+C` | Clear the input; exits when it is already empty. |
+| `Ctrl+Q` | Leave the input loop. `Ctrl+D` exits when the buffer is empty. |
 
 Rendered tool output uses diff cards: the header carries `path (+added -removed)`, the body is a
 block-coloured hunk with a per-block line-number gutter, and elisions collapse to `⋯`.
@@ -167,7 +177,7 @@ block-coloured hunk with a per-block line-number gutter, and elisions collapse t
 | `/models` | List every resolvable endpoint. |
 | `/bench [model]` | TTFT, tokens/s, and a tool-call round trip against the active or named model. |
 | `/byok`, `/b`, `/keys` | Manage API keys and custom base URLs. |
-| `/login`, `/provider`, `/connect` | Provider login: CLI auth, browser flow, or local server. |
+| `/login`, `/provider`, `/connect`, `/auth` | Provider login: CLI auth, browser flow, or local server. |
 | `/access`, `/a` | Change access mode. |
 | `/plan`, `/code`, `/act` | Switch phase. |
 | `/role` | Expertise role: Auto, Coder, Reviewer, Security, Test, Docs, Refactor. |
@@ -184,13 +194,14 @@ block-coloured hunk with a per-block line-number gutter, and elisions collapse t
 | `/goal <text>`, `/goals`, `/goal done <n>` | Track project goals. |
 | `/todo`, `/tasks` | Live task list; `- [ ]` lines in the model's text drive the progress bar. |
 | `/undo`, `/u` | Restore the last `write`/`edit` snapshot. |
-| `/review`, `/refactor`, `/security`, `/test`, `/docs` | Prompt shortcuts for a focused pass. |
+| `review <target>`, `/refactor <target>`, `/security <target>`, `/test <target>`, `/docs <target>` | Switch to that role and dispatch a focused pass over the given target. |
 | `/think`, `/t` | Toggle reasoning display. |
 | `/skill`, `/skills` | List, add, show, or remove skills. |
 | `/host`, `/tmp` | Target host and scratch paths. |
+| `/fleet`, `/f` | Parallel reachability and uptime sweep over every configured host. |
 | `/quota` | Provider quota state. |
 | `/reload`, `/r`, `/rb` | Live reload of the core prompt, config, and skills. |
-| `/lang`, `/dil`, `/tr`, `/en` | UI language. |
+| `/lang`, `/language`, `/dil`, `/tr`, `/en` | UI language. |
 | `/clear` | Clear the transcript (the session file keeps its history). |
 | `/exit`, `/quit`, `/x` | Leave the TUI. |
 
@@ -219,8 +230,8 @@ The task bar in the dock is not a tool: it tracks the `- [ ]` checklist items th
 into its own text, so progress advances as steps are completed without an extra round trip.
 
 Oversized `bash` output is truncated in the middle for the context window, but the dropped bytes
-are spilled to `~/.spavn/tool-output/` (bounded size, pruned) so the model can page them back in
-instead of re-running the command.
+are spilled to `~/.spavn/tool-output/` so the model can page them back in instead of re-running
+the command. Spills are capped at 8 MiB each, `0600`, and the 40 newest are kept.
 
 ### Parallel tool calls
 
@@ -283,11 +294,12 @@ non-local alias is never silently trusted.
 
 ```json
 {
-  "default_model": "local/qwen3-coder",
-  "lang": "en",
+  "default_model": "local",
+  "fallback_cloud_model": "sonnet",
+  "language": "en",
+  "busy_input_mode": "queue",
   "local_discovery_url": "http://localhost:1234/v1",
   "local_base_url": null,
-  "shell": null,
   "protected_paths": ["~/Documents/important"],
   "allowed_paths": ["~/work"],
   "quota_quick_script": null,
@@ -301,10 +313,12 @@ non-local alias is never silently trusted.
       "base_url": "https://gateway.internal/v1",
       "api_key_env": "WORK_API_KEY",
       "is_local": false,
+      "protocol": null,
+      "context_window": 200000,
       "models": [
         {
           "key": "work/sonnet",
-          "model_id": "claude-sonnet-4.6",
+          "model_id": "claude-sonnet-4-6",
           "label": "Sonnet (gateway)",
           "badge": "GW",
           "desc": "Internal gateway",
@@ -314,7 +328,13 @@ non-local alias is never silently trusted.
     }
   ],
   "hosts": [
-    { "alias": "buildbox", "ssh_target": "build@10.0.0.5", "workdir": "/srv/app" }
+    {
+      "key": "buildbox",
+      "ssh_target": "build@10.0.0.5",
+      "badge": "BB",
+      "desc": "Build server",
+      "sensitive": true
+    }
   ],
   "mcpServers": {
     "memory": { "command": "noospire-memory", "args": ["--stdio"], "readOnly": true },
@@ -326,16 +346,21 @@ non-local alias is never silently trusted.
 | Field | Meaning |
 | --- | --- |
 | `default_model` | Endpoint key used when `--model` and `SPAVN_MODEL` are absent. |
-| `lang` | `en` or `tr`. |
+| `fallback_cloud_model` | Endpoint tried when the default one fails to resolve. |
+| `language` | `en` or `tr` — the UI language, same as `/lang`. |
+| `busy_input_mode` | `queue` (default) or `steer`: what `Enter` does while a turn is running. |
 | `local_discovery_url` | OpenAI-compatible `/v1` URL probed for local models. |
-| `local_base_url` | Forces one base URL for `local/*` keys. |
-| `shell` | Shell used by the `bash` tool (defaults to `$SHELL`, then `sh`). |
+| `local_base_url` | Pins the base URL for `local` / `local:<id>` keys. |
 | `protected_paths` / `allowed_paths` | Path policy inputs, `~` expanded. |
 | `quota_quick_script` / `quota_full_script` | Commands whose output becomes the quota badge / picker pool. |
 | `memory_recall_bin` / `memory_remember_bin` | External memory bridges. |
-| `providers[].is_local` | Marks a provider as never leaving the machine, skipping approval for reads. |
+| `providers[].protocol` | `anthropic` to force the Messages API on a proxy that is not on `anthropic.com`. |
+| `providers[].is_local` | Marks a provider as local; the router never treats it as cloud. |
 | `providers[].api_key_env` | Environment variable holding the key; empty + a quota script means a pooled gateway. |
+| `providers[].context_window` | Fallback context budget for models that do not set their own. |
+| `hosts[].key` | Alias used by `-H`/`--host` and `bash(host=...)`. |
 | `hosts[].ssh_target` | `ssh` destination; `local` means "never remote". |
+| `hosts[].sensitive` | Require approval in `auto` mode; remote hosts are sensitive even without the flag. |
 | `mcpServers[].command` | Launch command, config-only — the model can never supply or alter it. |
 | `mcpServers[].readOnly` | Claims no side effects; without it, calls pass the mutation gate. |
 
@@ -366,10 +391,16 @@ Everything lives under `~/.spavn` (or `SPAVN_HOME`), mode `0700`:
 ├── config.json         providers, paths, MCP servers
 ├── PROFILE.md          user profile injected into the system prompt
 ├── skills/             on-demand domain instructions
-├── sessions/           JSONL transcripts, resumable and greppable
-├── tool-output/        spilled oversized tool output
-└── audit.log           HMAC-chained action trail
+├── sessions/           session-<epoch>.jsonl transcripts, resumable and greppable
+├── audit/              HMAC-chained ledger, one <YYYY-MM-DD>.jsonl per day
+├── audit.key           key material for that chain
+├── pins/               architectural rules pinned with /pin, one <project>.json each
+├── goals.json          /goal state
+└── tool-output/        spilled oversized tool output
 ```
+
+Plus `~/.claude/skills/` as a second skill source, so existing Claude skill packs work
+unchanged.
 
 A session file is append-only JSONL: one message or tool event per line. That makes a session
 `tail`-able, `rg`-able, forkable (`-s fork:<id>`), and safe to keep around — no binary blobs, no
@@ -392,6 +423,8 @@ src/
 │   ├── menus.rs     pickers and menus
 │   ├── toolcard.rs  tool cards, diffstat, numbered diff body
 │   └── edit.rs      inline line editor
+├── markdown.rs      streaming-safe Markdown renderer for tool output
+├── slash_commands.rs  slash dispatcher
 ├── router.rs        endpoint resolution, SSE streaming, retry policy
 ├── http.rs          ureq agents, manual redirect handling
 ├── tools.rs         tool schemas, executors, approval flow
@@ -401,7 +434,7 @@ src/
 ├── memory.rs        recall/remember bridge
 ├── skills.rs        skill discovery and injection
 ├── spill.rs         oversized-output spill files
-└── spavn_engine.rs  audit chain, janitor, goals, wiki, fleet
+└── spavn_engine.rs  audit chain, secret scrubbing, janitor, goals, pins, wiki
 ```
 
 Two invariants keep the code honest:
@@ -419,11 +452,12 @@ Two invariants keep the code honest:
 
 ```sh
 cargo build --release
-cargo test                # 190 unit tests + doc tests
-cargo clippy --all-targets
+cargo test                    # 193 tests: 190 library, 3 binary
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
 ```
 
-CI (`.github/workflows/ci.yml`) runs build, tests, and clippy on `ubuntu-latest` and
+CI (`.github/workflows/ci.yml`) runs exactly those four steps on `ubuntu-latest` and
 `macos-latest`. `.github/workflows/release.yml` builds `aarch64-apple-darwin`,
 `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc` archives with
 SHA-256 sidecars on every `v*` tag.

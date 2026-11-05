@@ -482,9 +482,9 @@ fn validate_host_arg(host: &str) -> Result<(), String> {
         return Ok(());
     }
     let looks_like_option = host.starts_with('-');
-    let charset_ok = host.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':' | '[' | ']')
-    });
+    let charset_ok = host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':' | '[' | ']'));
     if looks_like_option || !charset_ok {
         return Err(format!(
             "BLOCKED by SPAVN Host Policy: `{}` is not a valid host alias.\n\
@@ -788,7 +788,9 @@ fn run_command_with_timeout(
 /// arguments). A leading `\x1b[1A\x1b[2K` reached the prompt verbatim and let a caller erase the
 /// path line it was asking the user to approve, then print a benign one in its place.
 fn gate_safe(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control() || *c == '\t').collect()
+    s.chars()
+        .filter(|c| !c.is_control() || *c == '\t')
+        .collect()
 }
 
 fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str) -> bool {
@@ -1034,7 +1036,10 @@ fn format_spans(content: &str, spans: &[LineSpan]) -> String {
         }
     }
     if !shown_any {
-        return format!("(File has {} lines; none of the requested ranges exist)\n", total);
+        return format!(
+            "(File has {} lines; none of the requested ranges exist)\n",
+            total
+        );
     }
     out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
     out
@@ -1617,7 +1622,8 @@ pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Op
     None
 }
 
-fn count_code_braces(src: &str) -> (usize, usize) {    let mut open = 0usize;
+fn count_code_braces(src: &str) -> (usize, usize) {
+    let mut open = 0usize;
     let mut close = 0usize;
     let bytes = src.as_bytes();
     let len = bytes.len();
@@ -2674,7 +2680,10 @@ fn exec_glob(ctx: &mut ToolContext, args: &Value) -> String {
         .and_then(|v| v.as_u64())
         .map(|v| (v as usize).clamp(1, GLOB_MAX_LIMIT))
         .unwrap_or(GLOB_DEFAULT_LIMIT);
-    let hidden = args.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false);
+    let hidden = args
+        .get("hidden")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let explicit_host = get_str_alias(args, &["host", "target"]);
 
     if let Some((ssh_host, remote_path)) = split_remote_prefix(raw_path) {
@@ -2704,7 +2713,10 @@ fn exec_glob(ctx: &mut ToolContext, args: &Value) -> String {
             Ok(o) => {
                 let s = String::from_utf8_lossy(&o.stdout).to_string();
                 if s.trim().is_empty() {
-                    format!("(no files match `{}` in {}:{})", pattern, ssh_host, remote_path)
+                    format!(
+                        "(no files match `{}` in {}:{})",
+                        pattern, ssh_host, remote_path
+                    )
                 } else {
                     s
                 }
@@ -3736,7 +3748,9 @@ pub fn execute_read_only_batch(ctx: &mut ToolContext, calls: &[(String, String)]
     }
     // Two workers could both reach `prompt_user_approval`, and two prompts read the same stdin.
     // Outside SOVEREIGN any path may prompt, so a batch is refused outright.
-    if ctx.access != AccessMode::Sovereign || calls.iter().any(|(name, _)| !parallel_safe_tool(name)) {
+    if ctx.access != AccessMode::Sovereign
+        || calls.iter().any(|(name, _)| !parallel_safe_tool(name))
+    {
         return Vec::new();
     }
     let base = ctx.tool_step_counter;
@@ -3881,8 +3895,14 @@ mod phase_tests {
             AgentPhase::Code,
         );
         let calls = vec![
-            ("read".to_string(), r#"{"path":"/nonexistent-a"}"#.to_string()),
-            ("read".to_string(), r#"{"path":"/nonexistent-b"}"#.to_string()),
+            (
+                "read".to_string(),
+                r#"{"path":"/nonexistent-a"}"#.to_string(),
+            ),
+            (
+                "read".to_string(),
+                r#"{"path":"/nonexistent-b"}"#.to_string(),
+            ),
         ];
         assert!(super::execute_read_only_batch(&mut c, &calls).is_empty());
         assert_eq!(c.tool_step_counter, 0, "a refused batch consumes no steps");
@@ -3903,16 +3923,24 @@ mod phase_tests {
         let calls = vec![
             (
                 "read".to_string(),
-                format!(r#"{{"path":"{}","start_line":1,"end_line":2}}"#, target.display()),
+                format!(
+                    r#"{{"path":"{}","start_line":1,"end_line":2}}"#,
+                    target.display()
+                ),
             ),
             (
                 "read".to_string(),
-                format!(r#"{{"path":"{}","start_line":1,"end_line":2}}"#, other.display()),
+                format!(
+                    r#"{{"path":"{}","start_line":1,"end_line":2}}"#,
+                    other.display()
+                ),
             ),
         ];
         let out = super::execute_read_only_batch(&mut c, &calls);
         assert_eq!(out.len(), 2, "{out:?}");
-        assert!(c.read_mtimes.contains_key(&target.to_string_lossy().to_string()));
+        assert!(c
+            .read_mtimes
+            .contains_key(&target.to_string_lossy().to_string()));
 
         let edited = execute_tool(
             &mut c,
@@ -4052,14 +4080,21 @@ mod bash_spill_tests {
     fn oversized_output_keeps_head_and_tail_and_points_at_the_spill_file() {
         let out = exec_bash(&mut ctx(), &json!({ "command": "seq 1 6000" }));
         assert!(out.contains("SPAVN truncated"), "no marker: {out}");
-        assert!(out.starts_with("1\n"), "head lost: {}", &out[..40.min(out.len())]);
+        assert!(
+            out.starts_with("1\n"),
+            "head lost: {}",
+            &out[..40.min(out.len())]
+        );
         assert!(out.trim_end().ends_with("6000"), "tail lost");
         let path = out
             .split('`')
             .find(|seg| seg.contains("spavn") && seg.ends_with(".txt"))
             .unwrap_or_else(|| panic!("no spill path in marker: {out}"));
         let full = fs::read_to_string(path).expect("spill file should exist and be readable");
-        assert!(full.contains("\n3000\n"), "middle should survive in the spill file");
+        assert!(
+            full.contains("\n3000\n"),
+            "middle should survive in the spill file"
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -4077,7 +4112,10 @@ mod subagent_header_tests {
 
     #[test]
     fn short_tasks_are_passed_through_and_flattened() {
-        assert_eq!(one_line_task("  find   the\nmain entry "), "find the main entry");
+        assert_eq!(
+            one_line_task("  find   the\nmain entry "),
+            "find the main entry"
+        );
     }
 
     #[test]
@@ -4128,7 +4166,10 @@ mod line_span_tests {
     #[test]
     fn bare_single_expands_but_multi_list_does_not() {
         assert_eq!(expand_line_spans(vec![(30, 30)]), vec![(30, 150)]);
-        assert_eq!(expand_line_spans(vec![(5, 5), (90, 90)]), vec![(5, 5), (90, 90)]);
+        assert_eq!(
+            expand_line_spans(vec![(5, 5), (90, 90)]),
+            vec![(5, 5), (90, 90)]
+        );
     }
 
     #[test]
@@ -4214,8 +4255,16 @@ mod glob_tests {
         assert!(out.contains("main.rs"), "{}", out);
         assert!(out.contains("lib.rs"), "{}", out);
         assert!(!out.contains("target/"), "ignored dir leaked: {}", out);
-        assert!(!out.contains("notes.md"), "extension filter leaked: {}", out);
-        assert!(!out.contains(".hidden.rs"), "dotfile leaked by default: {}", out);
+        assert!(
+            !out.contains("notes.md"),
+            "extension filter leaked: {}",
+            out
+        );
+        assert!(
+            !out.contains(".hidden.rs"),
+            "dotfile leaked by default: {}",
+            out
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -4237,7 +4286,12 @@ mod glob_tests {
             &mut ctx(),
             &json!({ "pattern": "**/*.rs", "path": dir.to_string_lossy(), "limit": 1 }),
         );
-        assert_eq!(out.lines().filter(|l| l.ends_with(".rs")).count(), 1, "{}", out);
+        assert_eq!(
+            out.lines().filter(|l| l.ends_with(".rs")).count(),
+            1,
+            "{}",
+            out
+        );
         assert!(out.contains("limit 1 reached"), "{}", out);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -4442,7 +4496,8 @@ mod security_tests {
         // predictable: another local user could pre-create the path (symlink) and read or
         // redirect the output. They now live under the 0700 spavn home.
         let mut c = ctx_with(AccessMode::Sovereign, "/tmp/spavn-sec-ws");
-        let args = serde_json::json!({ "command": "echo sec-probe", "background": true }).to_string();
+        let args =
+            serde_json::json!({ "command": "echo sec-probe", "background": true }).to_string();
         let out = execute_tool(&mut c, "bash", &args);
         assert!(out.contains(".spavn/bg/"), "{out}");
         let log = out
@@ -4468,7 +4523,10 @@ mod security_tests {
     fn an_unanswerable_approval_denies_the_action() {
         // No TTY means no one can answer the prompt. Blocking forever would hang the turn, and
         // "no answer" must never be read as consent.
-        assert!(!crate::hud::stdin_is_tty(), "this test needs a non-tty stdin");
+        assert!(
+            !crate::hud::stdin_is_tty(),
+            "this test needs a non-tty stdin"
+        );
         let dir = std::env::temp_dir().join(format!("spavn-sec-approve-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let target = dir.join("would-be-written.txt");
@@ -4513,7 +4571,13 @@ mod security_tests {
     #[test]
     fn mcp_mutating_tool_is_treated_as_mutating_by_default() {
         // The gate used to be a deny-list of verbs, so `commit`/`move_file` slipped through.
-        for tool in ["commit", "move_file", "create_pull_request", "merge_pull_request", "delete_branch"] {
+        for tool in [
+            "commit",
+            "move_file",
+            "create_pull_request",
+            "merge_pull_request",
+            "delete_branch",
+        ] {
             assert!(is_mutating_mcp_tool("some-server", tool, false), "{tool}");
         }
         for tool in ["get_page", "list_issues", "search_code", "read_file"] {
@@ -4525,7 +4589,10 @@ mod security_tests {
 
     #[test]
     fn mcp_response_is_capped() {
-        let huge = format!("{{\"result\":{{\"content\":[{{\"text\":\"{}\"}}]}}}}", "x".repeat(400_000));
+        let huge = format!(
+            "{{\"result\":{{\"content\":[{{\"text\":\"{}\"}}]}}}}",
+            "x".repeat(400_000)
+        );
         let out = format_mcp_jsonrpc_response("srv", "tool", &huge);
         assert!(out.contains("kırpıldı"), "{} bytes", out.len());
         assert!(out.len() < 200_000, "{} bytes", out.len());

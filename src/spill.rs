@@ -10,11 +10,11 @@
 //! artifacts in `<spavn_dir>/artifacts/` (those are `<project>.jsonl` and are parsed).
 
 use crate::config::{set_owner_only_mode, spavn_dir};
-use std::sync::atomic::{AtomicU64, Ordering};
 use crate::session::safe_utf8_prefix;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Hard ceiling for a single spill file. A runaway command (`yes`, a huge build log)
 /// must never fill the disk just because its output was large.
@@ -76,7 +76,10 @@ pub fn spill_output_in(dir: &Path, label: &str, text: &str) -> Option<PathBuf> {
     // would sort "10" before "9" and evict the newest file.
     let path = dir.join(format!(
         "{:013}-{:06}-{:06}-{}.txt",
-        stamp, std::process::id() % 1_000_000, seq, slug
+        stamp,
+        std::process::id() % 1_000_000,
+        seq,
+        slug
     ));
 
     let body = if text.len() > SPILL_MAX_BYTES {
@@ -125,7 +128,11 @@ fn prune_old_spills(dir: &std::path::Path) {
 
 /// The truncation marker: tells the model *where* the missing bytes went and how to
 /// get them back, instead of silently dropping content.
-pub fn truncation_marker(dropped: usize, total: usize, spilled: Option<&std::path::Path>) -> String {
+pub fn truncation_marker(
+    dropped: usize,
+    total: usize,
+    spilled: Option<&std::path::Path>,
+) -> String {
     match spilled {
         Some(path) => format!(
             "... [SPAVN truncated {} of {} bytes from the middle. Full output saved to `{}` — \
@@ -136,8 +143,7 @@ pub fn truncation_marker(dropped: usize, total: usize, spilled: Option<&std::pat
         ),
         None => format!(
             "... [SPAVN truncated {} of {} bytes of middle output] ...",
-            dropped,
-            total
+            dropped, total
         ),
     }
 }
@@ -211,9 +217,13 @@ mod tests {
         }
         prune_old_spills(dir);
         let left = fs::read_dir(dir).unwrap().count();
-        assert_eq!(left, SPILL_KEEP, "prune must leave exactly SPILL_KEEP files");
+        assert_eq!(
+            left, SPILL_KEEP,
+            "prune must leave exactly SPILL_KEEP files"
+        );
         assert!(
-            dir.join(format!("0000000000001-000001-{:06}-x.txt", SPILL_KEEP + 4)).exists(),
+            dir.join(format!("0000000000001-000001-{:06}-x.txt", SPILL_KEEP + 4))
+                .exists(),
             "newest file must survive"
         );
         assert!(
@@ -233,11 +243,19 @@ mod tests {
                 .collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        let paths: Vec<_> = out.into_iter().map(|p| p.expect("spill under contention")).collect();
+        let paths: Vec<_> = out
+            .into_iter()
+            .map(|p| p.expect("spill under contention"))
+            .collect();
         let mut uniq: Vec<_> = paths.clone();
         uniq.sort();
         uniq.dedup();
-        assert_eq!(uniq.len(), paths.len(), "two spills shared a file: {:?}", paths);
+        assert_eq!(
+            uniq.len(),
+            paths.len(),
+            "two spills shared a file: {:?}",
+            paths
+        );
     }
 
     #[test]
