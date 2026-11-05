@@ -625,6 +625,12 @@ pub struct MarkdownStreamRenderer {
     out_buf: String,
 }
 
+impl Default for MarkdownStreamRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MarkdownStreamRenderer {
     pub fn new() -> Self {
         Self {

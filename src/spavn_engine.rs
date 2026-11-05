@@ -146,20 +146,7 @@ impl AgentRoleKey {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn short_badge(&self) -> &'static str {
-        match self {
-            AgentRoleKey::Auto => "",
-            AgentRoleKey::Coder => "💻 CODER",
-            AgentRoleKey::Reviewer => "🔍 REVIEW",
-            AgentRoleKey::Security => "🛡️ SEC",
-            AgentRoleKey::Test => "🧪 TEST",
-            AgentRoleKey::Docs => "📖 DOCS",
-            AgentRoleKey::Refactor => "🧹 REFACTOR",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_alias(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "auto" | "otomatik" => Some(Self::Auto),
             "coder" | "code" | "kod" => Some(Self::Coder),
@@ -224,7 +211,7 @@ impl AgentPhase {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_alias(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "plan" | "tasarim" | "tasarım" | "design" => Some(Self::Plan),
             "code" | "kod" | "act" | "apply" | "uygula" => Some(Self::Code),
@@ -444,6 +431,9 @@ pub fn record_audit_action(
 ) {
     let dir = spavn_dir().join("audit");
     let _ = fs::create_dir_all(&dir);
+    // The record embeds a prompt preview, so the directory and the day file are owner-only:
+    // inheriting the umask would leave them group/world readable on a permissive setup.
+    crate::config::set_owner_only_mode(&dir, 0o700);
     let file_path = dir.join(format!("{}.jsonl", today_ymd()));
 
     let mut prev_hash = String::new();
@@ -491,6 +481,7 @@ pub fn record_audit_action(
         .append(true)
         .open(&file_path)
     {
+        crate::config::set_owner_only_mode(&file_path, 0o600);
         if let Ok(json_line) = serde_json::to_string(&rec) {
             let _ = writeln!(file, "{}", json_line);
         }
@@ -1127,26 +1118,35 @@ mod engine_tests {
 
     #[test]
     fn role_from_str_handles_aliases_and_unknown() {
-        assert_eq!(AgentRoleKey::from_str("coder"), Some(AgentRoleKey::Coder));
-        assert_eq!(AgentRoleKey::from_str("  CODE "), Some(AgentRoleKey::Coder));
         assert_eq!(
-            AgentRoleKey::from_str("incele"),
+            AgentRoleKey::parse_alias("coder"),
+            Some(AgentRoleKey::Coder)
+        );
+        assert_eq!(
+            AgentRoleKey::parse_alias("  CODE "),
+            Some(AgentRoleKey::Coder)
+        );
+        assert_eq!(
+            AgentRoleKey::parse_alias("incele"),
             Some(AgentRoleKey::Reviewer)
         );
         assert_eq!(
-            AgentRoleKey::from_str("güvenlik"),
+            AgentRoleKey::parse_alias("güvenlik"),
             Some(AgentRoleKey::Security)
         );
-        assert_eq!(AgentRoleKey::from_str("otomatik"), Some(AgentRoleKey::Auto));
-        assert_eq!(AgentRoleKey::from_str("bogus"), None);
+        assert_eq!(
+            AgentRoleKey::parse_alias("otomatik"),
+            Some(AgentRoleKey::Auto)
+        );
+        assert_eq!(AgentRoleKey::parse_alias("bogus"), None);
     }
 
     #[test]
     fn phase_from_str_and_toggle_roundtrip() {
-        assert_eq!(AgentPhase::from_str("plan"), Some(AgentPhase::Plan));
-        assert_eq!(AgentPhase::from_str("tasarım"), Some(AgentPhase::Plan));
-        assert_eq!(AgentPhase::from_str("uygula"), Some(AgentPhase::Code));
-        assert_eq!(AgentPhase::from_str("nope"), None);
+        assert_eq!(AgentPhase::parse_alias("plan"), Some(AgentPhase::Plan));
+        assert_eq!(AgentPhase::parse_alias("tasarım"), Some(AgentPhase::Plan));
+        assert_eq!(AgentPhase::parse_alias("uygula"), Some(AgentPhase::Code));
+        assert_eq!(AgentPhase::parse_alias("nope"), None);
         assert_eq!(AgentPhase::Plan.toggled(), AgentPhase::Code);
         assert_eq!(AgentPhase::Code.toggled(), AgentPhase::Plan);
         assert!(AgentPhase::Plan.preamble().is_some());

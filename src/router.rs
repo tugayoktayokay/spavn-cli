@@ -182,18 +182,60 @@ pub struct ModelEndpoint {
     pub configured_context_window: Option<usize>,
 }
 
+/// Bare host of a base URL, lowercased: scheme, userinfo, path and port removed.
+///
+/// `https://user@127.0.0.1:8080/v1` → `127.0.0.1`.
+pub(crate) fn url_host(base_url: &str) -> String {
+    let no_scheme = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url);
+    let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        // IPv6 literal: keep the brackets so `[::1]` stays unambiguous.
+        match rest.split_once(']') {
+            Some((inner, _)) => return format!("[{}]", inner.to_lowercase()),
+            None => host_port,
+        }
+    } else {
+        host_port.split_once(':').map(|(h, _)| h).unwrap_or(host_port)
+    };
+    host.to_lowercase()
+}
+
 impl ModelEndpoint {
+    /// True only when the endpoint really is on this machine (or an mDNS `.local` peer).
+    ///
+    /// This used to be a substring test over the whole URL, so `https://127.0.0.1.evil.com`
+    /// or `https://localhost.attacker.net` reported *local*: the escaping logic, prompt
+    /// trimming and cache hints would then treat a remote host as a local engine. The host
+    /// is parsed out and compared exactly instead.
     pub fn is_local(&self) -> bool {
         if self.is_local_flag {
             return true;
         }
-        let lower = self.base_url.to_lowercase();
-        // Standard loopback IP/hostnames or mDNS local network (.local domain)
-        lower.contains("127.0.0.1")
-            || lower.contains("localhost")
-            || lower.contains("::1")
-            || lower.contains(".local")
+        let host = url_host(&self.base_url);
+        host == "localhost"
+            || host == "::1"
+            || host == "[::1]"
+            || host == "0.0.0.0"
+            || host
+                .parse::<std::net::Ipv4Addr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+            || host.ends_with(".local")
     }
+    /// True when the prompt should be trimmed: a local engine, or a fast/flash-tier
+    /// model where every saved prefill token is latency the user feels.
+    pub fn wants_compact_prompt(&self) -> bool {
+        if self.is_local() {
+            return true;
+        }
+        let key = self.model.to_lowercase();
+        key.contains("flash") || key.contains("mini") || key.contains("haiku") || key.contains("small")
+    }
+
 
     /// True when the endpoint speaks the native Anthropic Messages API
     /// (`/v1/messages`, `x-api-key`) rather than the OpenAI chat-completions
@@ -683,6 +725,17 @@ fn serialize_messages_with_vision(messages: &[ChatMessage]) -> Vec<Value> {
 
     for (idx, m) in sanitized.iter().enumerate() {
         let mut v = serde_json::to_value(m).unwrap_or_else(|_| json!({}));
+        // Strip non-standard fields that foreign upstreams (OpenCode, OpenAI, Groq) reject across protocols
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("thought_signature");
+            if let Some(tcs) = obj.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
+                for tc in tcs {
+                    if let Some(tc_obj) = tc.as_object_mut() {
+                        tc_obj.remove("thought_signature");
+                    }
+                }
+            }
+        }
         if m.role == "assistant" && v.get("content").is_none() {
             v["content"] = json!("");
         }
@@ -877,12 +930,20 @@ where
     let request_url = url.clone();
     std::thread::spawn(move || {
         let agent = crate::http::agent_stream();
-        let response = agent
+        let mut req = agent
             .post(&request_url)
             .header("Content-Type", "application/json")
             .header("Authorization", &auth_header)
-            .header("api-key", &raw_api_key)
-            .send(body_str.as_str());
+            .header("api-key", &raw_api_key);
+        if request_url.contains("opencode.ai") {
+            let sid = format!("ses_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+            req = req
+                .header("user-agent", "opencode/1.19.0 ai-sdk/provider-utils/4.0.23")
+                .header("x-opencode-client", "cli")
+                .header("x-opencode-session", &sid)
+                .header("x-opencode-session-id", &sid);
+        }
+        let response = req.send(body_str.as_str());
         let mut response = match response {
             Ok(response) => response,
             Err(err) => {
@@ -1969,6 +2030,40 @@ mod anthropic_tests {
         assert_eq!(content[1]["type"], "tool_use");
         assert_eq!(content[1]["name"], "write");
         assert_eq!(content[1]["input"]["path"], "b");
+    }
+
+    #[test]
+    fn local_detection_parses_the_host_instead_of_matching_a_substring() {
+        let ep = |u: &str| ModelEndpoint {
+            key: String::new(),
+            model: String::new(),
+            base_url: u.to_string(),
+            api_key: String::new(),
+            label: String::new(),
+            is_local_flag: false,
+            has_quota_pool: false,
+            configured_context_window: None,
+        };
+        // Genuinely local.
+        for url in [
+            "http://127.0.0.1:8080/v1",
+            "http://localhost:11434/v1",
+            "http://[::1]:1234/v1",
+            "http://127.0.0.2:8080/v1",
+            "http://mac-mini.local:8000/v1",
+        ] {
+            assert!(ep(url).is_local(), "{url} must be local");
+        }
+        // Remote hosts that merely embed a loopback name in their name or path.
+        for url in [
+            "https://127.0.0.1.evil.com/v1",
+            "https://localhost.attacker.net/v1",
+            "https://api.example.com/127.0.0.1/v1",
+            "https://notlocal.example.com/v1",
+            "https://api.local.example.com/v1",
+        ] {
+            assert!(!ep(url).is_local(), "{url} must NOT be local");
+        }
     }
 
     #[test]

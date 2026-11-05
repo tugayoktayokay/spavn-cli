@@ -128,20 +128,29 @@ pub fn load_skill_content(name: &str) -> Option<(SkillEntry, String)> {
     None
 }
 
-pub fn expand_inline_skills(user_input: &str) -> (String, Vec<String>) {
-    let mut candidate_names: Vec<String> = Vec::new();
-
+/// Extracts the `@name` skill tokens appearing anywhere in `user_input`.
+///
+/// A token is only accepted when the `@` starts a word and is followed by at least one
+/// alphanumeric/`-`/`_` character; trailing punctuation (`@vitest,`) is dropped.
+pub fn inline_skill_tokens(user_input: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
     for token in user_input.split_whitespace() {
-        if let Some(tag) = token.strip_prefix('@') {
-            let clean: String = tag
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-                .collect();
-            if !clean.is_empty() {
-                candidate_names.push(clean);
-            }
+        let Some(tag) = token.strip_prefix('@') else {
+            continue;
+        };
+        let clean: String = tag
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !clean.is_empty() {
+            names.push(clean);
         }
     }
+    names
+}
+
+pub fn expand_inline_skills(user_input: &str) -> (String, Vec<String>) {
+    let mut candidate_names: Vec<String> = inline_skill_tokens(user_input);
 
     let lower = user_input.to_lowercase();
     let words: Vec<&str> = lower
@@ -224,4 +233,49 @@ pub fn render_skills_panel() {
         "{}╰────────────────────────────────────────────────────────────────────────────{}",
         CYAN, RESET
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_summary_line_skips_frontmatter_and_heading_marks() {
+        let doc = "---\nname: vitest\ndescription: \"Run unit tests\"\n---\n\n# Heading\nBody";
+        assert_eq!(first_summary_line(doc), "Run unit tests");
+
+        let heading_only = "---\nname: x\n---\n\n## Avro schema notes\n";
+        assert_eq!(first_summary_line(heading_only), "Avro schema notes");
+
+        assert_eq!(first_summary_line(""), "Custom skill");
+        assert_eq!(first_summary_line("---\nname: y\n---\n"), "Custom skill");
+    }
+
+    #[test]
+    fn first_summary_line_caps_at_62_chars() {
+        let long = "a".repeat(200);
+        assert_eq!(first_summary_line(&long).chars().count(), 62);
+    }
+
+    #[test]
+    fn inline_tokens_take_leading_alnum_dash_and_underscore_only() {
+        assert_eq!(
+            inline_skill_tokens("@vitest ile @rust-review-2 çalıştır"),
+            vec!["vitest".to_string(), "rust-review-2".to_string()]
+        );
+        // Trailing punctuation is trimmed, the token itself still activates.
+        assert_eq!(
+            inline_skill_tokens("@vitest, koş"),
+            vec!["vitest".to_string()]
+        );
+        // A bare `@` or an `@` glued to a non-word char yields nothing.
+        assert!(inline_skill_tokens("@ @! sağlık").is_empty());
+        // Mid-word `@` (inside an email) never activates a skill.
+        assert!(inline_skill_tokens("mail me: a@b.com").is_empty());
+        // Underscores are preserved.
+        assert_eq!(
+            inline_skill_tokens("@gog_validate"),
+            vec!["gog_validate".to_string()]
+        );
+    }
 }
