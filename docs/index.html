@@ -1,0 +1,1561 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SPAVN docs — reference for the terminal coding agent</title>
+<meta name="description" content="Complete reference for SPAVN: install channels, all 37 slash commands, 11 builtin tools, every config key and environment variable, the six security gates, architecture, and troubleshooting." />
+<meta name="theme-color" content="#05080f" />
+<link rel="canonical" href="https://spavn.dev/docs/" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<meta property="og:title" content="SPAVN docs" />
+<meta property="og:description" content="Every command, tool, config key and gate — searchable, in one page, no dependencies." />
+<meta property="og:url" content="https://spavn.dev/docs/" />
+<style>
+  :root {
+    --bg: #05080f;
+    --bg-2: #080d18;
+    --panel: rgba(15, 23, 42, 0.72);
+    --panel-solid: #0a1020;
+    --line: rgba(148, 163, 184, 0.16);
+    --line-hi: rgba(34, 211, 238, 0.45);
+    --fg: #f1f5f9;
+    --muted: #94a3b8;
+    --dim: #64748b;
+    --cyan: #22d3ee;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --purple: #a78bfa;
+    --red: #fb7185;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --radius: 12px;
+    --w: 1420px;
+  }
+  html[data-theme="light"] {
+    --bg: #f8fafc;
+    --bg-2: #ffffff;
+    --panel: rgba(255, 255, 255, 0.9);
+    --panel-solid: #ffffff;
+    --line: rgba(15, 23, 42, 0.12);
+    --line-hi: rgba(8, 145, 178, 0.45);
+    --fg: #0f172a;
+    --muted: #475569;
+    --dim: #64748b;
+    --cyan: #0e7490;
+    --green: #047857;
+    --amber: #b45309;
+    --purple: #6d28d9;
+    --red: #be123c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 15.5px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  html[data-theme="dark"] body {
+    background-image:
+      radial-gradient(ellipse 70% 40% at 50% -10%, rgba(34, 211, 238, 0.10), transparent),
+      linear-gradient(to bottom, rgba(255,255,255,0.02) 1px, transparent 1px),
+      linear-gradient(to right, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 100% 100%, 44px 44px, 44px 44px;
+    background-attachment: fixed;
+  }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  code, kbd, pre { font-family: var(--mono); }
+  :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; border-radius: 4px; }
+
+  /* ── progress ─────────────────────────────────────────── */
+  #progress {
+    position: fixed; inset: 0 auto auto 0;
+    height: 2px; width: 0%; z-index: 60;
+    background: linear-gradient(90deg, var(--cyan), var(--green));
+    transition: width .1s linear;
+  }
+
+  /* ── top bar ──────────────────────────────────────────── */
+  header.top {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(14px);
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    border-bottom: 1px solid var(--line);
+  }
+  .top-inner {
+    max-width: var(--w); margin: 0 auto;
+    display: flex; align-items: center; gap: 14px;
+    padding: 11px 20px;
+  }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; letter-spacing: -.02em; font-size: 16px; color: var(--fg); }
+  .brand:hover { text-decoration: none; }
+  .brand .mark {
+    display: grid; place-items: center;
+    width: 27px; height: 27px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--cyan), var(--green));
+    color: #04121a; font-size: 15px; font-weight: 900;
+  }
+  .brand small { color: var(--dim); font-weight: 500; font-size: 12.5px; letter-spacing: .02em; }
+  .pill {
+    font-family: var(--mono); font-size: 11.5px;
+    padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--line-hi); color: var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 10%, transparent);
+  }
+  .grow { flex: 1; }
+
+  .searchbox { position: relative; flex: 0 1 390px; }
+  .searchbox input {
+    width: 100%; padding: 8px 66px 8px 34px;
+    font-family: var(--sans); font-size: 13.5px; color: var(--fg);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  }
+  .searchbox input::placeholder { color: var(--dim); }
+  .searchbox .lens { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--dim); font-size: 13px; pointer-events: none; }
+  .searchbox .hintk {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    display: flex; gap: 3px; pointer-events: none;
+  }
+  kbd {
+    font-size: 10.5px; padding: 1.5px 5px; border-radius: 5px;
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    border: 1px solid var(--line); color: var(--muted);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 8%, transparent);
+  }
+  #results {
+    position: absolute; top: calc(100% + 7px); left: 0; right: 0;
+    max-height: 66vh; overflow-y: auto;
+    background: var(--panel-solid);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: 0 22px 50px rgba(0,0,0,.45);
+    padding: 5px; display: none;
+  }
+  #results.open { display: block; }
+  #results .res {
+    display: block; padding: 8px 10px; border-radius: 8px;
+    color: var(--fg); cursor: pointer; border: 0; background: none;
+    width: 100%; text-align: left; font: inherit;
+  }
+  #results .res[aria-selected="true"] { background: color-mix(in srgb, var(--cyan) 14%, transparent); }
+  #results .res .r-title { font-size: 13.5px; font-weight: 600; display: flex; gap: 7px; align-items: baseline; }
+  #results .res .r-where { font-family: var(--mono); font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+  #results .res .r-snip { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  #results .res mark, .flash mark { background: color-mix(in srgb, var(--amber) 30%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
+  #results .empty { padding: 14px 12px; color: var(--muted); font-size: 13px; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 11px; border-radius: 9px; font-size: 13px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+    cursor: pointer;
+  }
+  .btn:hover { border-color: var(--line-hi); color: var(--fg); }
+  #menu-btn { display: none; }
+
+  /* ── layout ───────────────────────────────────────────── */
+  .shell {
+    max-width: var(--w); margin: 0 auto;
+    display: grid; grid-template-columns: 258px minmax(0, 1fr);
+    gap: 34px; padding: 0 20px 90px;
+  }
+  nav.side {
+    position: sticky; top: 60px; align-self: start;
+    max-height: calc(100vh - 76px); overflow-y: auto;
+    padding: 20px 0 30px;
+    scrollbar-width: thin;
+  }
+  nav.side .grp { margin-bottom: 15px; }
+  nav.side .grp > span {
+    display: block; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: .11em; text-transform: uppercase; color: var(--dim);
+    padding: 0 9px 5px;
+  }
+  nav.side a {
+    display: flex; gap: 8px; align-items: center;
+    padding: 5px 9px; border-radius: 7px;
+    font-size: 13.5px; color: var(--muted);
+  }
+  nav.side a:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); text-decoration: none; color: var(--fg); }
+  nav.side a.active { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 11%, transparent); font-weight: 600; }
+  nav.side a .n { font-family: var(--mono); font-size: 10.5px; color: var(--dim); min-width: 15px; }
+
+  main { padding-top: 22px; min-width: 0; }
+
+  /* ── intro ────────────────────────────────────────────── */
+  .hero { padding: 24px 0 26px; border-bottom: 1px solid var(--line); margin-bottom: 30px; }
+  .hero h1 { font-size: clamp(28px, 4vw, 40px); letter-spacing: -.03em; line-height: 1.15; }
+  .hero p { color: var(--muted); font-size: 16.5px; max-width: 66ch; margin-top: 12px; }
+  .hero .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 18px; }
+  .chip {
+    font-family: var(--mono); font-size: 11.5px; padding: 3px 9px;
+    border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+  }
+  .chip b { color: var(--fg); font-weight: 600; }
+
+  /* ── sections ─────────────────────────────────────────── */
+  section { padding: 12px 0 34px; border-bottom: 1px solid var(--line); margin-bottom: 22px; }
+  section:last-of-type { border-bottom: 0; }
+  .kick {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--cyan); margin-bottom: 6px;
+  }
+  h2 { font-size: 25px; letter-spacing: -.02em; margin-bottom: 10px; scroll-margin-top: 84px; }
+  h3 { font-size: 16.5px; letter-spacing: -.01em; margin: 26px 0 9px; scroll-margin-top: 84px; }
+  h4 { font-size: 14px; margin: 20px 0 7px; color: var(--muted); letter-spacing: .01em; }
+  p { margin: 9px 0; }
+  p.lead { color: var(--muted); }
+  ul, ol { margin: 9px 0 9px 20px; }
+  li { margin: 4px 0; }
+  li::marker { color: var(--dim); }
+  strong { color: var(--fg); font-weight: 650; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 26px 0; }
+
+  .anchor {
+    opacity: 0; margin-left: 8px; font-size: 15px; color: var(--dim);
+    text-decoration: none; font-weight: 400;
+  }
+  h2:hover .anchor, h3:hover .anchor { opacity: 1; }
+
+  /* ── tables ───────────────────────────────────────────── */
+  .tw { overflow-x: auto; margin: 13px 0; border: 1px solid var(--line); border-radius: var(--radius); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 13px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: color-mix(in srgb, var(--fg) 4%, transparent); font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--dim); font-weight: 600; white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: color-mix(in srgb, var(--cyan) 4%, transparent); }
+  td code, p code, li code, td kbd {
+    font-size: 12.5px; padding: 1.5px 5px; border-radius: 5px;
+    background: color-mix(in srgb, var(--fg) 7%, transparent);
+    border: 1px solid var(--line); color: var(--fg); white-space: nowrap;
+  }
+  td.wrap code { white-space: normal; }
+
+  /* ── code ─────────────────────────────────────────────── */
+  .cb { position: relative; margin: 13px 0; }
+  .cb pre {
+    background: var(--panel-solid); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 14px 16px; overflow-x: auto;
+    font-size: 12.8px; line-height: 1.6;
+  }
+  .cb .copy {
+    position: absolute; top: 8px; right: 8px;
+    font-family: var(--mono); font-size: 10.5px; padding: 3px 8px;
+    border-radius: 6px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--dim); cursor: pointer; opacity: 0;
+    transition: opacity .12s;
+  }
+  .cb:hover .copy, .cb .copy:focus-visible { opacity: 1; }
+  .cb .copy.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+  .tok-c { color: var(--dim); font-style: italic; }
+  .tok-s { color: var(--green); }
+  .tok-k { color: var(--purple); }
+  .tok-n { color: var(--amber); }
+
+  /* ── callouts ─────────────────────────────────────────── */
+  .note, .warn, .danger {
+    border: 1px solid var(--line); border-left: 3px solid var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 6%, transparent);
+    padding: 11px 14px; border-radius: 0 var(--radius) var(--radius) 0; margin: 14px 0;
+    font-size: 14px;
+  }
+  .warn { border-left-color: var(--amber); background: color-mix(in srgb, var(--amber) 7%, transparent); }
+  .danger { border-left-color: var(--red); background: color-mix(in srgb, var(--red) 7%, transparent); }
+  .note b:first-child, .warn b:first-child, .danger b:first-child { display: block; margin-bottom: 3px; font-size: 12px; letter-spacing: .07em; text-transform: uppercase; font-family: var(--mono); }
+
+  /* ── gate pipeline ────────────────────────────────────── */
+  .gates { display: grid; gap: 8px; margin: 16px 0; }
+  .gate {
+    display: grid; grid-template-columns: 30px 1fr auto; gap: 12px; align-items: center;
+    padding: 10px 13px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel);
+  }
+  .gate .num {
+    display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px;
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+    background: color-mix(in srgb, var(--cyan) 16%, transparent); color: var(--cyan);
+  }
+  .gate .t { font-size: 13.5px; }
+  .gate .t b { display: block; font-size: 13.5px; }
+  .gate .t span { color: var(--muted); font-size: 12.5px; }
+  .gate .loc { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+
+  /* ── cards ────────────────────────────────────────────── */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 11px; margin: 14px 0; }
+  .card {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 13px 15px; background: var(--panel); display: block; color: var(--fg);
+  }
+  .card:hover { border-color: var(--line-hi); text-decoration: none; }
+  .card .ct { font-weight: 650; font-size: 14px; display: flex; gap: 8px; align-items: center; }
+  .card .cd { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+
+  details.fold {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 0 15px; margin: 13px 0; background: var(--panel);
+  }
+  details.fold > summary {
+    cursor: pointer; padding: 11px 0; font-weight: 600; font-size: 14px;
+    list-style: none; display: flex; align-items: center; gap: 8px;
+  }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary::before { content: "▸"; color: var(--cyan); font-size: 11px; }
+  details.fold[open] > summary::before { content: "▾"; }
+  details.fold > summary + * { margin-top: 0; }
+  details.fold > *:last-child { margin-bottom: 13px; }
+
+  .flash { animation: flash 1.6s ease-out; }
+  @keyframes flash {
+    0% { background: color-mix(in srgb, var(--amber) 22%, transparent); }
+    100% { background: transparent; }
+  }
+
+  footer.end {
+    border-top: 1px solid var(--line); padding: 26px 20px 44px;
+    text-align: center; color: var(--dim); font-size: 13px;
+  }
+  footer.end a { color: var(--muted); }
+  footer.end .row { display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; margin-bottom: 12px; }
+
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: 1fr; gap: 0; padding: 0 16px 60px; }
+    nav.side {
+      position: fixed; inset: 53px 0 auto 0; z-index: 45;
+      max-height: 0; overflow: hidden; padding: 0; background: var(--bg-2);
+      border-bottom: 1px solid transparent; transition: max-height .2s ease;
+    }
+    nav.side.open { max-height: 72vh; overflow-y: auto; padding: 14px 16px 20px; border-bottom-color: var(--line); }
+    #menu-btn { display: inline-flex; }
+    .searchbox { flex: 1 1 auto; }
+    .searchbox .hintk { display: none; }
+    .top-inner { gap: 9px; padding: 9px 14px; }
+    .brand small { display: none; }
+  }
+  @media print {
+    header.top, nav.side, #progress, .copy, #results { display: none !important; }
+    .shell { grid-template-columns: 1fr; }
+    body { background: #fff; color: #000; }
+    section { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div id="progress" aria-hidden="true"></div>
+
+<header class="top">
+  <div class="top-inner">
+    <a class="brand" href="https://spavn.dev/"><span class="mark">⚡</span>SPAVN <small>docs</small></a>
+    <span class="pill">v0.1.0</span>
+    <span class="grow"></span>
+    <div class="searchbox">
+      <span class="lens" aria-hidden="true">⌕</span>
+      <input id="q" type="search" placeholder="Search commands, tools, keys…"
+             autocomplete="off" spellcheck="false" role="combobox"
+             aria-expanded="false" aria-controls="results" aria-label="Search the documentation" />
+      <span class="hintk" aria-hidden="true"><kbd>⌘</kbd><kbd>K</kbd></span>
+      <div id="results" role="listbox" aria-label="Search results"></div>
+    </div>
+    <button class="btn" id="menu-btn" aria-expanded="false" aria-controls="side">Menu</button>
+    <button class="btn" id="theme" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    <a class="btn" href="https://github.com/tugayoktayokay/spavn-cli">GitHub</a>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="side" id="side" aria-label="Documentation sections">
+    <div class="grp">
+      <span>Start</span>
+      <a href="#overview"><span class="n">01</span>Overview</a>
+      <a href="#install"><span class="n">02</span>Install</a>
+      <a href="#quickstart"><span class="n">03</span>Quickstart</a>
+      <a href="#models"><span class="n">04</span>Models &amp; routing</a>
+    </div>
+    <div class="grp">
+      <span>Reference</span>
+      <a href="#commands"><span class="n">05</span>Slash commands</a>
+      <a href="#tools"><span class="n">06</span>Tools</a>
+      <a href="#mcp"><span class="n">07</span>MCP servers</a>
+      <a href="#config"><span class="n">08</span>Config</a>
+      <a href="#env"><span class="n">09</span>Environment</a>
+    </div>
+    <div class="grp">
+      <span>Behaviour</span>
+      <a href="#security"><span class="n">10</span>Security gates</a>
+      <a href="#context"><span class="n">11</span>Context &amp; memory</a>
+      <a href="#architecture"><span class="n">12</span>Architecture</a>
+      <a href="#update"><span class="n">13</span>Updates</a>
+    </div>
+    <div class="grp">
+      <span>Help</span>
+      <a href="#troubleshooting"><span class="n">14</span>Troubleshooting</a>
+      <a href="#faq"><span class="n">15</span>FAQ</a>
+      <a href="#contributing"><span class="n">16</span>Contributing</a>
+    </div>
+  </nav>
+
+  <main id="main">
+
+    <div class="hero">
+      <h1>The complete SPAVN reference</h1>
+      <p>
+        One Rust binary, no async runtime, three direct dependencies. Everything below is taken from
+        the shipped source: 11 builtin tools, 37 slash commands, every config key, and the six gates
+        that stand between a model and your filesystem. Press <kbd>/</kbd> or <kbd>⌘K</kbd> to search.
+      </p>
+      <div class="chips">
+        <span class="chip"><b>v0.1.0</b></span>
+        <span class="chip"><b>11</b> tools</span>
+        <span class="chip"><b>37</b> commands</span>
+        <span class="chip"><b>6</b> gates</span>
+        <span class="chip"><b>3</b> direct deps</span>
+        <span class="chip">MIT</span>
+      </div>
+    </div>
+
+    <!-- ─────────────────────────────── OVERVIEW ─────────────────────────────── -->
+    <section id="overview" data-searchable>
+      <div class="kick">01 · Start</div>
+      <h2>Overview<a class="anchor" href="#overview" aria-label="Link to Overview">#</a></h2>
+      <p class="lead">
+        SPAVN is a terminal coding agent: you describe a change, it reads the repo, edits files, runs
+        commands and reports back. It runs as a single native binary with a synchronous TUI — there is
+        no Node, no Electron, no plugin tree, and no daemon.
+      </p>
+
+      <h3>The design bets</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Bet</th><th>What it means in the code</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Gates live in code, never in the prompt</strong></td><td>Access, phase, path, egress and MCP checks are <code>if</code> statements in <code>guard.rs</code> / <code>tools.rs</code>. A model cannot talk its way past them.</td></tr>
+            <tr><td><strong>No hidden network peers</strong></td><td>The binary talks to the endpoint <em>you</em> configure and to processes you name in <code>mcpServers</code>. Tested by a source scan, not a promise.</td></tr>
+            <tr><td><strong>Config over hardcode</strong></td><td>Search backend, providers, hosts, tools and the update endpoint all come from <code>~/.spavn/config.json</code>. No vendor host ships in the binary.</td></tr>
+            <tr><td><strong>One binary, boring deps</strong></td><td><code>serde</code>, <code>serde_json</code>, <code>ureq</code>. No async runtime; threads only where a child process would otherwise block.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>At a glance</h3>
+      <div class="tw">
+        <table>
+          <tbody>
+            <tr><th>Version</th><td>0.1.0 · MIT</td></tr>
+            <tr><th>Platforms</th><td>macOS (arm64, x86_64) · Linux (x86_64, arm64) · Windows (x86_64)</td></tr>
+            <tr><th>Rust</th><td>1.80+ (uses <code>LazyLock</code>)</td></tr>
+            <tr><th>State</th><td><code>~/.spavn</code> · mode <code>0700</code>, secrets <code>0600</code></td></tr>
+            <tr><th>External tools</th><td><code>ripgrep</code> for the <code>search</code> tool · <code>ssh</code> for remote hosts</td></tr>
+            <tr><th>TUI</th><td>Synchronous, alternate scroll region, no flicker, no cursor ghost</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────── INSTALL ─────────────────────────────── -->
+    <section id="install" data-searchable>
+      <div class="kick">02 · Start</div>
+      <h2>Install<a class="anchor" href="#install" aria-label="Link to Install">#</a></h2>
+      <p class="lead">Five channels. Pick one; they all install the same binary.</p>
+
+      <div class="tw">
+        <table>
+          <thead><tr><th>Channel</th><th>Command</th><th>Update with</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Install script</strong></td><td><code>curl -fsSL https://spavn.dev/install.sh | sh</code></td><td>re-run it</td></tr>
+            <tr><td><strong>Homebrew</strong></td><td><code>brew install tugayoktayokay/tap/spavn</code></td><td><code>brew upgrade spavn</code></td></tr>
+            <tr><td><strong>Cargo (git)</strong></td><td><code>cargo install --git https://github.com/tugayoktayokay/spavn-cli</code></td><td>re-run it</td></tr>
+            <tr><td><strong>Prebuilt archive</strong></td><td>GitHub Releases + <code>.sha256</code> sidecar</td><td>download again</td></tr>
+            <tr><td><strong>From source</strong></td><td><code>git clone … &amp;&amp; cargo build --release</code></td><td><code>git pull</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Install script</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>curl -fsSL https://spavn.dev/install.sh | sh
+
+# custom target directory
+SPAVN_INSTALL_DIR=/usr/local/bin sh install.sh
+
+# build from a local binary instead of downloading
+SPAVN_LOCAL_BIN=./target/release/spavn sh install.sh</code></pre></div>
+      <p>
+        Lands in <code>$HOME/.local/bin/spavn</code> plus the <code>spvn</code> alias, then executes the
+        binary once to prove <code>execve</code> works. Staging uses a fresh inode and an ad-hoc signature
+        so macOS <code>amfid</code> does not kill the result.
+      </p>
+
+      <h3>Homebrew</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>brew install tugayoktayokay/tap/spavn
+brew upgrade spavn        # later
+
+# Homebrew 6+ trusts third-party taps explicitly:
+brew trust tugayoktayokay/tap</code></pre></div>
+      <p>
+        The formula lives in <code>tugayoktayokay/homebrew-tap</code> and is generated, never hand-edited:
+        <code>packaging/homebrew/sync-tap.sh &lt;version&gt; &lt;tap-checkout&gt;</code> pulls each
+        <code>.sha256</code> sidecar and rewrites the URLs.
+      </p>
+
+      <h3>Cargo</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>cargo install --git https://github.com/tugayoktayokay/spavn-cli   # tracks main
+cargo install spavn                                             # once published</code></pre></div>
+      <div class="note">
+        <b>Note</b>
+        <code>cargo install</code> produces only <code>spavn</code>. The <code>spvn</code> alias comes from
+        the install script and the Homebrew formula.
+      </div>
+
+      <h3>Verify a download</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>gh release download v0.1.0 --pattern '*aarch64-apple-darwin*'
+shasum -a 256 -c ./*.sha256</code></pre></div>
+    </section>
+
+    <!-- ─────────────────────────────── QUICKSTART ─────────────────────────────── -->
+    <section id="quickstart" data-searchable>
+      <div class="kick">03 · Start</div>
+      <h2>Quickstart<a class="anchor" href="#quickstart" aria-label="Link to Quickstart">#</a></h2>
+
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>spavn                            # interactive TUI in the current directory
+spavn "explain the spill module" # one-shot prompt, still interactive
+spavn -p "fix the failing test" -q   # headless: print and exit
+spavn --resume                   # session picker
+spavn --help                     # every flag, path and env var</code></pre></div>
+
+      <h3>Flags</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>-m</code>, <code>--model</code></td><td>Model key, e.g. <code>sonnet</code>, <code>ollama:qwen2.5-coder</code></td></tr>
+            <tr><td><code>-a</code>, <code>--access</code></td><td><code>safe</code> · <code>auto</code> · <code>sovereign</code></td></tr>
+            <tr><td><code>-P</code>, <code>--phase</code></td><td><code>plan</code> (read-only) · <code>code</code></td></tr>
+            <tr><td><code>-H</code>, <code>--host</code></td><td>Target host from <code>hosts[]</code></td></tr>
+            <tr><td><code>-s</code>, <code>--session</code></td><td>Named session file</td></tr>
+            <tr><td><code>-c</code>, <code>--continue</code></td><td>Resume the most recent session</td></tr>
+            <tr><td><code>-r</code>, <code>--resume</code></td><td>Interactive session picker</td></tr>
+            <tr><td><code>-i</code>, <code>--interactive</code></td><td>Force the TUI even with a positional prompt</td></tr>
+            <tr><td><code>-p</code>, <code>--prompt</code></td><td>Explicit prompt (same as positional)</td></tr>
+            <tr><td><code>-t</code>, <code>--think</code></td><td>Show the reasoning stream</td></tr>
+            <tr><td><code>-q</code>, <code>--quiet</code></td><td>Headless: no HUD</td></tr>
+            <tr><td><code>-j</code>, <code>--json</code></td><td>Machine-readable output</td></tr>
+            <tr><td><code>-V</code>, <code>--version</code></td><td>Print version, OS and arch</td></tr>
+            <tr><td><code>-h</code>, <code>--help</code></td><td>Full reference</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>First five minutes</h3>
+      <ol>
+        <li><code>spavn</code> — the TUI opens with a dock: model, access mode, phase, host, context use.</li>
+        <li><code>/byok</code> — paste a provider key (stored in <code>~/.spavn/secrets.env</code>, <code>0600</code>) or start a local model instead.</li>
+        <li><code>/model</code> — pick from local → BYOK → catalog → free tier.</li>
+        <li><code>/access auto</code> — read-only calls run freely, mutations ask.</li>
+        <li><code>/plan</code> then describe the change; <code>/code</code> when you are ready to write.</li>
+      </ol>
+
+      <div class="note">
+        <b>Keys never touch config.json</b>
+        <code>config.json</code> holds endpoints and key <em>names</em>; the material lives in
+        <code>secrets.env</code>, which the path policy treats as secret material in every mode.
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────── MODELS ─────────────────────────────── -->
+    <section id="models" data-searchable>
+      <div class="kick">04 · Start</div>
+      <h2>Models &amp; routing<a class="anchor" href="#models" aria-label="Link to Models">#</a></h2>
+      <p class="lead">
+        One picker, four sources, resolved in this order: <strong>local → BYOK credits → provider
+        catalog → free tier</strong>.
+      </p>
+
+      <h3>Local models</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code># Ollama ships as a provider group at http://127.0.0.1:11434/v1 — zero config
+spavn --model ollama:qwen2.5-coder "refactor the spill module"
+
+# Other OpenAI-compatible servers: point discovery at the /v1 root once
+#   LM Studio   http://localhost:1234/v1
+#   llama.cpp   http://localhost:8080/v1
+export SPAVN_LOCAL_MODELS_URL=http://localhost:8080/v1
+export SPAVN_LOCAL_BASE_URL=http://localhost:8080/v1</code></pre></div>
+
+      <h3>Your own gateway</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>"providers": [
+  {
+    "id": "my-gw",
+    "title": "My gateway",
+    "base_url": "https://gw.example.test/v1",
+    "api_key_env": "MY_GW_KEY",
+    "models": [{ "key": "fast", "model_id": "gw-fast-1", "desc": "cheap", "context_window": 32768 }]
+  }
+]</code></pre></div>
+      <p>
+        Set <code>byokCatalog: false</code> to drop the built-in catalog entirely and drive the picker
+        from <code>providers</code> alone.
+      </p>
+
+      <h3><code>/bench</code> and <code>/fleet</code></h3>
+      <p>
+        <code>/bench</code> runs one prompt across every candidate and reports TTFT, tokens/sec and
+        whether the tool-call format actually parsed — <code>JSON</code>, <code>NO TOOL CALL</code>, or
+        a malformed call. <code>/fleet</code> probes every <code>hosts[]</code> entry over
+        <code>ssh -o ConnectTimeout=3</code> and prints round-trip latency plus the host's uptime line.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────── COMMANDS ─────────────────────────────── -->
+    <section id="commands" data-searchable>
+      <div class="kick">05 · Reference</div>
+      <h2>Slash commands<a class="anchor" href="#commands" aria-label="Link to Slash commands">#</a></h2>
+      <p class="lead">
+        37 entries, all with aliases. <code>/help</code> prints the same set in the TUI; <code>/</code>
+        opens the menu.
+      </p>
+
+      <div class="tw">
+        <table>
+          <thead><tr><th>Command</th><th>Aliases</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>/model</code></td><td><code>/m</code> <code>/models</code> <code>/local</code></td><td>Model picker: local → BYOK → catalog → free</td></tr>
+            <tr><td><code>/byok</code></td><td><code>/b</code> <code>/keys</code> <code>/login</code> <code>/provider</code> <code>/providers</code> <code>/connect</code> <code>/auth</code></td><td>Key setup, balance, provider login</td></tr>
+            <tr><td><code>/bench</code></td><td>—</td><td>Tournament across candidate models</td></tr>
+            <tr><td><code>/fleet</code></td><td><code>/f</code></td><td>Host panel with latency probes</td></tr>
+            <tr><td><code>/quota</code></td><td><code>/q</code></td><td>Quota badge / pool from configured scripts</td></tr>
+            <tr><td><code>/host</code></td><td><code>/h</code></td><td>Target host selection</td></tr>
+            <tr><td><code>/access</code></td><td><code>/a</code></td><td><code>safe</code> 🔒 · <code>auto</code> ⚡ · <code>sovereign</code> 🔥</td></tr>
+            <tr><td><code>/plan</code></td><td>—</td><td>Lock to the read-only design phase</td></tr>
+            <tr><td><code>/code</code></td><td><code>/act</code></td><td>Unlock writes</td></tr>
+            <tr><td><code>/role</code></td><td>—</td><td><code>auto</code> · <code>coder</code> · <code>reviewer</code> · <code>security</code> · <code>test</code> · <code>docs</code> · <code>refactor</code></td></tr>
+            <tr><td><code>/think</code></td><td>—</td><td>Toggle the reasoning stream</td></tr>
+            <tr><td><code>/recap</code></td><td>—</td><td>Idle recap; <code>on</code> / <code>off</code> / <code>toggle</code></td></tr>
+            <tr><td><code>/todo</code></td><td><code>/tasks</code></td><td>Live task list; <code>done</code>, <code>clear</code></td></tr>
+            <tr><td><code>/queue</code></td><td><code>/qlist</code> <code>/qedit</code></td><td>Inspect / edit queued prompts</td></tr>
+            <tr><td><code>/queue clear</code></td><td><code>/qclear</code> <code>/qcancel</code></td><td>Drop the queue and any steers</td></tr>
+            <tr><td><code>/queue pop</code></td><td><code>/qpop</code></td><td>Pop the last queued prompt</td></tr>
+            <tr><td><code>/new</code></td><td><code>/n</code></td><td>Fresh session</td></tr>
+            <tr><td><code>/resume</code></td><td><code>/s</code> <code>/sessions</code></td><td>Session picker</td></tr>
+            <tr><td><code>/fork</code></td><td>—</td><td>Branch the current session</td></tr>
+            <tr><td><code>/compact</code></td><td><code>/c</code></td><td>Compact context</td></tr>
+            <tr><td><code>/clear</code></td><td>—</td><td>Clear the transcript</td></tr>
+            <tr><td><code>/reload</code></td><td><code>/r</code> <code>/rb</code></td><td>Rebuild and re-exec, session preserved</td></tr>
+            <tr><td><code>/update</code></td><td><code>/upgrade</code> <code>/upd</code></td><td>Check for a newer release; prints the exact upgrade command</td></tr>
+            <tr><td><code>/exit</code></td><td><code>/quit</code> <code>/x</code> <code>:q</code></td><td>Leave</td></tr>
+            <tr><td><code>/stop</code></td><td><code>/cancel</code></td><td>Interrupt a running turn</td></tr>
+            <tr><td><code>/diff</code></td><td><code>/d</code></td><td>Working-tree diff</td></tr>
+            <tr><td><code>/commit</code></td><td><code>/cm</code></td><td>Commit helper</td></tr>
+            <tr><td><code>/undo</code></td><td><code>/u</code></td><td>Revert the last edit</td></tr>
+            <tr><td><code>/janitor</code></td><td><code>/j</code></td><td>Dead code / stray artifact sweep</td></tr>
+            <tr><td><code>/audit</code></td><td>—</td><td>HMAC-chained action log, filterable by file</td></tr>
+            <tr><td><code>/blame</code></td><td>—</td><td>Attribution for a path</td></tr>
+            <tr><td><code>/pin</code></td><td><code>/p</code> <code>/pins</code></td><td>Context pins: add / list / remove</td></tr>
+            <tr><td><code>/goal</code></td><td><code>/g</code> <code>/goals</code></td><td>Session goals</td></tr>
+            <tr><td><code>/wiki</code></td><td><code>/w</code></td><td>Project wiki view</td></tr>
+            <tr><td><code>/skill</code></td><td><code>/s</code> <code>/skills</code></td><td>Skill discovery and listing</td></tr>
+            <tr><td><code>/lang</code></td><td><code>/language</code> <code>/dil</code> <code>/en</code> <code>/tr</code></td><td>UI language</td></tr>
+            <tr><td><code>/help</code></td><td>—</td><td>This list</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Keyboard</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Keys</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td><kbd>Enter</kbd></td><td>Send</td></tr>
+            <tr><td><kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>Newline</td></tr>
+            <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>History / menu navigation</td></tr>
+            <tr><td><kbd>Tab</kbd></td><td>Complete a slash command or <code>@file</code></td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>C</kbd></td><td>Interrupt the running turn</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td><td>Exit</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>Close the menu / cancel the picker</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Piping into a busy session</h3>
+      <p>
+        <code>busy_input_mode</code> decides what happens when you type during a turn:
+        <code>queue</code> (default) defers to the next turn, <code>steer</code> interrupts and redirects
+        the model mid-flight.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────── TOOLS ─────────────────────────────── -->
+    <section id="tools" data-searchable>
+      <div class="kick">06 · Reference</div>
+      <h2>Tools<a class="anchor" href="#tools" aria-label="Link to Tools">#</a></h2>
+      <p class="lead">
+        Eleven builtins, each a fixed contract in <code>tool_definitions()</code>. Anything else comes
+        from an <code>mcpServers</code> entry.
+      </p>
+
+      <div class="tw">
+        <table>
+          <thead><tr><th>Tool</th><th>Purpose</th><th>Gate</th></tr></thead>
+          <tbody>
+            <tr><td><code>read</code></td><td>File or directory; several disjoint ranges in one call (<code>src/x.rs:97-112,1066-1076</code>)</td><td>path policy</td></tr>
+            <tr><td><code>edit</code></td><td>Exact <code>old_text</code> → <code>new_text</code>; batched <code>edits</code> applied atomically</td><td>write gate</td></tr>
+            <tr><td><code>write</code></td><td>Create or overwrite; <code>&lt;host&gt;:/path</code> for remote</td><td>write gate</td></tr>
+            <tr><td><code>bash</code></td><td>Local or remote; <code>cwd</code>, <code>timeout_sec</code>, <code>background</code> (PID + log path)</td><td>command classifier</td></tr>
+            <tr><td><code>search</code></td><td>Regex content search via ripgrep</td><td>path policy</td></tr>
+            <tr><td><code>glob</code></td><td>File listing; skips <code>node_modules</code>, <code>target</code>, <code>.git</code> unless <code>hidden</code></td><td>path policy</td></tr>
+            <tr><td><code>memory</code></td><td>Recall or record decisions; local store or an external binary</td><td>read-only tier</td></tr>
+            <tr><td><code>skill</code></td><td>Load domain instructions from <code>~/.spavn/skills</code>, <code>~/.claude/skills</code></td><td>read-only tier</td></tr>
+            <tr><td><code>web</code></td><td>Search or fetch a URL as Markdown; redirects re-validated per hop</td><td>egress classifier</td></tr>
+            <tr><td><code>subagent</code></td><td>Delegate a read-only investigation with its own context window</td><td>cannot mutate</td></tr>
+            <tr><td><code>lsp</code></td><td>Definitions, references, symbols; also the generic MCP call</td><td>read-only tier</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Points worth knowing</h3>
+      <ul>
+        <li><strong>Oversized output spills, it is not truncated away.</strong> <code>bash</code> keeps 8 MiB per stream in <code>~/.spavn/tool-output/</code> (newest 40 kept, <code>0600</code>) and tells the model the path instead of silently dropping bytes.</li>
+        <li><strong><code>read</code> beats <code>bash cat</code>.</strong> Range syntax avoids re-reading a whole file and never spawns a shell.</li>
+        <li><strong><code>subagent</code> cannot write.</strong> Investigate in parallel, then apply the change yourself.</li>
+        <li><strong><code>web</code> has no built-in endpoint.</strong> Search stays off until you point <code>webSearchUrl</code> or <code>webSearchServer</code> at a backend.</li>
+      </ul>
+    </section>
+
+    <!-- ─────────────────────────────── MCP ─────────────────────────────── -->
+    <section id="mcp" data-searchable>
+      <div class="kick">07 · Reference</div>
+      <h2>MCP servers<a class="anchor" href="#mcp" aria-label="Link to MCP servers">#</a></h2>
+      <p class="lead">
+        The extension path. There is no builtin desktop-control tool and no hardcoded path to one —
+        the catalog is read from your config, so nothing assumes a vendor or an install location.
+      </p>
+
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>{
+  "mcpServers": {
+    "memory":  { "command": "noospire-memory", "args": ["--stdio"], "readOnly": true },
+    "desktop": { "command": "open-computer-use", "args": ["mcp"], "readOnly": false },
+    "remote":  { "url": "https://bridge.example.test/mcp", "readOnly": true }
+  }
+}</code></pre></div>
+
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>// the model reaches any of them through the generic MCP call
+{ "op": "mcp", "server": "desktop", "tool": "click", "arguments": { "x": 640, "y": 320 } }</code></pre></div>
+
+      <h3>Rules</h3>
+      <ul>
+        <li>Every configured server name is listed in the <code>lsp</code> tool description, so the model finds them without a second prompt.</li>
+        <li>Servers <em>not</em> in <code>mcpServers</code> are unreachable.</li>
+        <li><code>readOnly: true</code> declares no side effects; without it, calls pass the mutation gate.</li>
+        <li>In <strong>PLAN</strong> phase a mutating MCP call is refused outright — no prompt, no override.</li>
+        <li>Stdio servers get a scrubbed environment: <strong>only</strong> what <code>env</code> declares survives.</li>
+        <li><code>url</code> selects a streamable-HTTP server instead of a subprocess.</li>
+      </ul>
+
+      <div class="warn">
+        <b>Environment is not inherited</b>
+        A stdio server inherits nothing, including <code>PATH</code>, unless you list it in
+        <code>env</code>. That is deliberate: a tool cannot read your shell secrets by accident.
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────── CONFIG ─────────────────────────────── -->
+    <section id="config" data-searchable>
+      <div class="kick">08 · Reference</div>
+      <h2>Config<a class="anchor" href="#config" aria-label="Link to Config">#</a></h2>
+      <p class="lead">
+        <code>~/.spavn/config.json</code>. Every key is optional; an absent file is a working default.
+        Both <code>camelCase</code> and <code>snake_case</code> spellings parse.
+      </p>
+
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>{
+  "default_model": "sonnet",
+  "busy_input_mode": "queue",
+  "language": "en",
+  "byokCatalog": true,
+  "updateCheck": true,
+  "updateCheckIntervalHours": 24,
+  "providers": [],
+  "mcpServers": {},
+  "hosts": [{ "key": "buildbox", "ssh_target": "deploy@10.0.0.5", "badge": "BB", "sensitive": true }]
+}</code></pre></div>
+
+      <h3>General</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>default_model</code></td><td>Model key used at startup</td></tr>
+            <tr><td><code>fallback_cloud_model</code></td><td>Used when the primary is unreachable</td></tr>
+            <tr><td><code>busy_input_mode</code></td><td><code>steer</code> interrupts mid-turn, <code>queue</code> defers</td></tr>
+            <tr><td><code>language</code></td><td><code>tr</code> · <code>en</code></td></tr>
+            <tr><td><code>byokCatalog</code></td><td><code>true</code> merges the built-in catalog; <code>false</code> runs the list from <code>providers</code> only</td></tr>
+            <tr><td><code>updateCheck</code></td><td>One background release check per interval</td></tr>
+            <tr><td><code>updateCheckIntervalHours</code></td><td>Hours between checks, minimum 1, default 24</td></tr>
+            <tr><td><code>updateCheckUrl</code></td><td>Endpoint answering with <code>tag_name</code>; unset derives from the packaged repo, empty disables</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Web / search backends</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>webSearchServer</code> <code>webSearchTool</code></td><td>Run <code>web</code> search through that <code>mcpServers</code> entry</td></tr>
+            <tr><td><code>webFetchTool</code></td><td>Tool used for page fetch on that server; unset keeps the built-in fetch path</td></tr>
+            <tr><td><code>webSearchUrl</code></td><td>HTTP MCP endpoint for <code>web</code>. Empty or unset means <strong>no</strong> HTTP backend</td></tr>
+            <tr><td><code>webSearchHttpTool</code> <code>webFetchHttpTool</code></td><td>Tool names your endpoint serves, if they differ</td></tr>
+            <tr><td><code>webSearchApiKeyHeader</code> <code>webSearchApiKeyEnv</code></td><td>Header and env var carrying the endpoint's key</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="warn">
+        <b>No vendor host ships in the binary</b>
+        Search is off until you point <code>webSearchUrl</code> or <code>webSearchServer</code> somewhere.
+        The refusal message names both routes, so an unconfigured <code>web</code> teaches instead of
+        failing dumbly.
+      </div>
+
+      <h3>Local discovery and paths</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>local_discovery_url</code></td><td>OpenAI-compatible <code>/v1</code> URL probed for local models</td></tr>
+            <tr><td><code>local_base_url</code></td><td>Pins the base URL for <code>local</code> / <code>local:&lt;id&gt;</code> keys</td></tr>
+            <tr><td><code>protected_paths</code> <code>allowed_paths</code></td><td>Path policy inputs, <code>~</code> expanded</td></tr>
+            <tr><td><code>quota_quick_script</code> <code>quota_full_script</code></td><td>Commands whose output becomes the quota badge / picker pool</td></tr>
+            <tr><td><code>memory_recall_bin</code> <code>memory_remember_bin</code></td><td>External recall bridge instead of the local store</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Remote hosts</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>hosts[].key</code></td><td>Alias used as <code>host</code> in tool calls</td></tr>
+            <tr><td><code>hosts[].ssh_target</code></td><td><code>ssh</code> destination; <code>local</code> means "never remote"</td></tr>
+            <tr><td><code>hosts[].sensitive</code></td><td>Require approval in <code>auto</code>; remote hosts are sensitive even without the flag</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        <code>read</code>, <code>write</code>, <code>bash</code>, <code>glob</code> and <code>search</code>
+        all accept <code>&lt;host&gt;:/path</code>, so one investigation can span machines.
+      </p>
+
+      <h3>MCP servers</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>mcpServers[].command</code> <code>args</code></td><td>Stdio server; <code>~</code> expanded, environment scrubbed</td></tr>
+            <tr><td><code>mcpServers[].env</code></td><td>The <strong>only</strong> variables the child inherits</td></tr>
+            <tr><td><code>mcpServers[].url</code></td><td>Streamable-HTTP server instead of a subprocess</td></tr>
+            <tr><td><code>mcpServers[].readOnly</code></td><td>Declares no side effects; without it, calls pass the mutation gate</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────── ENV ─────────────────────────────── -->
+    <section id="env" data-searchable>
+      <div class="kick">09 · Reference</div>
+      <h2>Environment variables<a class="anchor" href="#env" aria-label="Link to Environment">#</a></h2>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Variable</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><code>SPAVN_HOME</code></td><td>Config and state root instead of <code>~/.spavn</code></td></tr>
+            <tr><td><code>SPAVN_MODEL</code></td><td>Default model key</td></tr>
+            <tr><td><code>SPAVN_LANG</code></td><td>Initial UI language (<code>tr</code> / <code>en</code>)</td></tr>
+            <tr><td><code>SPAVN_SHELL</code></td><td>Shell used for <code>bash</code> tool invocations</td></tr>
+            <tr><td><code>SPAVN_BASE_URL</code> <code>SPAVN_API_KEY</code></td><td>Fallback endpoint when no provider resolves</td></tr>
+            <tr><td><code>SPAVN_FORCE_ANTHROPIC</code></td><td>Force the Anthropic wire format</td></tr>
+            <tr><td><code>SPAVN_LOCAL_MODELS_URL</code> <code>SPAVN_LOCAL_BASE_URL</code></td><td>Override local discovery / local base URL</td></tr>
+            <tr><td><code>SPAVN_WEB_SEARCH_URL</code></td><td>HTTP MCP endpoint for <code>web</code> when <code>webSearchUrl</code> is unset</td></tr>
+            <tr><td><code>SPAVN_UPDATE_CHECK</code></td><td><code>0</code> disables the release check</td></tr>
+            <tr><td><code>SPAVN_INSTALL_DIR</code> <code>SPAVN_LOCAL_BIN</code></td><td>Install script target directory / local binary to install</td></tr>
+            <tr><td><code>OPENAI_API_KEY</code> <code>ANTHROPIC_API_KEY</code> <code>GEMINI_API_KEY</code> <code>GROQ_API_KEY</code> <code>DEEPSEEK_API_KEY</code> <code>XAI_API_KEY</code> <code>OPENROUTER_API_KEY</code></td><td>Provider credentials</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────── SECURITY ─────────────────────────────── -->
+    <section id="security" data-searchable>
+      <div class="kick">10 · Behaviour</div>
+      <h2>Security gates<a class="anchor" href="#security" aria-label="Link to Security gates">#</a></h2>
+
+      <h3>Access modes</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Mode</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr><td>🔒 <code>safe</code></td><td>Every tool call asks for confirmation</td></tr>
+            <tr><td>⚡ <code>auto</code></td><td>Read-only calls run freely; mutations and non-trivial shell commands ask</td></tr>
+            <tr><td>🔥 <code>sovereign</code></td><td>Nothing asks — except the categories that always prompt</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="danger">
+        <b>sovereign is not a licence to exfiltrate</b>
+        Path policy, egress classification and MCP read-only checks stay active in every mode.
+      </div>
+
+      <h3>The six gates, in order</h3>
+      <div class="gates">
+        <div class="gate"><span class="num">1</span><span class="t"><b>Access</b><span>Mode below the call's risk class is refused</span></span><span class="loc">guard.rs</span></div>
+        <div class="gate"><span class="num">2</span><span class="t"><b>Phase</b><span><code>write</code>/<code>edit</code>/<code>bash</code> and mutating MCP calls refused in PLAN</span></span><span class="loc">tools.rs</span></div>
+        <div class="gate"><span class="num">3</span><span class="t"><b>Path</b><span><code>protected_paths</code>, secret material, outside <code>allowed_paths</code></span></span><span class="loc">guard.rs</span></div>
+        <div class="gate"><span class="num">4</span><span class="t"><b>Egress</b><span>Private / loopback / link-local targets, re-checked on every redirect hop</span></span><span class="loc">guard.rs</span></div>
+        <div class="gate"><span class="num">5</span><span class="t"><b>MCP</b><span>Mutating MCP call without <code>readOnly: true</code></span></span><span class="loc">tools.rs</span></div>
+        <div class="gate"><span class="num">6</span><span class="t"><b>Audit</b><span>Records nothing away — chains every action by HMAC</span></span><span class="loc">spavn_engine.rs</span></div>
+      </div>
+
+      <div class="warn">
+        <b>No TTY, no approval</b>
+        Approval prompts are answered by a real terminal only. Under a non-interactive shell there is
+        nobody to ask, so the answer is <strong>deny</strong> — a piped <code>stdin</code> at EOF is not
+        consent.
+      </div>
+
+      <h3>Phases</h3>
+      <p>
+        <code>/plan</code> is a read-only planning mode enforced in code: the model can read, search and
+        think, but <code>write</code>, <code>edit</code>, <code>bash</code> and mutating MCP calls are
+        refused. <code>/code</code> unlocks them. Prompt text cannot talk its way out of the phase.
+      </p>
+
+      <h3>What is on disk</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>~/.spavn/                 0700
+├── config.json           providers, paths, MCP servers
+├── secrets.env           0600 · flagged as secret material by the path policy
+├── PROFILE.md            user profile injected into the prompt
+├── sessions/             transcripts
+├── skills/               on-demand domain instructions
+├── tool-output/          spilled tool output, newest 40 kept
+└── audit.key             HMAC key for the audit chain</code></pre></div>
+    </section>
+
+    <!-- ─────────────────────────────── CONTEXT ─────────────────────────────── -->
+    <section id="context" data-searchable>
+      <div class="kick">11 · Behaviour</div>
+      <h2>Context &amp; memory<a class="anchor" href="#context" aria-label="Link to Context">#</a></h2>
+      <p class="lead">Four layers, increasing specificity. Everything is a file you can read and edit.</p>
+
+      <div class="tw">
+        <table>
+          <thead><tr><th>Layer</th><th>Location</th><th>Loaded</th></tr></thead>
+          <tbody>
+            <tr><td>Repo rules</td><td><code>AGENTS.md</code> in the working directory</td><td>always</td></tr>
+            <tr><td>Profile</td><td><code>~/.spavn/PROFILE.md</code></td><td>always; written back by <code>memory</code></td></tr>
+            <tr><td>Skills</td><td><code>~/.spavn/skills</code>, <code>~/.claude/skills</code></td><td>on demand via <code>skill</code></td></tr>
+            <tr><td>Pins</td><td>per project slug</td><td>always, until removed with <code>/pin</code></td></tr>
+            <tr><td>Wiki</td><td><code>~/.spavn</code></td><td>on <code>/wiki</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>External recall</h3>
+      <p>
+        <code>memory</code> can delegate to your own binaries via <code>memory_recall_bin</code> and
+        <code>memory_remember_bin</code> instead of the local store. The local store is the default,
+        not the only path.
+      </p>
+
+      <h3>Compaction</h3>
+      <p>
+        <code>/compact</code> rewrites the transcript into a shorter form and keeps going;
+        <code>/recap</code> controls the idle summary line. Context-window usage is shown in the dock as
+        a bar, sourced from the model's declared window.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────── ARCHITECTURE ─────────────────────────────── -->
+    <section id="architecture" data-searchable>
+      <div class="kick">12 · Behaviour</div>
+      <h2>Architecture<a class="anchor" href="#architecture" aria-label="Link to Architecture">#</a></h2>
+
+      <h3>Modules</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>src/
+├── main.rs           CLI parsing, agent loop, signal wiring
+├── lib.rs            module surface
+├── router.rs         model resolution, HTTP, streaming, endpoints
+├── tools.rs          tool schemas, executors, approval flow, MCP
+├── guard.rs          access, path and egress enforcement
+├── hud/              dock, input, keys, menus, tool cards
+├── slash_commands.rs command dispatch and /help
+├── session.rs        persistence, rewrite, fork
+├── spavn_engine.rs   audit chain, secret scrubbing, janitor, goals, pins
+├── memory.rs         recall / remember bridge
+├── skills.rs         skill discovery and injection
+├── update.rs         release check and upgrade advice
+├── spill.rs          oversized-output spill files
+├── markdown.rs       terminal Markdown rendering
+├── state.rs          shared signals between TUI and agent
+├── http.rs           the only socket code
+├── ansi.rs           escape sequences
+└── config.rs         config loading, defaults, provider catalog</code></pre></div>
+
+      <h3>Invariants</h3>
+      <ol>
+        <li><strong>Gates are code, never prompt text.</strong> Only <code>guard.rs</code> can permit.</li>
+        <li><strong>No implicit peers.</strong> The binary talks to the endpoint you configured and to processes you named in <code>mcpServers</code>.</li>
+        <li><strong>One socket layer.</strong> All network I/O goes through <code>http.rs</code>, which classifies every host before dialling.</li>
+      </ol>
+
+      <h3>Threads</h3>
+      <p>
+        No async runtime. The render loop is synchronous; threads exist only where a child process would
+        otherwise block: the pipe drainer that caps large output, the background-job waiter, bounded
+        <code>subagent</code> fan-out, and the one-shot update check. A long tool call still blocks the
+        render loop; interruption is by signal.
+      </p>
+
+      <h3>The request lifecycle</h3>
+      <ol>
+        <li>Prompt is assembled from <code>AGENTS.md</code>, profile, skills and pins.</li>
+        <li>Router resolves model key → endpoint.</li>
+        <li>Egress is classified and secrets are scrubbed before the body leaves.</li>
+        <li>Tokens stream into the transcript; tool calls arrive as structured JSON.</li>
+        <li>Each tool call walks the six gates; a mutation may prompt.</li>
+        <li>Result returns to the model; the dock and tool cards update.</li>
+      </ol>
+    </section>
+
+    <!-- ─────────────────────────────── UPDATE ─────────────────────────────── -->
+    <section id="update" data-searchable>
+      <div class="kick">13 · Behaviour</div>
+      <h2>Updates<a class="anchor" href="#update" aria-label="Link to Updates">#</a></h2>
+      <p class="lead">
+        There is no auto-updater and no daemon. The binary compares its own version against the newest
+        published tag and tells you the command to run.
+      </p>
+
+      <ul>
+        <li><strong>Background check</strong> — once per <code>updateCheckIntervalHours</code> (default 24), a single GET. Nothing is downloaded and nothing is executed.</li>
+        <li><strong>Banner notice</strong> — when a newer release is known, the welcome output carries a box with both versions and the upgrade command.</li>
+        <li><strong>Mid-session notice</strong> — if the check finishes later, the notice is parked and printed once the prompt is idle. It is never shown twice.</li>
+        <li><strong><code>/update</code></strong> — check on demand and print the exact command.</li>
+      </ul>
+
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>/update
+
+# the command it chooses depends on how this binary was installed
+#   brew  →  brew upgrade spavn
+#   cargo →  cargo install spavn --locked --force
+#   curl  →  curl -fsSL https://spavn.dev/install.sh | sh</code></pre></div>
+
+      <h3>Turning it off</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>// ~/.spavn/config.json
+{ "updateCheck": false }
+
+# or per invocation
+SPAVN_UPDATE_CHECK=0 spavn</code></pre></div>
+      <p>
+        <code>/update</code> says the check is disabled rather than falsely reporting "up to date".
+      </p>
+
+      <h3>Release channels</h3>
+      <p>
+        One tag drives everything: the GitHub archives with SHA-256 sidecars, the Homebrew formula
+        (generated by <code>packaging/homebrew/sync-tap.sh</code>) and the crates.io publish. Nothing is
+        rebuilt per channel.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────── TROUBLESHOOTING ─────────────────────────────── -->
+    <section id="troubleshooting" data-searchable>
+      <div class="kick">14 · Help</div>
+      <h2>Troubleshooting<a class="anchor" href="#troubleshooting" aria-label="Link to Troubleshooting">#</a></h2>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr><td>⚠️ NO TOOL CALL</td><td>The model cannot produce the tool format</td><td><code>/bench</code> it, then pick another model</td></tr>
+            <tr><td><code>search</code> errors out</td><td>ripgrep missing</td><td><code>brew install ripgrep</code> / <code>apt install ripgrep</code></td></tr>
+            <tr><td><code>web</code> refuses to search</td><td>No backend configured</td><td>Set <code>webSearchUrl</code> or <code>webSearchServer</code></td></tr>
+            <tr><td>Remote host shows 🔴</td><td><code>ssh</code> target unreachable</td><td><code>/host</code>, then check <code>ssh_target</code></td></tr>
+            <tr><td>Approval never appears</td><td>No TTY — the answer is deny by design</td><td>Run from a real terminal</td></tr>
+            <tr><td>Writes refused</td><td>Still in PLAN phase</td><td><code>/code</code></td></tr>
+            <tr><td>Everything asks in <code>auto</code></td><td>Command classified as mutating, or the host is <code>sensitive</code></td><td>Expected; use <code>/access sovereign</code> for speed</td></tr>
+            <tr><td><code>brew</code> refuses the tap</td><td>Homebrew 6+ requires explicit trust</td><td><code>brew trust tugayoktayokay/tap</code></td></tr>
+            <tr><td><code>brew install</code> says Xcode is too outdated</td><td>Homebrew aborts <em>any</em> install on an old Xcode</td><td>Update Xcode, or point <code>DEVELOPER_DIR</code> at the Command Line Tools</td></tr>
+            <tr><td>Binary killed on macOS after replacing it</td><td>Stale code signature in the kernel cache</td><td>Use the install script: it stages a fresh inode and re-signs</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Health checks</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>spavn --version          # version, OS, arch
+spavn --help             # flags, paths, env vars
+/audit                   # what actually ran, HMAC-chained
+/fleet                   # host reachability and latency
+/local                   # local model discovery</code></pre></div>
+    </section>
+
+    <!-- ─────────────────────────────── FAQ ─────────────────────────────── -->
+    <section id="faq" data-searchable>
+      <div class="kick">15 · Help</div>
+      <h2>FAQ<a class="anchor" href="#faq" aria-label="Link to FAQ">#</a></h2>
+
+      <details class="fold" open>
+        <summary>Does it phone home?</summary>
+        <p>
+          No telemetry and no analytics. Two outbound calls exist: the provider endpoint you configured,
+          and — if you leave it enabled — one release check per interval against
+          <code>updateCheckUrl</code>. Both are auditable in <code>http.rs</code>.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>Why is web search off by default?</summary>
+        <p>
+          Because shipping a default host would send your queries to a third party nobody chose. Point
+          <code>webSearchUrl</code> at your own bridge, or name an MCP server with
+          <code>webSearchServer</code>. Fetching a URL you gave it works without any config.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>Can I use it fully offline?</summary>
+        <p>
+          Yes, with a local model: <code>spavn --model ollama:qwen2.5-coder</code>, or any
+          OpenAI-compatible server via <code>SPAVN_LOCAL_BASE_URL</code>. Set
+          <code>updateCheck: false</code> and nothing leaves the machine.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>How is this different from a chat wrapper?</summary>
+        <p>
+          The gates. Access mode, phase, path policy, egress classification, MCP read-only checks and an
+          HMAC-chained audit log are enforced in Rust, not requested in a prompt. A model that decides to
+          write to <code>~/.ssh</code> in PLAN phase is refused.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>Does it work over SSH on a remote box?</summary>
+        <p>
+          Add the host to <code>hosts[]</code> and pass <code>&lt;host&gt;:/path</code> to
+          <code>read</code>, <code>write</code>, <code>bash</code>, <code>glob</code> or
+          <code>search</code>. Remote hosts are treated as <code>sensitive</code> automatically.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>Where are my API keys stored?</summary>
+        <p>
+          <code>~/.spavn/secrets.env</code>, mode <code>0600</code>. <code>config.json</code> stores key
+          <em>names</em> only. The path policy classifies <code>secrets.env</code> as secret material, so
+          no tool can read it back out.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>What happens if I pipe input into it?</summary>
+        <p>
+          Without a TTY there is nobody to approve anything, so the answer is deny. Headless use
+          (<code>-p … -q</code>) is designed for read-only or pre-approved work.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>How do I add desktop control?</summary>
+        <p>
+          Through MCP, not a builtin. Register the server in <code>mcpServers</code> and call it via the
+          <code>lsp</code> tool's <code>mcp</code> operation. Nothing assumes a vendor or a path.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>Why is there no async runtime?</summary>
+        <p>
+          A synchronous render loop is simpler to reason about and starts in under a millisecond. Threads
+          are used only where a child process would block: pipe draining, background jobs, subagents, and
+          the update check.
+        </p>
+      </details>
+
+      <details class="fold">
+        <summary>Can I ship it inside a company?</summary>
+        <p>
+          MIT licensed. Pin a version, mirror the archives, and set <code>updateCheckUrl</code> to your
+          own release feed — or turn the check off entirely. Provider endpoints and key env names are
+          config, so internal gateways work without patching.
+        </p>
+      </details>
+    </section>
+
+    <!-- ─────────────────────────────── CONTRIBUTING ─────────────────────────────── -->
+    <section id="contributing" data-searchable>
+      <div class="kick">16 · Help</div>
+      <h2>Contributing<a class="anchor" href="#contributing" aria-label="Link to Contributing">#</a></h2>
+
+      <h3>Build and gate</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>cargo build --release
+cargo fmt --all --check
+cargo clippy --all-targets
+cargo test
+
+# the ignored test needs a live MCP server from your own config
+cargo test -- --ignored</code></pre></div>
+
+      <h3>Rules that keep the project intact</h3>
+      <ul>
+        <li>No new runtime dependency without a strong reason, and no async runtime.</li>
+        <li>Every gate is enforced in code, never only in the prompt.</li>
+        <li>New behaviour needs a test that fails without it.</li>
+        <li>User-facing changes update <code>README.md</code> and <code>CHANGELOG.md</code>.</li>
+      </ul>
+
+      <h3>Release order</h3>
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>cargo fmt --all --check &amp;&amp; cargo clippy --all-targets &amp;&amp; cargo test
+cargo publish --dry-run
+
+git commit -am "chore(release): v0.1.1" &amp;&amp; git tag v0.1.1 &amp;&amp; git push --tags
+# CI builds the matrix and attaches SHA-256 sidecars
+
+cargo publish                                                  # needs a token
+sh packaging/homebrew/sync-tap.sh 0.1.1 /path/to/homebrew-tap   # or let CI do it</code></pre></div>
+
+      <div class="note">
+        <b>Publish after the tag</b>
+        <code>cargo publish</code> runs last so the crate's <code>repository</code> field and the README
+        images point at a release that already exists.
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="end">
+  <div class="row">
+    <a href="https://spavn.dev/">spavn.dev</a>
+    <a href="https://github.com/tugayoktayokay/spavn-cli">GitHub</a>
+    <a href="https://github.com/tugayoktayokay/spavn-cli/releases">Releases</a>
+    <a href="https://github.com/tugayoktayokay/spavn-cli/blob/main/README.md">README</a>
+    <a href="https://github.com/tugayoktayokay/homebrew-tap">Homebrew tap</a>
+  </div>
+  <div>SPAVN v0.1.0 · MIT · <span id="qcount">search index loading…</span></div>
+</footer>
+
+<noscript>
+  <div style="max-width:900px;margin:0 auto;padding:16px 20px;color:#94a3b8">
+    Search needs JavaScript. Every section below is plain HTML and fully readable without it.
+  </div>
+</noscript>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── theme ───────────────────────────────────────────────── */
+  var root = document.documentElement;
+  var saved = null;
+  try { saved = localStorage.getItem("spavn-docs-theme"); } catch (e) {}
+  if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
+  document.getElementById("theme").addEventListener("click", function () {
+    var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("spavn-docs-theme", next); } catch (e) {}
+  });
+
+  /* ── mobile nav ──────────────────────────────────────────── */
+  var side = document.getElementById("side");
+  var menuBtn = document.getElementById("menu-btn");
+  menuBtn.addEventListener("click", function () {
+    var open = side.classList.toggle("open");
+    menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  side.addEventListener("click", function (e) {
+    if (e.target.closest("a")) {
+      side.classList.remove("open");
+      menuBtn.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  /* ── copy buttons ────────────────────────────────────────── */
+  Array.prototype.forEach.call(document.querySelectorAll(".cb .copy"), function (btn) {
+    btn.addEventListener("click", function () {
+      var code = btn.parentNode.querySelector("code");
+      var text = code ? code.textContent : "";
+      var done = function () {
+        btn.textContent = "copied";
+        btn.classList.add("done");
+        setTimeout(function () { btn.textContent = "copy"; btn.classList.remove("done"); }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } else { fallback(); }
+      function fallback() {
+        var ta = document.createElement("textarea");
+        ta.value = text; ta.setAttribute("readonly", "");
+        ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    });
+  });
+
+  /* ── progress bar ────────────────────────────────────────── */
+  var bar = document.getElementById("progress");
+  var ticking = false;
+  window.addEventListener("scroll", function () {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(function () {
+      var h = document.documentElement.scrollHeight - window.innerHeight;
+      bar.style.width = (h > 0 ? Math.min(100, (window.scrollY / h) * 100) : 0) + "%";
+      ticking = false;
+    });
+  }, { passive: true });
+
+  /* ── active section in the sidebar ───────────────────────── */
+  var links = Array.prototype.slice.call(side.querySelectorAll("a"));
+  var byId = {};
+  links.forEach(function (a) { byId[a.getAttribute("href").slice(1)] = a; });
+
+  if ("IntersectionObserver" in window) {
+    var visible = {};
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) { visible[en.target.id] = en.isIntersecting ? en.intersectionRatio : 0; });
+      var best = null, bestV = 0;
+      Object.keys(visible).forEach(function (id) {
+        if (visible[id] > bestV) { bestV = visible[id]; best = id; }
+      });
+      if (best && byId[best]) {
+        links.forEach(function (a) { a.classList.remove("active"); });
+        byId[best].classList.add("active");
+      }
+    }, { rootMargin: "-70px 0px -60% 0px", threshold: [0, 0.15, 0.5, 1] });
+    Array.prototype.forEach.call(document.querySelectorAll("section[id]"), function (s) { io.observe(s); });
+  }
+
+  /* ── search index built from the rendered DOM ────────────── */
+  function norm(s) { return s.toLowerCase().replace(/\s+/g, " ").trim(); }
+
+  function buildIndex() {
+    var out = [];
+    Array.prototype.forEach.call(document.querySelectorAll("section[id]"), function (sec) {
+      var secTitle = (sec.querySelector("h2") || {}).textContent || sec.id;
+      secTitle = secTitle.replace("#", "").trim();
+      var kick = (sec.querySelector(".kick") || {}).textContent || "";
+      var group = kick.split("·")[1] ? kick.split("·")[1].trim() : "";
+
+      // Every heading owns the nodes up to the next h3/h4, so a search hit
+      // lands on the smallest section that actually contains the answer.
+      var subs = Array.prototype.slice.call(sec.querySelectorAll("h3, h4"));
+      if (subs.length === 0) {
+        out.push(make(sec.id, secTitle, secTitle, group, sec.textContent));
+        return;
+      }
+
+      subs.forEach(function (h, i) {
+        var title = h.textContent.replace("#", "").trim();
+        var text = title + " ";
+        var n = h.nextElementSibling;
+        while (n && !/^H[34]$/.test(n.tagName)) {
+          text += n.textContent + " ";
+          n = n.nextElementSibling;
+        }
+        // Give every heading a stable anchor if it has none.
+        if (!h.id) {
+          h.id = slug(title) + "-" + sec.id + (i ? "-" + i : "");
+        }
+        out.push(make(h.id, title, secTitle, group, text));
+      });
+    });
+    return out;
+  }
+
+  function make(id, title, section, group, text) {
+    return {
+      id: id,
+      title: title,
+      section: section,
+      group: group,
+      text: norm(text),
+      ntitle: norm(title),
+      nsection: norm(section)
+    };
+  }
+
+  function slug(s) {
+    return norm(s).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  }
+
+  /* Pure scoring: higher is better, 0 means no match. Exported for tests. */
+  function scoreEntry(entry, terms) {
+    var score = 0;
+    for (var i = 0; i < terms.length; i++) {
+      var t = terms[i];
+      var inTitle = entry.ntitle.indexOf(t) !== -1;
+      var inSection = entry.nsection.indexOf(t) !== -1;
+      var inBody = entry.text.indexOf(t) !== -1;
+      if (!inTitle && !inSection && !inBody) return 0;
+      if (entry.ntitle === t) score += 120;
+      else if (inTitle) score += 60;
+      if (inSection) score += 18;
+      if (inBody) {
+        score += 10;
+        // reward word-boundary hits over mid-word hits
+        if (new RegExp("(^|[^a-z0-9])" + t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(entry.text)) score += 6;
+      }
+    }
+    // Title-only sections are usually the best landing spot.
+    if (entry.title === entry.section) score += 4;
+    return score;
+  }
+
+  function snippet(entry, terms) {
+    var text = entry.text;
+    var at = -1;
+    for (var i = 0; i < terms.length && at === -1; i++) at = text.indexOf(terms[i]);
+    if (at === -1) at = 0;
+    var start = Math.max(0, at - 55);
+    var s = text.slice(start, start + 165).trim();
+    return (start > 0 ? "… " : "") + s + (start + 165 < text.length ? " …" : "");
+  }
+
+  function mark(str, terms) {
+    var out = str;
+    for (var i = 0; i < terms.length; i++) {
+      var t = terms[i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (!t) continue;
+      out = out.replace(new RegExp("(" + t + ")", "gi"), "<mark>$1</mark>");
+    }
+    return out;
+  }
+
+  var INDEX = [];
+  try {
+    INDEX = buildIndex();
+    document.getElementById("qcount").textContent = INDEX.length + " searchable sections";
+  } catch (e) {
+    document.getElementById("qcount").textContent = "search index unavailable";
+  }
+
+  var input = document.getElementById("q");
+  var results = document.getElementById("results");
+  var selected = -1;
+  var current = [];
+
+  function render(list, terms) {
+    current = list;
+    selected = list.length ? 0 : -1;
+    if (!list.length) {
+      results.innerHTML = '<div class="empty">No match. Try <code>mcp</code>, <code>access</code>, <code>update</code> or <code>webSearchUrl</code>.</div>';
+    } else {
+      results.innerHTML = list.map(function (r, i) {
+        return '<button class="res" role="option" data-i="' + i + '" aria-selected="' + (i === 0) + '">' +
+          '<span class="r-title">' + mark(r.title, terms) +
+          '<span class="r-where">' + r.section + '</span></span>' +
+          '<span class="r-snip">' + mark(snippet(r, terms), terms) + '</span></button>';
+      }).join("");
+    }
+    results.classList.add("open");
+    input.setAttribute("aria-expanded", "true");
+  }
+
+  function close() {
+    results.classList.remove("open");
+    input.setAttribute("aria-expanded", "false");
+    selected = -1;
+  }
+
+  function go(entry) {
+    close();
+    input.blur();
+    if (location.hash.slice(1) === entry.id) {
+      flash(entry.id);
+    } else {
+      location.hash = entry.id;
+    }
+  }
+
+  function flash(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove("flash");
+    void el.offsetWidth;
+    el.classList.add("flash");
+    setTimeout(function () { el.classList.remove("flash"); }, 1700);
+  }
+
+  function search(q) {
+    var terms = norm(q).split(" ").filter(function (t) { return t.length > 0; });
+    if (!terms.length) { close(); return; }
+    var scored = [];
+    for (var i = 0; i < INDEX.length; i++) {
+      var s = scoreEntry(INDEX[i], terms);
+      if (s > 0) scored.push({ e: INDEX[i], s: s });
+    }
+    scored.sort(function (a, b) { return b.s - a.s || a.e.title.length - b.e.title.length; });
+    render(scored.slice(0, 12).map(function (x) { return x.e; }), terms);
+  }
+
+  input.addEventListener("input", function () { search(input.value); });
+  input.addEventListener("focus", function () { if (input.value.trim()) search(input.value); });
+
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { input.value = ""; close(); input.blur(); return; }
+    if (!current.length) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      selected = e.key === "ArrowDown"
+        ? (selected + 1) % current.length
+        : (selected - 1 + current.length) % current.length;
+      Array.prototype.forEach.call(results.querySelectorAll(".res"), function (b, i) {
+        b.setAttribute("aria-selected", i === selected ? "true" : "false");
+        if (i === selected) b.scrollIntoView({ block: "nearest" });
+      });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (current[selected]) go(current[selected]);
+    }
+  });
+
+  results.addEventListener("click", function (e) {
+    var btn = e.target.closest(".res");
+    if (!btn) return;
+    var entry = current[parseInt(btn.getAttribute("data-i"), 10)];
+    if (entry) go(entry);
+  });
+
+  document.addEventListener("click", function (e) {
+    if (!e.target.closest(".searchbox")) close();
+  });
+
+  document.addEventListener("keydown", function (e) {
+    var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) || document.activeElement.isContentEditable;
+    if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault(); input.focus(); input.select(); return;
+    }
+    if (e.key === "/" && !typing) { e.preventDefault(); input.focus(); return; }
+    if (e.key === "Escape" && document.activeElement === input) { input.value = ""; close(); input.blur(); }
+  });
+
+  /* highlight the target after an external hash navigation */
+  window.addEventListener("hashchange", function () {
+    var id = location.hash.slice(1);
+    if (id) flash(id);
+  });
+  if (location.hash) {
+    var start = location.hash.slice(1);
+    setTimeout(function () { flash(start); }, 60);
+  }
+
+  /* exposed for the test harness */
+  window.__spavnDocs = { index: INDEX, score: scoreEntry, norm: norm, terms: function (q) {
+    return norm(q).split(" ").filter(function (t) { return t.length > 0; });
+  } };
+})();
+</script>
+</body>
+</html>
