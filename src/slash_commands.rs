@@ -907,10 +907,11 @@ pub fn dispatch_slash_command(
             return SlashOutcome::Handled;
         }
         if let Some(rest) = arg
-            .strip_prefix("done ")
-            .or_else(|| arg.strip_prefix("check "))
+            .strip_prefix("done")
+            .or_else(|| arg.strip_prefix("check"))
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
         {
-            if let Ok(idx) = rest.trim().parse::<usize>() {
+            let report = |idx: usize| {
                 if crate::toggle_live_task(idx) {
                     println!(
                         "\n{}✓ #{}: {}{}",
@@ -928,8 +929,34 @@ pub fn dispatch_slash_command(
                         RESET
                     );
                 }
-                return SlashOutcome::Handled;
+            };
+            // A bare `/todo done` (or anything that is not a usable index) opens the arrow-key
+            // picker: closing a task must not require memorising its number.
+            match rest.trim().parse::<usize>() {
+                Ok(idx) => report(idx),
+                Err(_) => match hud::interactive_select_live_task() {
+                    Some(idx) => report(idx),
+                    None if crate::list_live_tasks().is_empty() => println!(
+                        "\n{}📋 {}{}",
+                        DIM,
+                        tr_en(
+                            "Aktif görev yok. Eklemek için `/todo <görev>` yazın.",
+                            "No active tasks. Run `/todo <task>` to add one."
+                        ),
+                        RESET
+                    ),
+                    None => println!(
+                        "\n{}📋 {}{}",
+                        DIM,
+                        tr_en(
+                            "Seçim yapılmadı. Numarayla kapatmak için `/todo done <n>`.",
+                            "Nothing selected. Close by number with `/todo done <n>`."
+                        ),
+                        RESET
+                    ),
+                },
             }
+            return SlashOutcome::Handled;
         }
         if let Some(rest) = arg.strip_prefix("add ") {
             crate::add_live_task(rest.trim().to_string());
@@ -953,7 +980,7 @@ pub fn dispatch_slash_command(
                 .filter(|t| t.status == crate::LiveTaskStatus::Done)
                 .count();
             println!(
-                "\n{}╭─ 📋 {} [{}/{}] (/todo done <n> · /todo clear){}",
+                "\n{}╭─ 📋 {} [{}/{}] (/todo done ← ↑↓ · /todo clear){}",
                 CYAN,
                 tr_en("Canlı Görev Takibi", "Live Task Tracker"),
                 done_cnt,
