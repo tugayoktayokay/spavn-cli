@@ -11,7 +11,7 @@ No async runtime. No Electron. No plugin tree. Three direct dependencies, one `c
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![Tests](https://img.shields.io/badge/tests-215%20passing-success.svg)](#development)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#install)
-[![Docs](https://img.shields.io/badge/docs-spavn.dev-black.svg)](https://spavn.dev)
+[![Docs](https://img.shields.io/badge/docs-spavn.dev%2Fdocs-black.svg)](https://spavn.dev/docs/)
 
 ```
 $ spavn "refactor the spill module, then run the suite"
@@ -23,7 +23,7 @@ $ spavn "refactor the spill module, then run the suite"
 
 <div align="center">
 
-**[Screenshots](#-screenshots)** · **[Why](#-why-another-coding-agent)** · **[Install](#-install)** · **[First run](#-first-run)** · **[Tools](#-the-tool-surface)** · **[Slash commands](#-slash-commands)** · **[Config](#-configuration)** · **[Security](#-permissions-and-path-policy)** · **[Architecture](#-architecture)**
+**[Docs](https://spavn.dev/docs/)** · **[Screenshots](#-screenshots)** · **[Why](#-why-another-coding-agent)** · **[Install](#-install)** · **[First run](#-first-run)** · **[Tools](#-the-tool-surface)** · **[Slash commands](#-slash-commands)** · **[Config](#-configuration)** · **[Security](#-permissions-and-path-policy)** · **[Architecture](#-architecture)**
 
 </div>
 
