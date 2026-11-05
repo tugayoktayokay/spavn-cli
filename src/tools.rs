@@ -201,7 +201,11 @@ pub fn tool_definitions() -> Value {
     let mcp_hint = if mcp_names.is_empty() {
         "No MCP servers configured (`mcpServers` in `~/.spavn/config.json`).".to_string()
     } else {
-        format!("MCP servers: `{}`.", mcp_names.join("`, `"))
+        format!(
+            "MCP servers: `{}`. Call with `op='mcp'`, `server=<name>` and no `tool` to list what a \
+             server exposes, then again with `tool=<name>` and `arguments={{...}}` to run it.",
+            mcp_names.join("`, `")
+        )
     };
     let lsp_desc = format!(
         "Symbol navigation (`op=definition|references|symbols`) and generic MCP client (`op='mcp'`). {}",
@@ -411,41 +415,7 @@ pub fn tool_definitions() -> Value {
                     "required": ["op"]
                 }
             }
-        },
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "computer",
-                "description": "Native host desktop capture, accessibility tree, and input (SOVEREIGN Computer Use). Control macOS apps (WhatsApp, Chrome, Finder), inspect windows, take screenshots, click, type, press keys, read semantic accessibility tree.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": [
-                                "snapshot", "batch", "windows", "apps", "focus",
-                                "screenshot", "click", "double_click", "right_click",
-                                "mouse_move", "type", "key", "scroll", "ocr", "ocr_click"
-                            ],
-                            "description": "Action to perform"
-                        },
-                        "app": { "type": "string", "description": "Application name (e.g. WhatsApp, Google Chrome, Finder)" },
-                        "target": { "type": "string", "description": "Target window title, app name, or query" },
-                        "coordinate": {
-                            "type": "array",
-                            "items": { "type": "integer" },
-                            "description": "[x, y] coordinates"
-                        },
-                        "text": { "type": "string", "description": "Text to type" },
-                        "key": { "type": "string", "description": "Key or key combination to press (e.g. Return, Escape, cmd+v)" },
-                        "element": { "type": "integer", "description": "Accessibility element index" },
-                        "path": { "type": "string", "description": "Screenshot destination path" },
-                        "calls": { "type": "array", "description": "Batch calls array for batch action" }
-                    },
-                    "required": ["action"]
-                }
-            }
-        })
+        }
     ])
 }
 
@@ -3260,6 +3230,134 @@ fn run_single_subagent_worker(
         .unwrap_or_else(|| "(Sub-agent completed without textual summary)".to_string())
 }
 
+/// Runs one JSON-RPC exchange against a stdio MCP server and formats the reply.
+///
+/// Split out of the `lsp` dispatcher so the transport can be exercised against a throwaway server
+/// without going through `load_user_config()`, which would make the test mutate the user's real
+/// `~/.spavn/config.json`.
+fn call_stdio_mcp(
+    server_name: &str,
+    srv: &crate::config::McpServerConfig,
+    tool_name: &str,
+    mcp_args: &Value,
+) -> String {
+    let Some(cmd_bin) = &srv.command else {
+        return format!("MCP server '{}' has no `command`.", server_name);
+    };
+    let expanded_bin = crate::config::expand_user_path(cmd_bin);
+    let expanded_args: Vec<String> = srv
+        .args
+        .iter()
+        .map(|a| {
+            if a.starts_with("~/") {
+                crate::config::expand_user_path(a).display().to_string()
+            } else {
+                a.clone()
+            }
+        })
+        .collect();
+    let mut cmd = Command::new(&expanded_bin);
+    // The child used to inherit the whole environment, so a compromised or mispackaged
+    // MCP server could read every API key the user has exported. Only PATH/HOME plus the
+    // server's own configured values cross the boundary.
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let expanded_env: Vec<(String, String)> = srv
+        .env
+        .iter()
+        .map(|(k, v)| {
+            let value = if v.starts_with("~/") {
+                crate::config::expand_user_path(v).display().to_string()
+            } else {
+                v.clone()
+            };
+            (k.clone(), value)
+        })
+        .collect();
+    cmd.args(&expanded_args)
+        .env_clear()
+        .env("PATH", inherited_path)
+        .env("HOME", crate::config::home_dir())
+        .envs(expanded_env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let Ok(mut child) = cmd.spawn() else {
+        return format!(
+            "MCP server '{}' failed to spawn `{}`; check the `command` in `mcpServers`",
+            server_name,
+            expanded_bin.display()
+        );
+    };
+    let init_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "spavn", "version": env!("CARGO_PKG_VERSION") }
+        }
+    });
+    let call_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": if tool_name.is_empty() { "tools/list" } else { "tools/call" },
+        "params": if tool_name.is_empty() {
+            json!({})
+        } else {
+            json!({ "name": tool_name, "arguments": mcp_args })
+        }
+    });
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = writeln!(stdin, "{}", init_msg);
+        let _ = writeln!(
+            stdin,
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}"
+        );
+        let _ = writeln!(stdin, "{}", call_msg);
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            let mut last_json = String::new();
+            // A single JSON-RPC line has no size bound on the wire; capping it here keeps a
+            // chatty or hostile server from forcing a multi-megabyte parse per call.
+            const MCP_LINE_CAP: usize = 32 * 1024 * 1024; // 32MB for high-res Computer Use screenshots
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.len() > MCP_LINE_CAP {
+                    let _ = tx.send(format!(
+                        "{{\"error\":\"MCP response line exceeded {} bytes\"}}",
+                        MCP_LINE_CAP
+                    ));
+                    return;
+                }
+                if trimmed.starts_with('{') {
+                    last_json = trimmed.to_string();
+                    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                        if v.get("id").and_then(|id| id.as_i64()) == Some(2) {
+                            let _ = tx.send(trimmed.to_string());
+                            return;
+                        }
+                    }
+                }
+            }
+            if !last_json.is_empty() {
+                let _ = tx.send(last_json);
+            }
+        });
+    }
+    let received = rx.recv_timeout(std::time::Duration::from_secs(45)).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    match received {
+        Some(json_line) => format_mcp_jsonrpc_response(server_name, tool_name, &json_line),
+        None => "(MCP server returned no response within 45s)".to_string(),
+    }
+}
+
 /// Collapses a sub-agent task into one short, single-line header label.
 fn one_line_task(task: &str) -> String {
     let flat = task.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3482,8 +3580,8 @@ fn is_mutating_mcp_tool(server_name: &str, tool_name: &str, server_is_read_only:
     if tool_name.trim().is_empty() || server_is_read_only {
         return false;
     }
-    // The `sovereign` computer-use server drives a real desktop; nothing it exposes is safe to
-    // run unattended regardless of verb spelling.
+    // A desktop-driving server mutates everything it touches, whatever its verbs are spelled
+    // like; `readOnly: true` in the config is the only way to opt one out.
     if server_name.eq_ignore_ascii_case("sovereign") {
         return true;
     }
@@ -3562,115 +3660,8 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                 Err(e) => format!("MCP HTTP error ({}): {}", server_name, e),
             };
         }
-        if let Some(cmd_bin) = &srv.command {
-            let expanded_bin = crate::config::expand_user_path(cmd_bin);
-            let expanded_args: Vec<String> = srv
-                .args
-                .iter()
-                .map(|a| {
-                    if a.starts_with("~/") {
-                        crate::config::expand_user_path(a).display().to_string()
-                    } else {
-                        a.clone()
-                    }
-                })
-                .collect();
-            let mut cmd = Command::new(&expanded_bin);
-            // The child used to inherit the whole environment, so a compromised or mispackaged
-            // MCP server could read every API key the user has exported. Only PATH/HOME plus the
-            // server's own configured values cross the boundary.
-            let inherited_path = std::env::var("PATH").unwrap_or_default();
-            let expanded_env: Vec<(String, String)> = srv
-                .env
-                .iter()
-                .map(|(k, v)| {
-                    let value = if v.starts_with("~/") {
-                        crate::config::expand_user_path(v).display().to_string()
-                    } else {
-                        v.clone()
-                    };
-                    (k.clone(), value)
-                })
-                .collect();
-            cmd.args(&expanded_args)
-                .env_clear()
-                .env("PATH", inherited_path)
-                .env("HOME", crate::config::home_dir())
-                .envs(expanded_env)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            let Ok(mut child) = cmd.spawn() else {
-                return format!("MCP error: failed to spawn `{}`", expanded_bin.display());
-            };
-            let init_msg = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": { "name": "spavn", "version": env!("CARGO_PKG_VERSION") }
-                }
-            });
-            let call_msg = json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": if tool_name.is_empty() { "tools/list" } else { "tools/call" },
-                "params": if tool_name.is_empty() {
-                    json!({})
-                } else {
-                    json!({ "name": tool_name, "arguments": mcp_args })
-                }
-            });
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = writeln!(stdin, "{}", init_msg);
-                let _ = writeln!(
-                    stdin,
-                    "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}"
-                );
-                let _ = writeln!(stdin, "{}", call_msg);
-            }
-            let (tx, rx) = std::sync::mpsc::channel::<String>();
-            if let Some(stdout) = child.stdout.take() {
-                std::thread::spawn(move || {
-                    use std::io::BufRead;
-                    let reader = std::io::BufReader::new(stdout);
-                    let mut last_json = String::new();
-                    // A single JSON-RPC line has no size bound on the wire; capping it here keeps a
-                    // chatty or hostile server from forcing a multi-megabyte parse per call.
-                    const MCP_LINE_CAP: usize = 32 * 1024 * 1024; // 32MB for high-res Computer Use screenshots
-                    for line in reader.lines().map_while(Result::ok) {
-                        let trimmed = line.trim();
-                        if trimmed.len() > MCP_LINE_CAP {
-                            let _ = tx.send(format!(
-                                "{{\"error\":\"MCP response line exceeded {} bytes\"}}",
-                                MCP_LINE_CAP
-                            ));
-                            return;
-                        }
-                        if trimmed.starts_with('{') {
-                            last_json = trimmed.to_string();
-                            if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-                                if v.get("id").and_then(|id| id.as_i64()) == Some(2) {
-                                    let _ = tx.send(trimmed.to_string());
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    if !last_json.is_empty() {
-                        let _ = tx.send(last_json);
-                    }
-                });
-            }
-            let received = rx.recv_timeout(std::time::Duration::from_secs(45)).ok();
-            let _ = child.kill();
-            let _ = child.wait();
-            if let Some(json_line) = received {
-                return format_mcp_jsonrpc_response(server_name, &tool_name, &json_line);
-            }
-            return "(MCP server returned no response within 45s)".to_string();
+        if srv.command.is_some() {
+            return call_stdio_mcp(server_name, srv, &tool_name, &mcp_args);
         }
         return format!(
             "MCP server '{}' has neither `command` nor `url`.",
@@ -3726,186 +3717,6 @@ fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
     )
 }
 
-fn exec_computer(_ctx: &mut ToolContext, args: &Value) -> String {
-    let action_raw = get_str_alias(args, &["action", "op", "cmd", "action_type"]);
-    let action = action_raw.trim().to_lowercase();
-    let app = get_str_alias(args, &["app", "application", "bundle_id"]);
-    let target_raw = get_str_alias(args, &["target", "window", "title", "query"]);
-    let target = if target_raw.is_empty() {
-        app
-    } else {
-        target_raw
-    };
-    let text = get_str_alias(args, &["text", "string", "input"]);
-    let key = get_str_alias(args, &["key", "combination", "keys"]);
-    let path = get_str_alias(args, &["path", "file", "dest", "destination"]);
-
-    let (coord_x, coord_y) = if let Some(arr) = args.get("coordinate").and_then(|v| v.as_array()) {
-        if arr.len() >= 2 {
-            (arr[0].as_i64(), arr[1].as_i64())
-        } else {
-            (None, None)
-        }
-    } else {
-        let x = args.get("x").and_then(|v| v.as_i64());
-        let y = args.get("y").and_then(|v| v.as_i64());
-        (x, y)
-    };
-
-    let element = args.get("element").and_then(|v| v.as_i64());
-    let sov_path = home_dir().join("bin").join("sov");
-
-    let mut cmd = std::process::Command::new("python3");
-    cmd.arg(&sov_path).arg("gui");
-
-    match action.as_str() {
-        "snapshot" | "elements" | "tree" | "cua-snapshot" => {
-            cmd.arg("cua-snapshot");
-            if !target.is_empty() {
-                cmd.arg(target);
-            }
-        }
-        "batch" | "cua-batch" => {
-            cmd.arg("cua-batch");
-            let calls_str = if let Some(calls) = args.get("calls") {
-                calls.to_string()
-            } else if let Some(calls) = args.get("batch") {
-                calls.to_string()
-            } else {
-                "[]".to_string()
-            };
-            cmd.arg(calls_str);
-        }
-        "windows" => {
-            cmd.arg("windows");
-        }
-        "apps" => {
-            cmd.arg("apps");
-        }
-        "focus" | "activate" => {
-            cmd.arg("focus");
-            cmd.arg(target);
-        }
-        "screenshot" | "shot" => {
-            let out_path = if path.is_empty() {
-                "/tmp/spavn_screenshot.png".to_string()
-            } else {
-                path.to_string()
-            };
-            if !target.is_empty() {
-                cmd.arg("shot").arg(target).arg(&out_path);
-            } else {
-                let res = std::process::Command::new("screencapture")
-                    .arg("-x")
-                    .arg(&out_path)
-                    .output();
-                match res {
-                    Ok(o) if o.status.success() => {
-                        return serde_json::json!({
-                            "status": "ok",
-                            "path": out_path,
-                            "type": "screenshot"
-                        })
-                        .to_string();
-                    }
-                    Ok(o) => {
-                        return format!(
-                            "screencapture failed: {}",
-                            String::from_utf8_lossy(&o.stderr)
-                        );
-                    }
-                    Err(e) => return format!("screencapture error: {e}"),
-                }
-            }
-        }
-        "click" | "left_click" => {
-            if let Some(elem) = element {
-                let batch = serde_json::json!([
-                    {"tool": "click", "args": {"element": elem}}
-                ]);
-                cmd.arg("cua-batch").arg(batch.to_string());
-            } else if let (Some(x), Some(y)) = (coord_x, coord_y) {
-                cmd.arg("click").arg(x.to_string()).arg(y.to_string());
-            } else if !target.is_empty() {
-                cmd.arg("ocr-click").arg(target);
-            } else {
-                return "computer click requires either coordinate [x, y], element index, or target text".to_string();
-            }
-        }
-        "double_click" => {
-            if let (Some(x), Some(y)) = (coord_x, coord_y) {
-                cmd.arg("double-click")
-                    .arg(x.to_string())
-                    .arg(y.to_string());
-            } else {
-                return "computer double_click requires coordinate [x, y]".to_string();
-            }
-        }
-        "right_click" => {
-            if let (Some(x), Some(y)) = (coord_x, coord_y) {
-                cmd.arg("right-click").arg(x.to_string()).arg(y.to_string());
-            } else {
-                return "computer right_click requires coordinate [x, y]".to_string();
-            }
-        }
-        "mouse_move" | "move" => {
-            if let (Some(x), Some(y)) = (coord_x, coord_y) {
-                cmd.arg("move").arg(x.to_string()).arg(y.to_string());
-            } else {
-                return "computer mouse_move requires coordinate [x, y]".to_string();
-            }
-        }
-        "type" | "type_text" => {
-            cmd.arg("type").arg(text);
-        }
-        "key" | "press_key" | "key_combination" | "hotkey" => {
-            cmd.arg("key").arg(key);
-        }
-        "scroll" => {
-            let dx = coord_x.unwrap_or(0);
-            let dy = coord_y.unwrap_or(0);
-            cmd.arg("scroll").arg(dx.to_string()).arg(dy.to_string());
-        }
-        "ocr" => {
-            cmd.arg("ocr");
-            if !target.is_empty() {
-                cmd.arg(target);
-            }
-        }
-        "ocr_click" => {
-            cmd.arg("ocr-click").arg(target);
-            if !text.is_empty() {
-                cmd.arg(text);
-            }
-        }
-        _ => {
-            return format!(
-                "Unknown computer action '{action}'. Valid actions: snapshot, batch, windows, apps, focus, screenshot, click, double_click, right_click, mouse_move, type, key, scroll, ocr, ocr_click"
-            );
-        }
-    }
-
-    match cmd.output() {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if !stdout.is_empty() {
-                stdout
-            } else if !stderr.is_empty() {
-                stderr
-            } else if out.status.success() {
-                serde_json::json!({"status": "ok", "action": action}).to_string()
-            } else {
-                format!(
-                    "computer action '{action}' failed with exit code {:?}",
-                    out.status.code()
-                )
-            }
-        }
-        Err(e) => format!("failed to execute sovereign computer engine (~/bin/sov): {e}"),
-    }
-}
-
 pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> String {
     ctx.tool_step_counter += 1;
     let args = parse_args_resilient(args_json);
@@ -3930,11 +3741,8 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
         "lsp" | "mcp" | "goto_definition" | "find_references" | "document_symbols" => {
             exec_lsp_and_mcp(ctx, &args)
         }
-        "computer" | "computer_use" | "open_computer_use" => {
-            exec_computer(ctx, &args)
-        }
         _ => format!(
-            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp, computer.",
+            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp.",
             name
         ),
     }
@@ -4846,5 +4654,143 @@ mod security_tests {
         let out = format_mcp_jsonrpc_response("srv", "tool", &huge);
         assert!(out.contains("kırpıldı"), "{} bytes", out.len());
         assert!(out.len() < 200_000, "{} bytes", out.len());
+    }
+}
+
+#[cfg(test)]
+mod mcp_computer_tests {
+    use super::*;
+
+    fn ctx() -> ToolContext {
+        ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            crate::spavn_engine::AgentPhase::Code,
+        )
+    }
+
+    /// `computer` used to be a builtin that shelled out to a hardcoded `~/bin/sov` path. Desktop
+    /// control is now just an MCP server the user configures, so the builtin must stay gone while
+    /// the `lsp` tool keeps carrying the MCP client.
+    #[test]
+    fn computer_is_no_longer_a_builtin_tool() {
+        let names: Vec<String> = tool_definitions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(!names.iter().any(|n| n == "computer"), "{:?}", names);
+        assert!(names.iter().any(|n| n == "lsp"));
+
+        // The model has to be able to find a server's tools without a second prompt, so the
+        // description must carry the configured server names.
+        let lsp = tool_definitions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["function"]["name"] == "lsp")
+            .cloned()
+            .unwrap();
+        let desc = lsp["function"]["description"].as_str().unwrap();
+        assert!(desc.contains("op='mcp'"), "{}", desc);
+        let configured = crate::config::load_user_config();
+        for name in configured.mcp_servers.keys() {
+            assert!(
+                desc.contains(name.as_str()),
+                "{} missing from {}",
+                name,
+                desc
+            );
+        }
+    }
+
+    #[test]
+    fn a_removed_builtin_reports_unknown() {
+        let mut c = ctx();
+        let out = execute_tool(&mut c, "computer", "{}");
+        assert!(out.contains("Unknown tool"), "{}", out);
+        assert!(!out.contains("computer,"), "stale hint: {}", out);
+    }
+
+    /// Exercises the real stdio transport against a throwaway server. Takes the config by value so
+    /// the test never touches `~/.spavn/config.json`.
+    #[test]
+    fn stdio_mcp_lists_and_calls() {
+        let dir = std::env::temp_dir().join(format!("spavn-mcp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let server = dir.join("stub.py");
+        std::fs::write(
+            &server,
+            r#"import json,sys
+for line in sys.stdin:
+    msg=json.loads(line)
+    if "id" not in msg: continue
+    m=msg.get("method")
+    if m=="initialize":
+        out={"protocolVersion":"2024-11-05","capabilities":{"tools":{}}}
+    elif m=="tools/list":
+        out={"tools":[{"name":"click","description":"Click","inputSchema":{"type":"object"}}]}
+    elif m=="tools/call":
+        a=msg["params"].get("arguments",{})
+        out={"content":[{"type":"text","text":"clicked %s,%s"%(a.get("x"),a.get("y"))}]}
+    else: continue
+    sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":out})+"\n")
+    sys.stdout.flush()
+"#,
+        )
+        .unwrap();
+        let srv = crate::config::McpServerConfig {
+            command: Some("python3".to_string()),
+            args: vec![server.display().to_string()],
+            env: Default::default(),
+            url: None,
+            read_only: false,
+        };
+
+        let listed = call_stdio_mcp("desktop", &srv, "", &json!({}));
+        let called = call_stdio_mcp("desktop", &srv, "click", &json!({"x": 3, "y": 4}));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(listed.contains("click"), "list: {}", listed);
+        assert!(called.contains("clicked 3,4"), "call: {}", called);
+    }
+
+    /// The real desktop server, used only when the operator has it installed. `capture_display`
+    /// is read-only, so this proves the whole path without touching the screen.
+    #[test]
+    #[ignore]
+    fn real_open_computer_use_lists_tools() {
+        let home = std::env::var("HOME").unwrap();
+        let bin = std::path::PathBuf::from(&home).join("bin/open-computer-use");
+        if !bin.exists() {
+            return;
+        }
+        let srv = crate::config::McpServerConfig {
+            command: Some(bin.display().to_string()),
+            args: vec!["mcp".to_string()],
+            env: Default::default(),
+            url: None,
+            read_only: false,
+        };
+        let listed = call_stdio_mcp("open-computer-use", &srv, "", &json!({}));
+        assert!(listed.contains("capture_display"), "{}", listed);
+        assert!(listed.contains("click"), "{}", listed);
+        let shot = call_stdio_mcp("open-computer-use", &srv, "list_apps", &json!({}));
+        assert!(!shot.is_empty(), "{}", shot);
+    }
+
+    #[test]
+    fn a_missing_server_binary_is_named() {
+        let srv = crate::config::McpServerConfig {
+            command: Some("spavn-no-such-binary".to_string()),
+            args: Vec::new(),
+            env: Default::default(),
+            url: None,
+            read_only: false,
+        };
+        let out = call_stdio_mcp("desktop", &srv, "", &json!({}));
+        assert!(out.contains("desktop"), "{}", out);
     }
 }
