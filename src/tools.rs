@@ -3015,12 +3015,109 @@ fn strip_html_to_clean_text(html: &str) -> String {
         .to_string()
 }
 
-fn call_exa_mcp(tool_name: &str, arguments: Value) -> Option<String> {
-    // Key goes in a header (documented by Exa), never in the URL where logs and proxies keep it.
-    let api_key = std::env::var("EXA_API_KEY").unwrap_or_default();
+/// Endpoint the `web` tool posts its MCP calls to.
+///
+/// Ships with the hosted default so first runs work unconfigured, but the value is config-driven
+/// (`web_search_url`) so operators can point it at their own bridge or switch it off entirely.
+const DEFAULT_WEB_SEARCH_URL: &str = "https://mcp.exa.ai/mcp";
+
+fn web_search_endpoint() -> Option<String> {
+    let configured = crate::config::load_user_config().web_search_url;
+    let raw = configured
+        .or_else(|| std::env::var("SPAVN_WEB_SEARCH_URL").ok())
+        .unwrap_or_else(|| DEFAULT_WEB_SEARCH_URL.to_string());
+    let trimmed = raw.trim();
+    // An empty value is a deliberate "no search backend"; callers fall back to plain fetching.
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Resolves the streaming-MCP backend for the `web` tool.
+///
+/// Returns `Ok(None)` when search is deliberately switched off. An unusable configuration is an
+/// error rather than a silent fallback: falling back would send the query to the hosted default,
+/// which is exactly the host an operator who configured a server wanted to avoid.
+fn web_search_server_tool() -> Result<Option<(String, String)>, String> {
+    let cfg = crate::config::load_user_config();
+    resolve_web_search_target(
+        cfg.web_search_server.as_deref(),
+        cfg.web_search_tool.as_deref(),
+        |name| cfg.mcp_servers.contains_key(name),
+    )
+}
+
+/// Pure core of [`web_search_server_tool`], split out so the validation rules are testable
+/// without touching the global config or process environment.
+fn resolve_web_search_target(
+    server: Option<&str>,
+    tool: Option<&str>,
+    server_exists: impl Fn(&str) -> bool,
+) -> Result<Option<(String, String)>, String> {
+    let server = server.map(str::trim).unwrap_or_default();
+    if server.is_empty() {
+        return Ok(None);
+    }
+    if !server_exists(server) {
+        return Err(format!(
+            "Web search error: `webSearchServer` names `{}`, which is not in `mcpServers`.",
+            server
+        ));
+    }
+    let tool = tool.map(str::trim).unwrap_or_default();
+    if tool.is_empty() {
+        return Err(format!(
+            "Web search error: `webSearchServer` is `{}` but `webSearchTool` is unset.",
+            server
+        ));
+    }
+    Ok(Some((server.to_string(), tool.to_string())))
+}
+
+/// Tool name the HTTP backend serves for one operation, honouring the config override.
+fn web_http_tool(configured: Option<&str>, default: &str) -> String {
+    configured
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+        .unwrap_or(default)
+        .to_string()
+}
+
+/// Posts one MCP call to the configured HTTP search backend.
+///
+/// Host, tool name, API-key header and key env var all come from config, so a self-hosted bridge
+/// substitutes the hosted default without a rebuild and without editing source.
+fn call_web_http(tool_name: &str, arguments: Value) -> Option<String> {
+    let cfg = crate::config::load_user_config();
+    let endpoint = web_search_endpoint()?;
+    let header = cfg
+        .web_search_api_key_header
+        .as_deref()
+        .map(str::trim)
+        .filter(|header| !header.is_empty())
+        .unwrap_or("x-api-key");
+    let env_name = cfg
+        .web_search_api_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|env_name| !env_name.is_empty())
+        .unwrap_or("EXA_API_KEY");
+    let api_key = std::env::var(env_name).unwrap_or_default();
+    call_http_search_mcp(&endpoint, tool_name, arguments, &api_key, header)
+}
+
+fn call_http_search_mcp(
+    endpoint: &str,
+    tool_name: &str,
+    arguments: Value,
+    api_key: &str,
+    api_key_header: &str,
+) -> Option<String> {
+    // Keys go in a header, never in the URL where logs and proxies keep them.
     let mut headers = vec![("Accept", "application/json, text/event-stream")];
     if !api_key.trim().is_empty() {
-        headers.push(("x-api-key", api_key.trim()));
+        headers.push((api_key_header, api_key.trim()));
     }
     let payload = json!({
         "jsonrpc": "2.0",
@@ -3032,8 +3129,7 @@ fn call_exa_mcp(tool_name: &str, arguments: Value) -> Option<String> {
         }
     });
     let (status, raw) =
-        crate::http::post_json("https://mcp.exa.ai/mcp", &payload.to_string(), &headers, 15)
-            .ok()?;
+        crate::http::post_json(endpoint, &payload.to_string(), &headers, 15).ok()?;
     if !(200..300).contains(&status) {
         return None;
     }
@@ -3088,14 +3184,45 @@ fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
             return blocked;
         }
         if !crate::guard::egress_is_blocked(target_url) {
-            if let Some(exa_md) = call_exa_mcp(
-                "web_fetch_exa",
-                json!({
-                    "urls": [target_url],
-                    "maxCharacters": 9000
-                }),
-            ) {
-                return exa_md;
+            match web_search_server_tool() {
+                Ok(Some((server, _))) => {
+                    let cfg = crate::config::load_user_config();
+                    if let Some(srv) = cfg.mcp_servers.get(&server) {
+                        let tool = cfg
+                            .web_fetch_tool
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or_default();
+                        if !tool.is_empty() {
+                            let out = call_stdio_mcp(
+                                &server,
+                                srv,
+                                tool,
+                                &json!({ "urls": [target_url], "maxCharacters": 9000 }),
+                            );
+                            if !out.trim().is_empty() {
+                                return out;
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    let tool = web_http_tool(
+                        crate::config::load_user_config().web_fetch_http_tool.as_deref(),
+                        "web_fetch_exa",
+                    );
+                    if let Some(markdown) = call_web_http(
+                        &tool,
+                        json!({
+                            "urls": [target_url],
+                            "maxCharacters": 9000
+                        }),
+                    ) {
+                        return markdown;
+                    }
+                }
+                Err(message) => return message,
             }
         }
         let fetched = crate::http::get_text_public(
@@ -3129,14 +3256,27 @@ fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
     if query.is_empty() {
         return "Web search error: missing 'query' parameter.".to_string();
     }
-    if let Some(exa_res) = call_exa_mcp(
+    let search_args = json!({
+        "query": query,
+        "numResults": 6
+    });
+    match web_search_server_tool() {
+        Ok(Some((server, tool))) => {
+            let cfg = crate::config::load_user_config();
+            let Some(srv) = cfg.mcp_servers.get(&server) else {
+                return format!("Web search error: MCP server `{}` disappeared.", server);
+            };
+            return call_stdio_mcp(&server, srv, &tool, &search_args);
+        }
+        Ok(None) => {}
+        Err(message) => return message,
+    }
+    let tool = web_http_tool(
+        crate::config::load_user_config().web_search_http_tool.as_deref(),
         "web_search_exa",
-        json!({
-            "query": query,
-            "numResults": 6
-        }),
-    ) {
-        return exa_res;
+    );
+    if let Some(results) = call_web_http(&tool, search_args) {
+        return results;
     }
     "Web search returned no results.".to_string()
 }
@@ -3887,6 +4027,17 @@ mod phase_tests {
     }
 
     #[test]
+    fn test_binaries_always_report_a_non_tty_stdin() {
+        // Approval prompts fail closed on a non-TTY stdin. `cargo test` inherits the developer's
+        // terminal, so this used to answer "TTY" and the suite blocked on the prompt forever.
+        // Pinning it here keeps a future refactor of `stdin_is_tty` from reintroducing the hang.
+        assert!(
+            !crate::hud::stdin_is_tty(),
+            "test builds must never see a tty"
+        );
+    }
+
+    #[test]
     fn plan_allows_read_and_memory() {
         // Guards the fail-closed approval path: with no TTY the prompt answers "no", so any
         // read that needs approval would silently become a block in every test below.
@@ -4617,6 +4768,47 @@ mod security_tests {
     }
 
     #[test]
+    fn web_search_backend_is_chosen_by_config_not_hardcoded() {
+        // No `webSearchServer` keeps the built-in endpoint; naming one routes through that MCP
+        // server, so the default host is never baked into the binary's behaviour.
+        assert_eq!(resolve_web_search_target(None, None, |_| false), Ok(None));
+        assert_eq!(
+            resolve_web_search_target(Some("  "), Some("x"), |_| true),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_web_search_target(Some("lazyweb"), Some(" search "), |n| n == "lazyweb"),
+            Ok(Some(("lazyweb".to_string(), "search".to_string())))
+        );
+        // A broken config must error instead of quietly falling back to the hosted default.
+        let missing =
+            resolve_web_search_target(Some("nope"), Some("search"), |_| false).unwrap_err();
+        assert!(
+            missing.contains("nope") && missing.contains("mcpServers"),
+            "{missing}"
+        );
+        let no_tool = resolve_web_search_target(Some("lazyweb"), None, |_| true).unwrap_err();
+        assert!(no_tool.contains("webSearchTool"), "{no_tool}");
+    }
+
+    #[test]
+    fn web_http_backend_honours_tool_overrides() {
+        // A self-hosted bridge names its own tools; unset or blank keeps the hosted default.
+        assert_eq!(
+            web_http_tool(None, "web_search_exa"),
+            "web_search_exa".to_string()
+        );
+        assert_eq!(
+            web_http_tool(Some("   "), "web_fetch_exa"),
+            "web_fetch_exa".to_string()
+        );
+        assert_eq!(
+            web_http_tool(Some(" search "), "web_search_exa"),
+            "search".to_string()
+        );
+    }
+
+    #[test]
     fn web_fetch_asks_in_safe_mode() {
         // Sovereign egress to a public host is unattended by design; SAFE must still ask, and
         // with no TTY that ask fails closed.
@@ -4757,28 +4949,24 @@ for line in sys.stdin:
         assert!(called.contains("clicked 3,4"), "call: {}", called);
     }
 
-    /// The real desktop server, used only when the operator has it installed. `capture_display`
-    /// is read-only, so this proves the whole path without touching the screen.
+    /// The real desktop server, used only when the operator has it configured. `list_apps` is
+    /// read-only, so this proves the whole path without touching the screen. The entry comes from
+    /// the user config rather than a hardcoded path, so a launcher wrapper is exercised too.
     #[test]
     #[ignore]
     fn real_open_computer_use_lists_tools() {
-        let home = std::env::var("HOME").unwrap();
-        let bin = std::path::PathBuf::from(&home).join("bin/open-computer-use");
-        if !bin.exists() {
+        let Some(srv) = crate::config::load_user_config()
+            .mcp_servers
+            .get("open-computer-use")
+            .cloned()
+        else {
             return;
-        }
-        let srv = crate::config::McpServerConfig {
-            command: Some(bin.display().to_string()),
-            args: vec!["mcp".to_string()],
-            env: Default::default(),
-            url: None,
-            read_only: false,
         };
         let listed = call_stdio_mcp("open-computer-use", &srv, "", &json!({}));
-        assert!(listed.contains("capture_display"), "{}", listed);
         assert!(listed.contains("click"), "{}", listed);
-        let shot = call_stdio_mcp("open-computer-use", &srv, "list_apps", &json!({}));
-        assert!(!shot.is_empty(), "{}", shot);
+        assert!(listed.contains("get_app_state"), "{}", listed);
+        let apps = call_stdio_mcp("open-computer-use", &srv, "list_apps", &json!({}));
+        assert!(!apps.is_empty(), "{}", apps);
     }
 
     #[test]

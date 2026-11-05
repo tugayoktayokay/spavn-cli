@@ -1,5 +1,5 @@
 use crate::config::{
-    builtin_byok_catalog, expand_user_path, is_en, load_user_config, resolve_api_key,
+    byok_catalog, expand_user_path, is_en, load_user_config, resolve_api_key,
     save_user_config, tr_en, upsert_spavn_secret, ModelConfigEntry, ProviderGroupConfig,
 };
 use crate::router::{ChatMessage, ModelEndpoint};
@@ -848,18 +848,25 @@ const NCCS: usize = 32;
 /// Approval prompts read a line from stdin. Without a TTY that read can block forever on an
 /// inherited pipe and can never be answered, so callers must fail closed instead of waiting.
 pub fn stdin_is_tty() -> bool {
-    #[cfg(unix)]
+    // Test binaries inherit whatever stdin the developer ran `cargo test` from, so a suite started
+    // in a terminal used to sit on the approval prompt until it was answered by hand. The gate
+    // fails closed, so a test build reports "no TTY" and never reaches the blocking read.
+    #[cfg(test)]
+    {
+        false
+    }
+    #[cfg(all(not(test), unix))]
     unsafe {
         let mut term = empty_termios();
         tcgetattr(0, &mut term) == 0
     }
-    #[cfg(windows)]
+    #[cfg(all(not(test), windows))]
     unsafe {
         let h_in = GetStdHandle((-10i32) as u32);
         let mut mode: u32 = 0;
         GetConsoleMode(h_in, &mut mode) != 0
     }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(all(not(test), not(any(unix, windows))))]
     false
 }
 
