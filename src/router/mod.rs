@@ -329,14 +329,19 @@ impl ModelEndpoint {
             return 131_072;
         }
         let k = self.model.to_lowercase();
-        if k.contains("gemini") || k.contains("argon") || k.contains("gpt-4.1") {
+        if k.contains("gemini")
+            || k.contains("argon")
+            || k.contains("gpt-4.1")
+            || ((k.contains("claude")
+                || k.contains("opus")
+                || k.contains("sonnet")
+                || k.contains("fable"))
+                && !k.contains("haiku"))
+        {
             1_000_000
         } else if k.contains("grok-4") {
             256_000
-        } else if k.contains("claude")
-            || k.contains("opus")
-            || k.contains("sonnet")
-            || k.contains("haiku")
+        } else if k.contains("haiku")
             || k.contains("minimax")
             || k.contains("gpt-5")
             || k.starts_with("o3")
