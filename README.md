@@ -8,8 +8,8 @@ No async runtime. No Electron. No plugin tree. Three direct dependencies, one `c
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/tugayoktayokay/spavn-cli?color=7c5cff)](https://github.com/tugayoktayokay/spavn-cli/releases)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-215%20passing-success.svg)](#development)
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
+[![Tests](https://img.shields.io/badge/tests-247%20passing-success.svg)](#development)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#install)
 [![Docs](https://img.shields.io/badge/docs-spavn.dev%2Fdocs-black.svg)](https://spavn.dev/docs/)
 
@@ -23,7 +23,7 @@ $ spavn "refactor the spill module, then run the suite"
 
 <div align="center">
 
-**[Docs](https://spavn.dev/docs/)** · **[Screenshots](#-screenshots)** · **[Why](#-why-another-coding-agent)** · **[Install](#-install)** · **[First run](#-first-run)** · **[Tools](#-the-tool-surface)** · **[Slash commands](#-slash-commands)** · **[Config](#-configuration)** · **[Security](#-permissions-and-path-policy)** · **[Architecture](#-architecture)**
+**[Docs](https://spavn.dev/docs/)** · **[Screenshots](#-screenshots)** · **[Why](#-why-another-coding-agent)** · **[Harness Intelligence](#-autonomous-harness-intelligence)** · **[Install](#-install)** · **[First run](#-first-run)** · **[Tools](#-the-tool-surface)** · **[JSON-RPC](#-headless-json-rpc-20-bridge)** · **[Slash commands](#-slash-commands)** · **[Security](#-permissions-and-path-policy)** · **[Architecture](#-architecture)**
 
 </div>
 
@@ -38,9 +38,11 @@ $ spavn "refactor the spill module, then run the suite"
 | :--- | :--- |
 | [🖼️ Screenshots](#-screenshots) | Live HUD, `/model`, `/bench`, `/fleet` |
 | [🎯 Why another coding agent](#-why-another-coding-agent) | The four bets behind the design |
+| [🧠 Autonomous harness intelligence](#-autonomous-harness-intelligence) | Zero-Stop compiler gate, signature map, fuzzy self-heal edits, stale-file guard |
 | [⚙️ Requirements](#-requirements) | Rust version, OS support, network |
 | [⬇️ Install](#-install) | One-liner, Cargo, prebuilt, from source |
-| [🚀 First run](#-first-run) | Zero-config start, local models, BYOK |
+| [🚀 First run](#-first-run) | Zero-config start, local models, BYOK, Claude 5.5 |
+| [🔌 Headless JSON-RPC 2.0 bridge](#-headless-json-rpc-20-bridge) | `spavn --rpc` stdio protocol for desktop/IDE hosts |
 | [🧰 The tool surface](#-the-tool-surface) | 11 builtins + anything MCP |
 | [⌨️ Slash commands](#-slash-commands) | 37 entries, all aliases |
 | [🔐 Permissions and path policy](#-permissions-and-path-policy) | 3 access modes, 6 gates |
@@ -107,6 +109,22 @@ Four bets, each visible in the source rather than the marketing:
 
 ---
 
+## 🧠 Autonomous harness intelligence
+
+New in **`v0.2.0`**: deterministic Rust harness layers that catch model mistakes before they hit your tree or waste turns:
+
+| Layer | Module | How it works |
+| :--- | :--- | :--- |
+| **Zero-Stop Verification Gate** | `src/turn/mod.rs` | When a turn mutates source files (`write` / `edit`), SPAVN automatically runs project-native verification (`cargo check --quiet`, `tsc --noEmit`, `python3 -m py_compile`, `go vet`) before allowing the turn to finish. Compiler diagnostics are injected straight back into the loop so the model repairs its own breakage. |
+| **Signature & Arity-Aware Symbol Map** | `src/tools/search.rs` | Extracts exact function, method, struct, and type signatures with 1-based line numbers across modified files and neighboring project files, injecting `[SPAVN LIVE PROJECT SIGNATURES]` into the turn context so models never hallucinate parameter counts or return types. |
+| **Fuzzy Self-Heal `edit` Engine** | `src/tools/edit.rs` | Recovers automatically from intra-line whitespace and indentation drift when a block matches uniquely (`fuzzy_find_unique_line_block`), expands off-by-N line ranges (±25 lines) when `old_text` is anchored nearby, and supports multi-hunk in-memory `edits[]` plus cross-file atomic `files[]` transactions with full rollback. |
+| **Stale-File Guard (`FS_STALE_VERSION`)** | `src/tools/edit.rs` | Records per-file `SystemTime` modification snapshots on `read` and rejects `edit` / `write` calls if a file was modified externally since it was last read — preventing silent overwrites of concurrent user or formatter edits. |
+| **Canonical Repeat-Tool Breaker** | `src/turn/mod.rs` | Recursively canonicalizes JSON tool arguments (sorted object keys, normalized whitespace) and injects `[SPAVN REPEAT-TOOL BREAKER]` after 2 identical read-only calls to break infinite exploration loops, especially on smaller local models. |
+| **Turn-Aware Schema & Budget Compaction** | `src/tools/schema.rs`, `src/session/compactor.rs` | Trims redundant tool schema boilerplate after Turn 0 and scales context window pruning dynamically to the active model's `context_window`. |
+| **Transactional `/undo` Stack** | `src/tools/edit.rs` | Captures pre-mutation snapshots before every `write` and `edit`, enabling instant single-step or multi-step rollback via `/undo [N]`. |
+
+---
+
 ## ⚙️ Requirements
 
 | Item | Value |
@@ -129,7 +147,7 @@ Four bets, each visible in the source rather than the marketing:
 | **crates.io** | `cargo install spavn` (pending the first publish) | `cargo install --force spavn` |
 | **Archive / source** | release tarball, or `cargo build --release` | manual |
 
-`spavn --version` answers `spavn v0.1.0 (macos/aarch64)`. `/update` then tells you when a newer tag
+`spavn --version` answers `spavn v0.2.0 (macos/aarch64)`. `/update` then tells you when a newer tag
 exists and prints the upgrade command that matches **the channel you installed from** — `brew upgrade`
 for a Homebrew install, `cargo install --force` for a cargo one, the script otherwise.
 
@@ -209,11 +227,20 @@ spavn --model ollama:qwen2.5-coder "refactor the spill module"
 # then set SPAVN_LOCAL_BASE_URL / SPAVN_LOCAL_MODELS_URL, or edit providers in config.json
 ```
 
-Every flag: `-m/--model`, `-a/--access`, `-P/--phase`, `-H/--host`, `-s/--session`, `-c/--continue`, `-r/--resume`, `-i/--interactive`, `-p/--prompt`, `-t/--think`, `-q/--quiet`, `-j/--json`, `-V/--version`, `-h/--help`.
+Every flag: `-m/--model`, `-a/--access`, `-P/--phase`, `-H/--host`, `-s/--session`, `-c/--continue`, `-r/--resume`, `-i/--interactive`, `-p/--prompt`, `-t/--think`, `-q/--quiet`, `-j/--json`, `--rpc`, `-V/--version`, `-h/--help`.
 
 ### Against a cloud provider
 
-Run `/byok` inside the TUI (aliases `/login`, `/keys`, `/provider`) or drop keys in `~/.spavn/secrets.env` (`0600`). Keys are never written to `config.json`.
+Run `/byok` inside the TUI (aliases `/login`, `/keys`, `/provider`) or drop keys in `~/.spavn/secrets.env` (`0600`). Keys are never written to `config.json`. Built-in Anthropic aliases (`sonnet` → `claude-sonnet-5-5`, `opus` → `claude-opus-5-5`, plus `claude-sonnet-4-6` / `claude-opus-4-6`), OpenAI, Google Gemini, DeepSeek, xAI, Groq, and OpenRouter work out of the box.
+
+---
+
+## 🔌 Headless JSON-RPC 2.0 bridge
+
+`spavn --rpc` runs the agent as a headless NDJSON JSON-RPC 2.0 server over `stdin` / `stdout` — the exact protocol used by [`spavn-desktop`](https://github.com/tugayoktayokay/spavn-desktop) and external IDE integrations:
+
+- **Requests (`stdin`)**: `prompt`, `abort`, `set_phase`, `set_model`, `get_state`
+- **Streaming notifications (`stdout`)**: `turn_start`, `text_delta`, `thinking_delta`, `tool_start`, `tool_end`, `turn_end`, `state`
 
 ---
 
@@ -223,9 +250,9 @@ Eleven builtins, each a hard-coded contract in `tool_definitions()`. Plus anythi
 
 | Tool | Purpose | Gate |
 | :--- | :--- | :--- |
-| 📖 `read` | File or dir; disjoint ranges in one call (`src/x.rs:97-112,1066-1076`) | path policy |
-| ✏️ `edit` | Exact `old_text` → `new_text`; batch `edits` applied atomically | write gate |
-| 📝 `write` | Create/overwrite; `<host>:/path` for remote | write gate |
+| 📖 `read` | File, dir, SQLite, PDF, image; disjoint ranges (`src/x.rs:97-112,1066-1076`), mtime snapshot | path policy |
+| ✏️ `edit` | Fuzzy self-heal `old_text` → `new_text`, auto line-window expansion, multi-hunk `edits[]`, cross-file atomic `files[]`, stale-file guard | write gate |
+| 📝 `write` | Create/overwrite with stale-file guard (`FS_STALE_VERSION`); `<host>:/path` for remote | write gate |
 | 💻 `bash` | Local or remote; `cwd`, `timeout_sec`, `background` (PID + log path) | command classifier |
 | 🔎 `search` | Regex content search via ripgrep | path policy |
 | 🗂️ `glob` | File listing; skips `node_modules`/`target`/`.git` unless `hidden` | path policy |
@@ -282,7 +309,7 @@ Streamable-HTTP servers use `url` instead of `command`. Stdio servers get a scru
 | `/role` | — | `auto`, `coder`, `reviewer`, `security`, `test`, `docs`, `refactor` |
 | `/think` | — | Toggle reasoning stream |
 | `/recap` | — | Idle recap summary; `on` / `off` / `toggle` |
-| `/todo` | `/tasks` | Live task list; `done`, `clear` |
+| `/todo` | `/tasks` | Live task list; interactive ↑/↓ picker on `/todo done`, `clear` |
 | `/queue` | `/qlist`, `/qedit` | Inspect / edit queued prompts |
 | `/queue clear` | `/qclear`, `/queue cancel`, `/qcancel` | Drop queue and steers |
 | `/queue pop` | `/qpop` | Pop last queued prompt |
@@ -297,7 +324,7 @@ Streamable-HTTP servers use `url` instead of `command`. Stdio servers get a scru
 | `/stop` | `/cancel` | Interrupt a running turn |
 | `/diff` | `/d` | Working-tree diff |
 | `/commit` | `/cm` | Commit helper |
-| `/undo` | `/u` | Revert last edit |
+| `/undo` | `/u` | Transactional rollback of the last `N` file edits/writes (`/undo [N]`) |
 | `/janitor` | `/j` | Dead code / stray artifact sweep |
 | `/audit` | — | HMAC-chained action log, filterable by file |
 | `/blame` | — | Attribution for a path |
@@ -520,29 +547,50 @@ Oversized tool output is **never** silently truncated. It spills to `tool-output
 
 ```
 src/
-├── main.rs           CLI parsing, first-run, entry point
-├── lib.rs            module wiring and shared constants
-├── router.rs         provider/model resolution, streaming decode
-├── config.rs         config load/save, ~/.spavn layout
-├── tools.rs          tool schemas + dispatch, MCP client, web, spill
-├── guard.rs          access modes, path policy, egress classification
-├── http.rs           blocking HTTP on ureq, no async runtime
+├── main.rs            CLI parsing, first-run, TUI & --rpc entry point
+├── lib.rs             module wiring and shared constants
+├── rpc.rs             headless JSON-RPC 2.0 stdio bridge (spavn --rpc)
+├── config.rs          config load/save, provider catalog (Claude 5.5, etc.), ~/.spavn layout
+├── guard.rs           access modes, path policy, shell AST risk & egress classification
+├── http.rs            blocking HTTP on ureq, no async runtime
+├── router/
+│   ├── mod.rs         provider/model resolution, quota & fallback routing
+│   ├── catalog.rs     dynamic & built-in model catalogs
+│   ├── oauth.rs       OAuth / token helpers
+│   └── stream.rs      SSE streaming decode & stall watchdog
+├── turn/
+│   ├── mod.rs         agentic turn loop, Zero-Stop compiler gate, repeat-tool breaker
+│   └── verdict.rs     tool verdict classification & formatting
+├── tools/
+│   ├── mod.rs         tool dispatch, timeout & detached TTY execution
+│   ├── schema.rs      turn-aware tool schema generation
+│   ├── edit.rs        fuzzy self-heal edit, stale-file guard (FS_STALE_VERSION), UndoStack
+│   ├── search.rs      ripgrep search, BM25+AST fallback, live signature & arity extractor
+│   ├── shell.rs       local/remote bash, background jobs, zero-quoting py/js execution
+│   ├── mcp_web.rs     MCP stdio/HTTP client, web search/fetch
+│   └── subagent.rs    bounded parallel read-only sub-agents
 ├── hud/
-│   ├── mod.rs        dock, transcript render, panels
-│   ├── input.rs      line editor, queue/steer handling
-│   ├── keys.rs       key decoding
-│   ├── menus.rs      model/provider/fleet pickers
-│   ├── toolcard.rs   collapsible tool result cards
-│   └── edit.rs       inline diff editor
-├── slash_commands.rs command dispatch + /help
-├── session.rs        persistence, rewrite, fork
-├── memory.rs         recall/remember bridge
-├── skills.rs         skill discovery and injection
-├── spill.rs          oversized-output spill files
-├── markdown.rs       streaming Markdown renderer
-├── ansi.rs           colour and escape handling
-├── state.rs          global runtime state
-└── spavn_engine.rs   audit chain, secret scrubbing, janitor, goals, pins, wiki
+│   ├── mod.rs         dock, transcript render, panels
+│   ├── dock.rs        live status dock & context pressure bar
+│   ├── input.rs       line editor, queue/steer handling
+│   ├── keys.rs        key decoding
+│   ├── menus.rs       interactive ↑/↓ menu engine
+│   ├── pickers.rs     /model, /byok, /resume, /todo done pickers
+│   ├── panels.rs      /bench, /fleet, /quota panels
+│   ├── toolcard.rs    collapsible tool result cards & spill markers
+│   └── edit.rs        inline diff preview
+├── session/
+│   ├── mod.rs         session lifecycle, fork, resume
+│   ├── compactor.rs   budget-relative context compaction & supersede pruning
+│   └── store.rs       JSONL persistence
+├── slash_commands.rs  command dispatch + /help
+├── memory.rs          recall/remember bridge & repo map builder
+├── skills.rs          skill discovery and injection
+├── spill.rs           oversized-output spill files
+├── markdown.rs        streaming Markdown renderer
+├── ansi.rs            colour, OSC-52 clipboard and escape handling
+├── state.rs           global runtime state
+└── spavn_engine.rs    audit chain, secret scrubbing, janitor, goals, pins, wiki
 ```
 
 ### Request lifecycle
@@ -586,7 +634,7 @@ sequenceDiagram
 
 ```sh
 cargo build --release
-cargo test                       # 204 lib + 3 bin; 1 network test is #[ignore]
+cargo test                       # 242 lib + 5 bin; 1 network test is #[ignore]
 cargo clippy --all-targets       # clean, zero warnings
 cargo fmt --check
 ```
@@ -597,8 +645,8 @@ Current status on `main`:
 | :--- | :--- |
 | `cargo check --all-targets` | ✅ ok |
 | `cargo clippy --all-targets` | ✅ 0 warnings |
-| `cargo test --lib` | ✅ 212 passed, 0 failed, 1 ignored |
-| `cargo test --bins` | ✅ 3 passed |
+| `cargo test --lib` | ✅ 242 passed, 0 failed, 1 ignored |
+| `cargo test --bins` | ✅ 5 passed |
 
 The single ignored test (`real_open_computer_use_lists_tools`) needs a live MCP server from your own config; run it with `cargo test -- --ignored`.
 

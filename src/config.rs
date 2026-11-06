@@ -164,11 +164,11 @@ mod catalog_tests {
         let by_key = |k: &str| anthropic.models.iter().find(|m| m.key == k);
         assert_eq!(
             by_key("sonnet").map(|m| m.model_id.as_str()),
-            Some("claude-sonnet-4-6")
+            Some("claude-sonnet-5-5")
         );
         assert_eq!(
             by_key("opus").map(|m| m.model_id.as_str()),
-            Some("claude-opus-4-6")
+            Some("claude-opus-5-5")
         );
     }
 }
@@ -518,6 +518,22 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             context_window: Some(200_000),
             models: vec![
                 ModelConfigEntry {
+                    key: "claude-opus-5-5".to_string(),
+                    model_id: "claude-opus-5-5".to_string(),
+                    label: "Claude Opus 5.5".to_string(),
+                    badge: "🧠 Deep".to_string(),
+                    desc: "Anthropic Claude Opus 5.5".to_string(),
+                    context_window: Some(200_000),
+                },
+                ModelConfigEntry {
+                    key: "claude-sonnet-5-5".to_string(),
+                    model_id: "claude-sonnet-5-5".to_string(),
+                    label: "Claude Sonnet 5.5".to_string(),
+                    badge: "⚡ Balanced".to_string(),
+                    desc: "Anthropic Claude Sonnet 5.5".to_string(),
+                    context_window: Some(200_000),
+                },
+                ModelConfigEntry {
                     key: "claude-opus-4-6".to_string(),
                     model_id: "claude-opus-4-6".to_string(),
                     label: "Claude Opus 4.6".to_string(),
@@ -535,18 +551,18 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
                 },
                 ModelConfigEntry {
                     key: "sonnet".to_string(),
-                    model_id: "claude-sonnet-4-6".to_string(),
+                    model_id: "claude-sonnet-5-5".to_string(),
                     label: "Sonnet (kısa ad)".to_string(),
                     badge: "⚡ Balanced".to_string(),
-                    desc: "Alias → claude-sonnet-4-6".to_string(),
+                    desc: "Alias → claude-sonnet-5-5".to_string(),
                     context_window: Some(200_000),
                 },
                 ModelConfigEntry {
                     key: "opus".to_string(),
-                    model_id: "claude-opus-4-6".to_string(),
+                    model_id: "claude-opus-5-5".to_string(),
                     label: "Opus (kısa ad)".to_string(),
                     badge: "🧠 Deep".to_string(),
-                    desc: "Alias → claude-opus-4-6".to_string(),
+                    desc: "Alias → claude-opus-5-5".to_string(),
                     context_window: Some(200_000),
                 },
             ],

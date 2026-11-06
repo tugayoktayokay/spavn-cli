@@ -349,7 +349,7 @@
 <header class="top">
   <div class="top-inner">
     <a class="brand" href="https://spavn.dev/"><span class="mark">⚡</span>SPAVN <small>docs</small></a>
-    <span class="pill">v0.1.0</span>
+    <span class="pill">v0.2.0</span>
     <span class="grow"></span>
     <div class="searchbox">
       <span class="lens" aria-hidden="true">⌕</span>
@@ -407,10 +407,11 @@
         that stand between a model and your filesystem. Press <kbd>/</kbd> or <kbd>⌘K</kbd> to search.
       </p>
       <div class="chips">
-        <span class="chip"><b>v0.1.0</b></span>
+        <span class="chip"><b>v0.2.0</b></span>
         <span class="chip"><b>11</b> tools</span>
         <span class="chip"><b>37</b> commands</span>
         <span class="chip"><b>6</b> gates</span>
+        <span class="chip"><b>JSON-RPC 2.0</b></span>
         <span class="chip"><b>3</b> direct deps</span>
         <span class="chip">MIT</span>
       </div>
@@ -439,15 +440,32 @@
         </table>
       </div>
 
+      <h3>Autonomous harness intelligence (v0.2.0)</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Layer</th><th>Module</th><th>How it works</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Zero-Stop Verification Gate</strong></td><td><code>src/turn/mod.rs</code></td><td>Automatically runs <code>cargo check --quiet</code>, <code>tsc --noEmit</code>, <code>python3 -m py_compile</code>, or <code>go vet</code> when a turn modifies source files, feeding compiler diagnostics back into the turn loop before stopping.</td></tr>
+            <tr><td><strong>Signature &amp; Arity-Aware Symbol Map</strong></td><td><code>src/tools/search.rs</code></td><td>Extracts exact function, method, struct, and type signatures with 1-based line numbers across modified and neighboring files (<code>[SPAVN LIVE PROJECT SIGNATURES]</code>) so models never hallucinate parameter counts.</td></tr>
+            <tr><td><strong>Fuzzy Self-Heal <code>edit</code> Engine</strong></td><td><code>src/tools/edit.rs</code></td><td>Recovers from intra-line whitespace/indentation drift (<code>fuzzy_find_unique_line_block</code>), auto-expands off-by-N line ranges (±25 lines), and supports multi-hunk <code>edits[]</code> plus cross-file atomic <code>files[]</code> transactions.</td></tr>
+            <tr><td><strong>Stale-File Guard (<code>FS_STALE_VERSION</code>)</strong></td><td><code>src/tools/edit.rs</code></td><td>Tracks per-file <code>SystemTime</code> snapshots on <code>read</code> and refuses <code>edit</code> / <code>write</code> calls when a file was modified externally since it was last read.</td></tr>
+            <tr><td><strong>Canonical Repeat-Tool Breaker</strong></td><td><code>src/turn/mod.rs</code></td><td>Recursively canonicalizes JSON tool arguments (sorted object keys) and injects <code>[SPAVN REPEAT-TOOL BREAKER]</code> after 2 identical read-only calls to break infinite loops.</td></tr>
+            <tr><td><strong>Turn-Aware Schema &amp; Budget Compaction</strong></td><td><code>src/tools/schema.rs</code>, <code>src/session/compactor.rs</code></td><td>Trims tool schema verbosity after Turn 0 and scales context pruning to the active model's <code>context_window</code>.</td></tr>
+            <tr><td><strong>Transactional <code>/undo</code> Stack</strong></td><td><code>src/tools/edit.rs</code></td><td>Snapshots files before every <code>write</code> / <code>edit</code> for instant single or multi-step rollback via <code>/undo [N]</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
       <h3>At a glance</h3>
       <div class="tw">
         <table>
           <tbody>
-            <tr><th>Version</th><td>0.1.0 · MIT</td></tr>
+            <tr><th>Version</th><td>0.2.0 · MIT</td></tr>
             <tr><th>Platforms</th><td>macOS (arm64, x86_64) · Linux (x86_64, arm64) · Windows (x86_64)</td></tr>
             <tr><th>Rust</th><td>1.80+ (uses <code>LazyLock</code>)</td></tr>
             <tr><th>State</th><td><code>~/.spavn</code> · mode <code>0700</code>, secrets <code>0600</code></td></tr>
             <tr><th>External tools</th><td><code>ripgrep</code> for the <code>search</code> tool · <code>ssh</code> for remote hosts</td></tr>
+            <tr><th>Bridge</th><td><code>spavn --rpc</code> headless NDJSON JSON-RPC 2.0 stdio server for <code>spavn-desktop</code> &amp; IDEs</td></tr>
             <tr><th>TUI</th><td>Synchronous, alternate scroll region, no flicker, no cursor ghost</td></tr>
           </tbody>
         </table>
@@ -509,7 +527,7 @@ cargo install spavn                                             # once published
       </div>
 
       <h3>Verify a download</h3>
-      <div class="cb"><button class="copy" type="button">copy</button><pre><code>gh release download v0.1.0 --pattern '*aarch64-apple-darwin*'
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>gh release download v0.2.0 --pattern '*aarch64-apple-darwin*'
 shasum -a 256 -c ./*.sha256</code></pre></div>
     </section>
 
@@ -529,7 +547,7 @@ spavn --help                     # every flag, path and env var</code></pre></di
         <table>
           <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
           <tbody>
-            <tr><td><code>-m</code>, <code>--model</code></td><td>Model key, e.g. <code>sonnet</code>, <code>ollama:qwen2.5-coder</code></td></tr>
+            <tr><td><code>-m</code>, <code>--model</code></td><td>Model key, e.g. <code>sonnet</code> (<code>claude-sonnet-5-5</code>), <code>opus</code> (<code>claude-opus-5-5</code>), <code>ollama:qwen2.5-coder</code></td></tr>
             <tr><td><code>-a</code>, <code>--access</code></td><td><code>safe</code> · <code>auto</code> · <code>sovereign</code></td></tr>
             <tr><td><code>-P</code>, <code>--phase</code></td><td><code>plan</code> (read-only) · <code>code</code></td></tr>
             <tr><td><code>-H</code>, <code>--host</code></td><td>Target host from <code>hosts[]</code></td></tr>
@@ -541,6 +559,7 @@ spavn --help                     # every flag, path and env var</code></pre></di
             <tr><td><code>-t</code>, <code>--think</code></td><td>Show the reasoning stream</td></tr>
             <tr><td><code>-q</code>, <code>--quiet</code></td><td>Headless: no HUD</td></tr>
             <tr><td><code>-j</code>, <code>--json</code></td><td>Machine-readable output</td></tr>
+            <tr><td><code>--rpc</code></td><td>Headless JSON-RPC 2.0 stdio bridge (<code>prompt</code>, <code>abort</code>, <code>set_phase</code>, <code>set_model</code>, <code>get_state</code>)</td></tr>
             <tr><td><code>-V</code>, <code>--version</code></td><td>Print version, OS and arch</td></tr>
             <tr><td><code>-h</code>, <code>--help</code></td><td>Full reference</td></tr>
           </tbody>
@@ -697,9 +716,9 @@ export SPAVN_LOCAL_BASE_URL=http://localhost:8080/v1</code></pre></div>
         <table>
           <thead><tr><th>Tool</th><th>Purpose</th><th>Gate</th></tr></thead>
           <tbody>
-            <tr><td><code>read</code></td><td>File or directory; several disjoint ranges in one call (<code>src/x.rs:97-112,1066-1076</code>)</td><td>path policy</td></tr>
-            <tr><td><code>edit</code></td><td>Exact <code>old_text</code> → <code>new_text</code>; batched <code>edits</code> applied atomically</td><td>write gate</td></tr>
-            <tr><td><code>write</code></td><td>Create or overwrite; <code>&lt;host&gt;:/path</code> for remote</td><td>write gate</td></tr>
+            <tr><td><code>read</code></td><td>File, directory, SQLite, PDF or image; disjoint ranges (<code>src/x.rs:97-112,1066-1076</code>), records mtime snapshot</td><td>path policy</td></tr>
+            <tr><td><code>edit</code></td><td>Fuzzy self-heal <code>old_text</code> → <code>new_text</code>, auto line-window expansion, multi-hunk <code>edits[]</code>, cross-file atomic <code>files[]</code>, stale-file guard</td><td>write gate</td></tr>
+            <tr><td><code>write</code></td><td>Create or overwrite with stale-file guard (<code>FS_STALE_VERSION</code>); <code>&lt;host&gt;:/path</code> for remote</td><td>write gate</td></tr>
             <tr><td><code>bash</code></td><td>Local or remote; <code>cwd</code>, <code>timeout_sec</code>, <code>background</code> (PID + log path)</td><td>command classifier</td></tr>
             <tr><td><code>search</code></td><td>Regex content search via ripgrep</td><td>path policy</td></tr>
             <tr><td><code>glob</code></td><td>File listing; skips <code>node_modules</code>, <code>target</code>, <code>.git</code> unless <code>hidden</code></td><td>path policy</td></tr>
@@ -981,24 +1000,26 @@ export SPAVN_LOCAL_BASE_URL=http://localhost:8080/v1</code></pre></div>
 
       <h3>Modules</h3>
       <div class="cb"><button class="copy" type="button">copy</button><pre><code>src/
-├── main.rs           CLI parsing, agent loop, signal wiring
+├── main.rs           CLI parsing, TUI &amp; --rpc entry point
 ├── lib.rs            module surface
-├── router.rs         model resolution, HTTP, streaming, endpoints
-├── tools.rs          tool schemas, executors, approval flow, MCP
-├── guard.rs          access, path and egress enforcement
-├── hud/              dock, input, keys, menus, tool cards
+├── rpc.rs            headless JSON-RPC 2.0 stdio bridge
+├── router/           model resolution, catalog, OAuth, SSE stream watchdog
+├── turn/             agentic turn loop, Zero-Stop compiler gate, repeat-tool breaker
+├── tools/            schema, fuzzy self-heal edit, stale-file guard, live signature map, shell, MCP
+├── guard.rs          access, path, shell AST risk and egress enforcement
+├── hud/              dock, input, keys, menus, pickers, panels, tool cards
 ├── slash_commands.rs command dispatch and /help
-├── session.rs        persistence, rewrite, fork
+├── session/          JSONL persistence, budget-relative compactor, fork
 ├── spavn_engine.rs   audit chain, secret scrubbing, janitor, goals, pins
-├── memory.rs         recall / remember bridge
+├── memory.rs         recall / remember bridge &amp; repo map builder
 ├── skills.rs         skill discovery and injection
 ├── update.rs         release check and upgrade advice
 ├── spill.rs          oversized-output spill files
 ├── markdown.rs       terminal Markdown rendering
 ├── state.rs          shared signals between TUI and agent
 ├── http.rs           the only socket code
-├── ansi.rs           escape sequences
-└── config.rs         config loading, defaults, provider catalog</code></pre></div>
+├── ansi.rs           escape sequences &amp; OSC-52 clipboard
+└── config.rs         config loading, defaults, provider catalog (Claude 5.5, etc.)</code></pre></div>
 
       <h3>Invariants</h3>
       <ol>
