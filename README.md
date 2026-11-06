@@ -231,9 +231,9 @@ spavn --model ollama:qwen2.5-coder "refactor the spill module"
 
 Every flag: `-m/--model`, `-a/--access`, `-P/--phase`, `-H/--host`, `-s/--session`, `-c/--continue`, `-r/--resume`, `-i/--interactive`, `-p/--prompt`, `-t/--think`, `-q/--quiet`, `-j/--json`, `--rpc`, `-V/--version`, `-h/--help`.
 
-### Against a cloud provider
+### Against a cloud provider (BYOK)
 
-Run `/byok` inside the TUI (aliases `/login`, `/keys`, `/provider`) or drop keys in `~/.spavn/secrets.env` (`0600`). Keys are never written to `config.json`. Built-in Anthropic aliases (`sonnet` → `claude-sonnet-5-5`, `opus` → `claude-opus-5-5`, plus `claude-sonnet-4-6` / `claude-opus-4-6`), OpenAI, Google Gemini, DeepSeek, xAI, Groq, and OpenRouter work out of the box.
+Run `/byok` inside the TUI (aliases `/login`, `/keys`, `/provider`) or drop your own API keys in `~/.spavn/secrets.env` (`0600`). Keys are never written to `config.json`. Any OpenAI-compatible endpoint, custom gateway, or major cloud provider works out of the box with zero middleman markup.
 
 ---
 
