@@ -182,7 +182,10 @@ fn collect_symbol_map(dir: &Path, root: &Path, out: &mut Vec<String>, depth: usi
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go") {
+        if !matches!(
+            ext,
+            "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "cs" | "java" | "kt" | "swift"
+        ) {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
@@ -191,19 +194,7 @@ fn collect_symbol_map(dir: &Path, root: &Path, out: &mut Vec<String>, depth: usi
         let mut symbols = Vec::new();
         for (idx, line) in content.lines().enumerate() {
             let trimmed = line.trim();
-            let is_sym = trimmed.starts_with("pub fn ")
-                || trimmed.starts_with("pub async fn ")
-                || trimmed.starts_with("pub struct ")
-                || trimmed.starts_with("pub enum ")
-                || trimmed.starts_with("def ")
-                || trimmed.starts_with("async def ")
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("func ")
-                || trimmed.starts_with("export function ")
-                || trimmed.starts_with("export async function ")
-                || trimmed.starts_with("export class ")
-                || trimmed.starts_with("export interface ");
-            if is_sym {
+            if crate::tools::is_structural_outline_line(line) {
                 let sig = trimmed.trim_end_matches('{').trim_end_matches(':').trim();
                 let short_sig: String = sig.chars().take(48).collect();
                 symbols.push(format!("L{}: `{}`", idx + 1, short_sig));

@@ -4,34 +4,35 @@ pub mod read;
 pub mod schema;
 pub mod search;
 pub mod shell;
-pub mod web;
 #[cfg(test)]
 mod tests;
+pub mod web;
 
-pub use edit::{
-    build_live_project_signatures, check_unfinished_placeholders, run_project_verification_gate,
-};
-pub use schema::{tool_definitions, tool_definitions_for_phase, tool_definitions_for_turn};
 pub(crate) use edit::*;
+pub use edit::{
+    build_live_project_signatures, check_unfinished_placeholders,
+    has_compiler_or_test_error_signature, is_verification_shell_command,
+    run_project_verification_gate,
+};
 pub(crate) use mcp_subagent::*;
 pub(crate) use read::*;
+pub use schema::{tool_definitions, tool_definitions_for_phase, tool_definitions_for_turn};
 pub(crate) use search::*;
 pub(crate) use shell::*;
 pub(crate) use web::*;
 
+use crate::approval::ApprovalAnswer;
 use crate::config::{expand_user_path, home_dir, load_user_config};
 use crate::guard::{assess_shell_command, PathPolicy, PathRisk, ShellRisk};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 pub(crate) const CYAN: &str = "\x1b[36m";
-pub(crate) const GREEN: &str = "\x1b[32m";
 pub(crate) const YELLOW: &str = "\x1b[33m";
-pub(crate) const DIM: &str = "\x1b[2m";
-pub(crate) const BOLD: &str = "\x1b[1m";
 pub(crate) const RESET: &str = "\x1b[0m";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,7 @@ pub struct ToolContext {
     pub default_host: String,
     pub undo_stack: Vec<UndoSnapshot>,
     pub read_mtimes: std::collections::HashMap<String, std::time::SystemTime>,
+    pub read_hashes: std::collections::HashMap<String, u64>,
     pub read_ranges: std::collections::HashMap<
         String,
         (std::time::SystemTime, Option<usize>, Option<usize>, usize),
@@ -105,10 +107,22 @@ pub struct ToolContext {
     pub current_prompt: String,
     pub phase: crate::spavn_engine::AgentPhase,
     pub policy: PathPolicy,
+    pub last_cwd: PathBuf,
+    /// terminal (the desktop webview) swaps in its own card without touching the gate logic.
+    pub approver: Arc<dyn crate::approval::Approver>,
     /// False for workers with no terminal behind them (sub-agents). An approval prompt needs a
     /// human, so a context that cannot ask must decide on policy alone instead of hanging or
     /// silently answering "no" on every call.
     pub can_prompt: bool,
+}
+
+pub(crate) fn fnv1a_hash64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 impl ToolContext {
@@ -119,23 +133,51 @@ impl ToolContext {
         phase: crate::spavn_engine::AgentPhase,
     ) -> Self {
         let policy = PathPolicy::new(&workspace_root);
+        let last_cwd = policy.cwd.clone();
         Self {
             access,
             default_host,
             phase,
             undo_stack: Vec::new(),
             read_mtimes: std::collections::HashMap::new(),
+            read_hashes: std::collections::HashMap::new(),
             read_ranges: std::collections::HashMap::new(),
             tool_step_counter: 0,
             current_model: "default".to_string(),
             current_prompt: String::new(),
             policy,
+            last_cwd,
+            approver: crate::approval::terminal(),
             can_prompt: true,
         }
     }
 
+    pub fn resolve_local_path(&self, raw_path: &str) -> PathBuf {
+        let expanded = expand_tilde(raw_path);
+        if expanded.is_absolute() {
+            expanded
+        } else if self.last_cwd.is_dir() {
+            self.last_cwd.join(expanded)
+        } else {
+            self.policy.cwd.join(expanded)
+        }
+    }
+    pub fn resolve_target_arg(&self, raw_path: &str) -> String {
+        if split_remote_prefix(raw_path).is_some() {
+            raw_path.to_string()
+        } else {
+            self.resolve_local_path(raw_path)
+                .to_string_lossy()
+                .to_string()
+        }
+    }
+
     fn enforce_path(&mut self, raw_path: &str, write: bool, verb: &str) -> Result<(), String> {
-        match self.policy.check(raw_path, write) {
+        let mut policy = self.policy.clone();
+        if self.last_cwd.is_dir() {
+            policy.cwd = self.last_cwd.clone();
+        }
+        match policy.check(raw_path, write) {
             PathRisk::Allow => Ok(()),
             PathRisk::Deny { reason } => Err(format!(
                 "BLOCKED by SPAVN Path Sandbox: {} ({} — {})",
@@ -167,30 +209,47 @@ impl ToolContext {
         if split_remote_prefix(raw_path).is_some() {
             return;
         }
-        let path = expand_tilde(raw_path);
-        if let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
-            let key = path.to_string_lossy().to_string();
-            self.read_mtimes.insert(key.clone(), mtime);
-            self.read_ranges.remove(&key);
+        let path = self.resolve_local_path(raw_path);
+        if let Ok(meta) = fs::metadata(&path) {
+            if let Ok(mtime) = meta.modified() {
+                let key = path.to_string_lossy().to_string();
+                self.read_mtimes.insert(key.clone(), mtime);
+                if meta.len() <= 4 * 1024 * 1024 {
+                    if let Ok(bytes) = fs::read(&path) {
+                        self.read_hashes.insert(key.clone(), fnv1a_hash64(&bytes));
+                    }
+                }
+                self.read_ranges.remove(&key);
+            }
         }
     }
 
-    pub fn check_external_mtime_shift(&self, raw_path: &str) -> String {
+    pub fn is_external_stale_version(&self, raw_path: &str) -> bool {
         if split_remote_prefix(raw_path).is_some() {
-            return String::new();
+            return false;
         }
-        let path = expand_tilde(raw_path);
+        let path = self.resolve_local_path(raw_path);
         let key = path.to_string_lossy().to_string();
+        if let Some(&recorded_hash) = self.read_hashes.get(&key) {
+            if let Ok(bytes) = fs::read(&path) {
+                return fnv1a_hash64(&bytes) != recorded_hash;
+            }
+        }
         if let Some(&recorded) = self.read_mtimes.get(&key) {
             if let Ok(current) = fs::metadata(&path).and_then(|m| m.modified()) {
-                if current > recorded {
-                    println!(
-                        "{}⚠️  [Code-Shifting Guard]: {} dosyası son okumadan (read) sonra dışarıdan değiştirildi!{}",
-                        YELLOW, raw_path, RESET
-                    );
-                    return " [CODE-SHIFTING GUARD WARNING: File was modified externally since last read — verify surrounding lines]".to_string();
-                }
+                return current > recorded;
             }
+        }
+        false
+    }
+
+    pub fn check_external_mtime_shift(&self, raw_path: &str) -> String {
+        if self.is_external_stale_version(raw_path) {
+            println!(
+                "{}⚠️  [Code-Shifting Guard]: {} dosyası son okumadan (read) sonra dışarıdan değiştirildi!{}",
+                YELLOW, raw_path, RESET
+            );
+            return " [CODE-SHIFTING GUARD WARNING: File was modified externally since last read — verify surrounding lines]".to_string();
         }
         String::new()
     }
@@ -214,7 +273,6 @@ impl ToolContext {
         }
     }
 }
-
 
 pub(crate) fn expand_tilde(path_str: &str) -> PathBuf {
     if path_str == "~" {
@@ -387,7 +445,8 @@ pub(crate) fn write_target_file(raw_path: &str, content: &str) -> Result<(), Str
     }
 }
 
-pub(crate) static ATOMIC_WRITE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static ATOMIC_WRITE_SEQ: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Temp file in the same dir + rename: a crash or full disk never leaves a truncated target.
 /// Follows symlinks (including broken symlinks) and keeps the existing file's permissions.
@@ -449,7 +508,24 @@ pub(crate) fn remove_target_file(raw_path: &str) {
 
 #[cfg(unix)]
 extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
+    pub(crate) fn kill(pid: i32, sig: i32) -> i32;
+    pub(crate) fn setsid() -> i32;
+    pub(crate) fn getpgrp() -> i32;
+    pub(crate) fn tcgetpgrp(fd: i32) -> i32;
+    pub(crate) fn tcsetpgrp(fd: i32, pgrp: i32) -> i32;
+}
+
+#[cfg(unix)]
+pub fn reclaim_foreground_tty() {
+    unsafe {
+        let my_pgrp = getpgrp();
+        if my_pgrp > 0 {
+            let cur = tcgetpgrp(0);
+            if cur > 0 && cur != my_pgrp {
+                let _ = tcsetpgrp(0, my_pgrp);
+            }
+        }
+    }
 }
 
 pub(crate) const MAX_CAPTURE_BYTES: u64 = 4 * 1024 * 1024;
@@ -503,17 +579,44 @@ pub(crate) fn spawn_error_message(cmd: &Command, err: &std::io::Error) -> String
 }
 
 pub(crate) fn run_command_with_timeout(
-    mut cmd: Command,
+    cmd: Command,
     timeout_sec: u64,
 ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), String> {
+    run_command_with_timeout_and_stdin(cmd, timeout_sec, None)
+}
+
+pub(crate) fn run_command_with_timeout_and_stdin(
+    mut cmd: Command,
+    timeout_sec: u64,
+    stdin_bytes: Option<&[u8]>,
+) -> Result<(i32, Vec<u8>, Vec<u8>, bool), String> {
+    if stdin_bytes.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    } else {
+        cmd.stdin(std::process::Stdio::null());
+    }
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                let _ = setsid();
+                Ok(())
+            });
+        }
     }
     let mut child = cmd.spawn().map_err(|e| spawn_error_message(&cmd, &e))?;
+    if let Some(input) = stdin_bytes {
+        if let Some(mut child_stdin) = child.stdin.take() {
+            let payload = input.to_vec();
+            std::thread::spawn(move || {
+                let _ = child_stdin.write_all(&payload);
+                let _ = child_stdin.flush();
+            });
+        }
+    }
     let out_handle = capture_capped(child.stdout.take());
     let err_handle = capture_capped(child.stderr.take());
 
@@ -553,6 +656,8 @@ pub(crate) fn run_command_with_timeout(
             Err(e) => return Err(e.to_string()),
         }
     };
+    #[cfg(unix)]
+    reclaim_foreground_tty();
 
     let out_bytes = out_handle.join().unwrap_or_default();
     let err_bytes = err_handle.join().unwrap_or_default();
@@ -570,70 +675,25 @@ pub(crate) fn gate_safe(s: &str) -> String {
         .collect()
 }
 
-pub(crate) fn prompt_user_approval(ctx: &mut ToolContext, action_title: &str, detail: &str) -> bool {
-    // Fail closed without a TTY: the read below would block forever on a piped/inherited stdin
-    // and the turn could never make progress. A prompt that cannot be answered is a "no".
-    if !crate::hud::stdin_is_tty() {
-        return false;
-    }
-    crate::hud::pause_active_spinner();
-    println!(
-        "\n{}╭─ 🛡️  {} ({}){}",
-        YELLOW,
-        crate::config::tr_en("SPAVN ERİŞİM KAPISI", "SPAVN ACCESS GATE"),
-        ctx.access.short_badge(),
-        RESET
-    );
-    println!(
-        "{}│{} {}{}{}",
-        YELLOW,
-        RESET,
-        BOLD,
-        gate_safe(action_title),
-        RESET
-    );
-    for line in detail.lines().take(6) {
-        println!("{}│{} {}{}{}", YELLOW, RESET, DIM, gate_safe(line), RESET);
-    }
-    print!(
-        "{}╰─ {}: {}",
-        YELLOW,
-        crate::config::tr_en(
-            "Onaylıyor musunuz? [e = Evet / H = Hayır / s = Sovereign Moda Geç]",
-            "Approve? [y = Yes / N = No / s = Switch to Sovereign Mode]"
-        ),
-        RESET
-    );
-    let _ = io::stdout().flush();
-
-    let mut ans = String::new();
-    // Ok(0) = EOF (closed/piped stdin): never treat it as the empty "default yes" answer.
-    if !matches!(io::stdin().read_line(&mut ans), Ok(n) if n > 0) {
-        crate::hud::resume_active_spinner();
-        return false;
-    }
-    let clean = ans.trim().to_lowercase();
-    if clean == "s" || clean == "sovereign" {
-        ctx.access = AccessMode::Sovereign;
-        println!(
-            "{}🔥 {}{}",
-            GREEN,
-            crate::config::tr_en(
+pub(crate) fn prompt_user_approval(
+    ctx: &mut ToolContext,
+    action_title: &str,
+    detail: &str,
+) -> bool {
+    match ctx.approver.ask(action_title, detail, ctx.access) {
+        ApprovalAnswer::Approve => true,
+        ApprovalAnswer::Deny => false,
+        // Widening the mode is the caller's job: an approver never mutates agent state.
+        ApprovalAnswer::Sovereign => {
+            ctx.access = AccessMode::Sovereign;
+            ctx.approver.notice(crate::config::tr_en(
                 "Erişim modu SOVEREIGN (Tam Otonom) olarak güncellendi.",
-                "Access mode switched to SOVEREIGN (Full Autonomous)."
-            ),
-            RESET
-        );
-        crate::hud::resume_active_spinner();
-        return true;
+                "Access mode switched to SOVEREIGN (Full Autonomous).",
+            ));
+            true
+        }
     }
-    // Enter alone declines: a stray keypress must not approve a risky action.
-    let approved = matches!(clean.as_str(), "e" | "evet" | "y" | "yes");
-    crate::hud::resume_active_spinner();
-    approved
 }
-
-
 
 pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> String {
     ctx.tool_step_counter += 1;
@@ -746,6 +806,7 @@ pub fn execute_read_only_batch(ctx: &mut ToolContext, calls: &[(String, String)]
 
     for local in locals {
         ctx.read_mtimes.extend(local.read_mtimes);
+        ctx.read_hashes.extend(local.read_hashes);
         ctx.read_ranges.extend(local.read_ranges);
     }
     ctx.tool_step_counter = base + calls.len();
@@ -770,4 +831,3 @@ pub fn phase_locked_tool(name: &str) -> bool {
             | "terminal"
     )
 }
-

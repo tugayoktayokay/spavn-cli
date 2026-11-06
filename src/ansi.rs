@@ -54,10 +54,63 @@ pub(crate) fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) 
                     break;
                 }
             }
+        } else if next_c == ']' {
+            // OSC sequence (\x1b]...\x07 or \x1b]...\x1b\\): zero printable width.
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == '\x07' {
+                    break;
+                }
+                if c == '\x1b' && chars.peek() == Some(&'\\') {
+                    chars.next();
+                    break;
+                }
+            }
         } else {
             chars.next();
         }
     }
+}
+
+/// Wraps `display` in an arbitrary OSC 8 hyperlink (`\x1b]8;;<url>\x07<display>\x1b]8;;\x07`).
+pub fn osc8_link(url: &str, display: &str) -> String {
+    let clean = url.trim();
+    if clean.is_empty() || clean.contains('\x1b') || clean.contains('\x07') {
+        return display.to_string();
+    }
+    format!("\x1b]8;;{}\x07{}\x1b]8;;\x07", clean, display)
+}
+
+/// Wraps `display` in an OSC 8 terminal hyperlink (`file:///abs/path#L<line>`) when `path`
+/// resolves to a local path. Because `skip_escape` and `truncate_ansi_to_width` treat OSC
+/// sequences as zero-width, wrapping does not alter layout math.
+pub fn osc8_file_link(path: &str, line: Option<usize>, display: &str) -> String {
+    let clean = path.trim();
+    if clean.is_empty() || clean.contains("://") || clean.contains('\x1b') {
+        return display.to_string();
+    }
+    let abs = if clean.starts_with('/') {
+        std::path::PathBuf::from(clean)
+    } else if let Some(rest) = clean.strip_prefix("~/") {
+        std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+            .join(rest)
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(clean)
+    };
+    let frag = line
+        .filter(|&l| l > 0)
+        .map(|l| format!("#L{}", l))
+        .unwrap_or_default();
+    format!(
+        "\x1b]8;;file://{}{}\x07{}\x1b]8;;\x07",
+        abs.display(),
+        frag,
+        display
+    )
 }
 
 /// Truncates `s` to at most `max_cols` printable cells, preserving any escape sequences it
@@ -66,6 +119,7 @@ pub fn truncate_ansi_to_width(s: &str, max_cols: usize) -> (String, usize) {
     let mut out = String::with_capacity(s.len());
     let mut used = 0usize;
     let mut chars = s.chars().peekable();
+    let mut in_osc8 = false;
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
             out.push(ch);
@@ -80,6 +134,27 @@ pub fn truncate_ansi_to_width(s: &str, max_cols: usize) -> (String, usize) {
                             break;
                         }
                     }
+                } else if next_c == ']' {
+                    if let Some(c) = chars.next() {
+                        out.push(c);
+                    }
+                    let mut osc_body = String::new();
+                    while let Some(c) = chars.next() {
+                        out.push(c);
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' && chars.peek() == Some(&'\\') {
+                            if let Some(st) = chars.next() {
+                                out.push(st);
+                            }
+                            break;
+                        }
+                        osc_body.push(c);
+                    }
+                    if osc_body.starts_with("8;;") {
+                        in_osc8 = osc_body.len() > 3;
+                    }
                 } else if let Some(c) = chars.next() {
                     out.push(c);
                 }
@@ -92,6 +167,9 @@ pub fn truncate_ansi_to_width(s: &str, max_cols: usize) -> (String, usize) {
         }
         used += w;
         out.push(ch);
+    }
+    if in_osc8 {
+        out.push_str("\x1b]8;;\x07");
     }
     out.push_str(RESET);
     (out, used)

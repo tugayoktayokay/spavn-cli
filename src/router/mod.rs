@@ -3,13 +3,13 @@ pub mod openai;
 pub mod vision;
 
 pub use anthropic::stream_anthropic;
+pub(crate) use openai::*;
 pub use openai::{stream_chat_completion, stream_openai};
+pub(crate) use vision::*;
 pub use vision::{
     base64_encode_bytes, collapse_pasted_image_paths, extract_dragged_images_info,
     register_read_image, DraggedImage,
 };
-pub(crate) use openai::*;
-pub(crate) use vision::*;
 
 use crate::config::{byok_catalog, load_user_config, resolve_api_key};
 use serde::{Deserialize, Serialize};
@@ -234,6 +234,24 @@ impl ModelEndpoint {
         if self.is_local_flag {
             return true;
         }
+        if self.has_quota_pool {
+            return false;
+        }
+        if !self.model.is_empty() {
+            let k = self.model.to_lowercase();
+            if k.contains("gemini")
+                || k.contains("argon")
+                || k.contains("claude")
+                || k.contains("opus")
+                || k.contains("sonnet")
+                || k.contains("haiku")
+                || k.contains("gpt-4")
+                || k.contains("gpt-5")
+                || k.contains("grok-")
+            {
+                return false;
+            }
+        }
         let host = url_host(&self.base_url);
         host == "localhost"
             || host == "::1"
@@ -256,6 +274,13 @@ impl ModelEndpoint {
             || key.contains("mini")
             || key.contains("haiku")
             || key.contains("small")
+    }
+
+    /// True for the cheap/free tiers where long round-trips (LLM context compaction, rich
+    /// tool schemas) cost more than the tokens they save.
+    pub fn is_low_cost_tier(&self) -> bool {
+        let key = self.model.to_lowercase();
+        key.contains("free") || key.contains("flash") || self.key.to_lowercase().contains("free")
     }
 
     /// True when the endpoint speaks the native Anthropic Messages API
@@ -304,7 +329,7 @@ impl ModelEndpoint {
             return 131_072;
         }
         let k = self.model.to_lowercase();
-        if k.contains("gemini") || k.contains("gpt-4.1") {
+        if k.contains("gemini") || k.contains("argon") || k.contains("gpt-4.1") {
             1_000_000
         } else if k.contains("grok-4") {
             256_000

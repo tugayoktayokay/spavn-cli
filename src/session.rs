@@ -80,9 +80,25 @@ pub fn load_session(path: &PathBuf) -> Vec<ChatMessage> {
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
     for line in reader.lines().map_while(Result::ok) {
-        if let Ok(msg) = serde_json::from_str::<ChatMessage>(&line) {
+        if let Ok(mut msg) = serde_json::from_str::<ChatMessage>(&line) {
             if !messages.is_empty() && msg.role == "system" {
                 continue;
+            }
+            if msg.role == "assistant" && msg.tool_calls.is_none() {
+                if let Some(ref c) = msg.content {
+                    if c.contains("DSML") && c.contains("invoke") {
+                        let recovered = crate::router::recover_inline_tool_calls(c);
+                        if !recovered.is_empty() {
+                            let stripped = crate::router::strip_recovered_tool_markup(c);
+                            msg.content = if stripped.is_empty() {
+                                None
+                            } else {
+                                Some(stripped)
+                            };
+                            msg.tool_calls = Some(recovered);
+                        }
+                    }
+                }
             }
             messages.push(msg);
         }
@@ -312,15 +328,25 @@ pub fn summarize_tool_args(name: &str, args_json: &str, default_host: &str) -> S
         // physical line names what the call does. Keeping the body let it swallow the whole
         // header, so the leading `cd <path>` — the part the reader actually needs — got cut.
         "bash" => {
-            let explicit_host = get_str_alias(&val, &["host", "target"]);
-            let host = if explicit_host.is_empty() {
-                default_host
+            let op = get_str_alias(&val, &["op", "action"]);
+            let job_id = get_str_alias(&val, &["job_id", "job", "id", "pid"]);
+            if matches!(op, "status" | "list" | "kill") {
+                if job_id.is_empty() {
+                    format!("[job:{}]", op)
+                } else {
+                    format!("[job:{}] {}", op, job_id)
+                }
             } else {
-                explicit_host
-            };
-            let command = get_str_alias(&val, &["command", "cmd", "script", "shell"]);
-            let first_line = command.lines().next().unwrap_or("");
-            format!("[{}] {}", host, first_line)
+                let explicit_host = get_str_alias(&val, &["host", "target"]);
+                let host = if explicit_host.is_empty() {
+                    default_host
+                } else {
+                    explicit_host
+                };
+                let command = get_str_alias(&val, &["command", "cmd", "script", "shell"]);
+                let first_line = command.lines().next().unwrap_or("");
+                format!("[{}] {}", host, first_line)
+            }
         }
         "search" => get_str_alias(&val, &["pattern", "query", "regex", "search"]).to_string(),
         "glob" | "find_files" | "list_files" | "file_glob" => {
@@ -457,8 +483,46 @@ pub fn perform_manual_compact(
     }
 
     let before_tok = estimate_tokens(messages);
+    let active_user_idx = messages.iter().rposition(|m| {
+        m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
+    });
+    let active_user_prompt = active_user_idx
+        .and_then(|idx| messages[idx].content.clone())
+        .map(|c| hud::strip_internal_tags_for_display(&c).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            const MARKER: &str = "[Active User Request — MUST complete all items]:\n";
+            messages.iter().rev().find_map(|m| {
+                if m.role != "user" {
+                    return None;
+                }
+                let c = m.content.as_deref()?;
+                let (_, after) = c.split_once(MARKER)?;
+                let clean = after
+                    .split("\n\n[Active Live Task Checklist]:")
+                    .next()
+                    .unwrap_or(after)
+                    .trim()
+                    .to_string();
+                (!clean.is_empty()).then_some(clean)
+            })
+        });
+    let mut tail_start = if messages.len() > 6 {
+        messages.len().saturating_sub(4)
+    } else {
+        messages.len()
+    };
+    if let Some(u_idx) = active_user_idx {
+        if messages.len().saturating_sub(u_idx) <= 8 {
+            tail_start = tail_start.min(u_idx);
+        }
+    }
+    while tail_start > 1 && tail_start < messages.len() && messages[tail_start].role == "tool" {
+        tail_start -= 1;
+    }
+
     let mut touched_tools: Vec<String> = Vec::new();
-    for m in messages.iter_mut().skip(1) {
+    for (idx, m) in messages.iter_mut().enumerate().skip(1) {
         if let Some(ref c) = m.content {
             if c.contains("<active_skill") {
                 m.content = Some(evict_old_skill_blocks(c));
@@ -478,14 +542,20 @@ pub fn perform_manual_compact(
                 }
             }
         }
-        if m.role == "tool" {
-            if let Some(ref c) = m.content {
-                if c.len() > 350 {
+        if idx < tail_start && m.role == "tool" {
+            if let Some(c) = &m.content {
+                if c.len() > 350 && !c.contains("[SPAVN Shaken") && !c.contains("...[Compacted") {
+                    let est_tok = c.len() / 4 + 1;
                     let head = safe_utf8_prefix(c, 180);
+                    let spill_note = crate::spill::spill_output("shaken-tool", c)
+                        .map(|p| format!(" — recover: {}", p.display()))
+                        .unwrap_or_default();
                     m.content = Some(format!(
-                        "{}\n...[Compacted {} bytes]...",
+                        "{}\n...[SPAVN Shaken ~{} tokens ({} bytes){}]...",
                         head,
-                        c.len().saturating_sub(180)
+                        est_tok,
+                        c.len().saturating_sub(180),
+                        spill_note
                     ));
                 }
             }
@@ -494,26 +564,44 @@ pub fn perform_manual_compact(
 
     if messages.len() > 6 {
         let sys = messages[0].clone();
-        let active_user_idx = messages.iter().rposition(|m| {
-            m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
-        });
-        let active_user_prompt = active_user_idx
-            .and_then(|idx| messages[idx].content.clone())
-            .map(|c| hud::strip_internal_tags_for_display(&c).trim().to_string())
-            .filter(|s| !s.is_empty());
-        let mut tail_start = messages.len().saturating_sub(4);
-        if let Some(u_idx) = active_user_idx {
-            if messages.len().saturating_sub(u_idx) <= 8 {
-                tail_start = tail_start.min(u_idx);
-            }
-        }
-        while tail_start > 1 && messages[tail_start].role == "tool" {
-            tail_start -= 1;
-        }
         let mut transcript_lines = Vec::new();
         for m in &messages[1..tail_start] {
             if m.role == "user" || m.role == "assistant" {
                 if let Some(c) = &m.content {
+                    if m.role == "user"
+                        && (c.starts_with("[SPAVN Auto-Compact")
+                            || c.starts_with("[SPAVN Semantic Context Handoff"))
+                    {
+                        let body = c
+                            .split("\n\n[Active User Request")
+                            .next()
+                            .unwrap_or(c)
+                            .split("\n\n[Active Live Task Checklist]:")
+                            .next()
+                            .unwrap_or(c);
+                        for line in body.lines().skip(1) {
+                            let t = line.trim();
+                            if let Some(rest) = t.strip_prefix("- [tools/files]:") {
+                                for item in rest.split(',').map(str::trim).filter(|s| !s.is_empty())
+                                {
+                                    let owned = item.to_string();
+                                    if !touched_tools.contains(&owned) && touched_tools.len() < 24 {
+                                        touched_tools.push(owned);
+                                    }
+                                }
+                            } else if !t.is_empty() && !t.contains("[SPAVN Auto-Compact") {
+                                let formatted = if t.starts_with("- [") {
+                                    t.to_string()
+                                } else {
+                                    format!("- [prior]: {}", t.trim_start_matches(['-', '*', ' ']))
+                                };
+                                if !transcript_lines.contains(&formatted) {
+                                    transcript_lines.push(formatted);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     let clean = hud::strip_internal_tags_for_display(c);
                     let snippet: String = clean
                         .lines()
@@ -536,7 +624,9 @@ pub fn perform_manual_compact(
         // is requested). On local models (`endpoint.is_local()`) during auto-compact, skip the LLM
         // summarization round-trip so we never flush the local KV-cache or stall for 20-30s.
         let mut llm_summary: Option<String> = None;
-        if !transcript_lines.is_empty() && (!endpoint.is_local() || focus.is_some()) {
+        let use_llm_compact = focus.is_some()
+            || (!endpoint.is_local() && !endpoint.model.contains("free") && messages.len() <= 80);
+        if !transcript_lines.is_empty() && use_llm_compact {
             let mut spin = LiveSpinner::start(tr_en(
                 "🗜️  Bağlam LLM ile anlamsal olarak özetleniyor",
                 "🗜️  Summarizing context semantically with LLM",
@@ -601,8 +691,9 @@ pub fn perform_manual_compact(
                 .collect();
             format!("\n\n[Active Live Task Checklist]:\n{}", lines.join("\n"))
         };
-        let preserved_user_suffix = match (active_user_idx, active_user_prompt.as_deref()) {
-            (Some(u_idx), Some(prompt)) if u_idx < tail_start => {
+        let user_in_tail = active_user_idx.map(|u| u >= tail_start).unwrap_or(false);
+        let preserved_user_suffix = match active_user_prompt.as_deref() {
+            Some(prompt) if !user_in_tail => {
                 format!(
                     "\n\n[Active User Request — MUST complete all items]:\n{}{}",
                     prompt, tasks_handoff_suffix
@@ -736,10 +827,10 @@ mod tests {
             "[local] cargo test"
         );
         let alias_host =
-            serde_json::json!({ "target": "telya-server", "command": "uptime" }).to_string();
+            serde_json::json!({ "target": "prod-server", "command": "uptime" }).to_string();
         assert_eq!(
             summarize_tool_args("bash", &alias_host, "local"),
-            "[telya-server] uptime"
+            "[prod-server] uptime"
         );
     }
 
@@ -759,5 +850,102 @@ mod tests {
         let edit = serde_json::json!({ "file_path": "src/hud/menus.rs" }).to_string();
         assert_eq!(tool_progress_target("edit", &edit), "src/hud/menus.rs");
         assert_eq!(tool_progress_target("web", &edit), "");
+    }
+
+    #[test]
+    fn repeated_compaction_preserves_active_request_and_tail_tool_outputs() {
+        let ep = ModelEndpoint {
+            key: "local".to_string(),
+            model: "qwen-coder".to_string(),
+            base_url: "http://127.0.0.1:8000/v1".to_string(),
+            api_key: "local".to_string(),
+            label: "Local".to_string(),
+            is_local_flag: true,
+            has_quota_pool: false,
+            configured_context_window: None,
+        };
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("Fix all 3 bugs in turn.rs and session.rs"),
+        ];
+        for step in 0..10 {
+            msgs.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![crate::router::ToolCall {
+                    id: format!("tc_{step}"),
+                    call_type: "function".to_string(),
+                    function: crate::router::ToolFunction {
+                        name: "read".to_string(),
+                        arguments: serde_json::json!({ "path": format!("src/f{step}.rs") })
+                            .to_string(),
+                    },
+                    thought_signature: None,
+                }]),
+                tool_call_id: None,
+                name: None,
+                thought_signature: None,
+            });
+            msgs.push(ChatMessage::tool_result(
+                format!("tc_{step}"),
+                "read",
+                "x".repeat(600),
+            ));
+        }
+        perform_manual_compact(&ep, &mut msgs, None);
+        let handoff_1 = msgs[1].content.clone().unwrap_or_default();
+        assert!(handoff_1.contains("[Active User Request — MUST complete all items]:\nFix all 3 bugs in turn.rs and session.rs"));
+        assert!(!msgs
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("...[Compacted"));
+
+        // Add more tool steps and compact a second time
+        for step in 10..18 {
+            msgs.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![crate::router::ToolCall {
+                    id: format!("tc_{step}"),
+                    call_type: "function".to_string(),
+                    function: crate::router::ToolFunction {
+                        name: "read".to_string(),
+                        arguments: serde_json::json!({ "path": format!("src/f{step}.rs") })
+                            .to_string(),
+                    },
+                    thought_signature: None,
+                }]),
+                tool_call_id: None,
+                name: None,
+                thought_signature: None,
+            });
+            msgs.push(ChatMessage::tool_result(
+                format!("tc_{step}"),
+                "read",
+                "y".repeat(600),
+            ));
+        }
+        perform_manual_compact(&ep, &mut msgs, None);
+        let handoff_2 = msgs[1].content.clone().unwrap_or_default();
+        assert!(
+            handoff_2.contains("[Active User Request — MUST complete all items]:\nFix all 3 bugs in turn.rs and session.rs"),
+            "Second compaction must preserve original user request: {handoff_2}"
+        );
+        assert!(
+            !handoff_2.contains("- [user]: [SPAVN Auto-Compact"),
+            "Second compaction must not recursively nest Auto-Compact header: {handoff_2}"
+        );
+        assert!(!msgs
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("...[Compacted"));
     }
 }

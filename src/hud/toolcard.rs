@@ -148,26 +148,219 @@ const CONTENT_KEYS: &[&str] = &["content", "text", "body", "code"];
 ///
 /// One place decides what a payload means, so the change preview, the diffstat and the row
 /// count can never disagree about the same call.
-fn hunk_pairs<'a>(tool_name: &str, val: &'a serde_json::Value) -> Vec<(&'a str, &'a str)> {
-    if let Some(hunks) = val.get("edits").and_then(|v| v.as_array()) {
-        return hunks
+fn parse_inline_line_range(raw_path: &str) -> (&str, Option<(usize, usize)>) {
+    if let Some(colon) = raw_path.rfind(':') {
+        let suffix = &raw_path[colon + 1..];
+        let first_seg = suffix.split(',').next().unwrap_or("");
+        let (s_part, e_part) = first_seg.split_once('-').unwrap_or((first_seg, first_seg));
+        if !s_part.is_empty()
+            && s_part.bytes().all(|b| b.is_ascii_digit())
+            && !e_part.is_empty()
+            && e_part.bytes().all(|b| b.is_ascii_digit())
+        {
+            if let (Ok(s), Ok(e)) = (s_part.parse::<usize>(), e_part.parse::<usize>()) {
+                if s > 0 && e >= s {
+                    return (&raw_path[..colon], Some((s, e)));
+                }
+            }
+        }
+    }
+    (raw_path, None)
+}
+
+fn parse_inline_start_line(raw_path: &str) -> (&str, Option<usize>) {
+    let (clean, range) = parse_inline_line_range(raw_path);
+    (clean, range.map(|(s, _)| s))
+}
+
+fn resolve_range_old_text(
+    h: &serde_json::Value,
+    root: &serde_json::Value,
+    default_clean_path: &str,
+    default_inline_range: Option<(usize, usize)>,
+) -> String {
+    let h_raw = alias(h, &["path", "file_path", "filepath", "file"]);
+    let (h_clean, h_inline_range) = if h_raw.is_empty() {
+        (default_clean_path, default_inline_range)
+    } else {
+        parse_inline_line_range(h_raw)
+    };
+    let start = h
+        .get("start_line")
+        .or_else(|| root.get("start_line"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .or_else(|| h_inline_range.map(|(s, _)| s));
+    let end = h
+        .get("end_line")
+        .or_else(|| root.get("end_line"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .or_else(|| h_inline_range.map(|(_, e)| e))
+        .or(start);
+    let (Some(s), Some(e)) = (start, end) else {
+        return String::new();
+    };
+    if s == 0 || e < s || h_clean.is_empty() {
+        return String::new();
+    }
+    let Ok(content) = std::fs::read_to_string(h_clean) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if s > lines.len() {
+        return String::new();
+    }
+    let end_clamped = e.min(lines.len());
+    lines[s - 1..end_clamped].join("\n")
+}
+
+fn hunk_pairs(tool_name: &str, val: &serde_json::Value) -> Vec<(String, String)> {
+    let top_raw_path = alias(val, &["path", "file_path", "filepath", "file"]);
+    let (top_clean_path, top_inline_range) = parse_inline_line_range(top_raw_path);
+    if let Some(files) = val.get("files").and_then(|v| v.as_array()) {
+        return files
             .iter()
-            .map(|h| (alias(h, OLD_KEYS), alias(h, NEW_KEYS)))
+            .map(|h| {
+                let raw_o = alias(h, OLD_KEYS);
+                let o = if raw_o.is_empty() && tool_name != "write" {
+                    resolve_range_old_text(h, val, top_clean_path, top_inline_range)
+                } else {
+                    raw_o.to_string()
+                };
+                (o, alias(h, NEW_KEYS).to_string())
+            })
             .filter(|(o, n)| !o.is_empty() || !n.is_empty())
             .collect();
     }
-    let old_text = alias(val, OLD_KEYS);
+    if let Some(hunks) = val.get("edits").and_then(|v| v.as_array()) {
+        return hunks
+            .iter()
+            .map(|h| {
+                let raw_o = alias(h, OLD_KEYS);
+                let o = if raw_o.is_empty() && tool_name != "write" {
+                    resolve_range_old_text(h, val, top_clean_path, top_inline_range)
+                } else {
+                    raw_o.to_string()
+                };
+                (o, alias(h, NEW_KEYS).to_string())
+            })
+            .filter(|(o, n)| !o.is_empty() || !n.is_empty())
+            .collect();
+    }
+    let raw_old = alias(val, OLD_KEYS);
+    let old_text = if raw_old.is_empty() && tool_name != "write" {
+        resolve_range_old_text(val, val, top_clean_path, top_inline_range)
+    } else {
+        raw_old.to_string()
+    };
     // `write` replaces the whole file, so everything it carries is an addition; an `edit`
     // with no anchor is not a change we can show.
     let new_text = if old_text.is_empty() && tool_name == "write" {
-        alias(val, CONTENT_KEYS)
+        alias(val, CONTENT_KEYS).to_string()
     } else {
-        alias(val, NEW_KEYS)
+        alias(val, NEW_KEYS).to_string()
     };
     if old_text.is_empty() && new_text.is_empty() {
         Vec::new()
     } else {
         vec![(old_text, new_text)]
+    }
+}
+
+fn find_snippet_start_line(file_content: &str, snippet: &str) -> Option<usize> {
+    let trimmed = snippet.trim_matches('\n');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(pos) = file_content.find(trimmed) {
+        return Some(file_content[..pos].bytes().filter(|&b| b == b'\n').count() + 1);
+    }
+    let first_non_empty = trimmed.lines().find(|l| !l.trim().is_empty())?.trim();
+    if first_non_empty.len() >= 4 {
+        if let Some(pos) = file_content.find(first_non_empty) {
+            return Some(file_content[..pos].bytes().filter(|&b| b == b'\n').count() + 1);
+        }
+    }
+    None
+}
+
+/// Resolves the 1-based starting file line number for each hunk in an `edit`/`write` call.
+pub fn resolve_hunk_start_lines(tool_name: &str, args_json: &str) -> Vec<usize> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(args_json) else {
+        return Vec::new();
+    };
+    if tool_name == "write" {
+        return vec![1];
+    }
+    let top_raw_path = alias(&val, &["path", "file_path", "filepath", "file"]);
+    let (top_clean_path, top_inline_line) = parse_inline_start_line(top_raw_path);
+    let top_file_content = (!top_clean_path.is_empty())
+        .then(|| std::fs::read_to_string(top_clean_path).ok())
+        .flatten();
+
+    let resolve_one = |h: &serde_json::Value, old_s: &str, new_s: &str| -> usize {
+        if let Some(s) = h
+            .get("start_line")
+            .or_else(|| val.get("start_line"))
+            .and_then(|v| v.as_u64())
+            .filter(|&n| n > 0)
+        {
+            return s as usize;
+        }
+        if let Some(ins) = h
+            .get("insert_after_line")
+            .or_else(|| val.get("insert_after_line"))
+            .and_then(|v| v.as_u64())
+        {
+            return (ins as usize) + 1;
+        }
+        let h_raw = alias(h, &["path", "file_path", "filepath", "file"]);
+        let (h_clean, h_inline) = parse_inline_start_line(h_raw);
+        if let Some(l) = h_inline.or(top_inline_line) {
+            return l;
+        }
+        let content_buf;
+        let content_ref = if !h_clean.is_empty() && h_clean != top_clean_path {
+            content_buf = std::fs::read_to_string(h_clean).ok();
+            content_buf.as_deref()
+        } else {
+            top_file_content.as_deref()
+        };
+        if let Some(fc) = content_ref {
+            if let Some(l) =
+                find_snippet_start_line(fc, new_s).or_else(|| find_snippet_start_line(fc, old_s))
+            {
+                return l;
+            }
+        }
+        1
+    };
+
+    if let Some(files) = val.get("files").and_then(|v| v.as_array()) {
+        return files
+            .iter()
+            .filter_map(|h| {
+                let (o, n) = (alias(h, OLD_KEYS), alias(h, NEW_KEYS));
+                (!o.is_empty() || !n.is_empty()).then(|| resolve_one(h, o, n))
+            })
+            .collect();
+    }
+    if let Some(hunks) = val.get("edits").and_then(|v| v.as_array()) {
+        return hunks
+            .iter()
+            .filter_map(|h| {
+                let (o, n) = (alias(h, OLD_KEYS), alias(h, NEW_KEYS));
+                (!o.is_empty() || !n.is_empty()).then(|| resolve_one(h, o, n))
+            })
+            .collect();
+    }
+    let old_text = alias(&val, OLD_KEYS);
+    let new_text = alias(&val, NEW_KEYS);
+    if old_text.is_empty() && new_text.is_empty() {
+        Vec::new()
+    } else {
+        vec![resolve_one(&val, old_text, new_text)]
     }
 }
 
@@ -244,6 +437,72 @@ fn push_hunk(rows: &mut Vec<String>, old_text: &str, new_text: &str, keep: usize
 
 const BG_REMOVED: &str = "\x1b[48;5;52m";
 const BG_ADDED: &str = "\x1b[48;5;22m";
+const BG_REMOVED_WORD: &str = "\x1b[1;48;5;88m\x1b[97m";
+const BG_ADDED_WORD: &str = "\x1b[1;48;5;28m\x1b[97m";
+
+/// Highlights the changed intra-line span between `row` (`- ...` or `+ ...`) and its paired
+/// counterpart line (`peer`), keeping the outer line on `base_bg + base_fg` and painting only
+/// the modified middle token(s) with `word_bg`.
+fn style_word_diff_line(
+    row: &str,
+    peer: Option<&str>,
+    base_bg: &str,
+    base_fg: &str,
+    word_bg: &str,
+) -> String {
+    let Some(peer_raw) = peer else {
+        return format!("{}{}{}{}{}", base_bg, base_fg, row, RESET, RESET);
+    };
+    let (sign, body) = if let Some(b) = row.strip_prefix("- ") {
+        ("- ", b)
+    } else if let Some(b) = row.strip_prefix("+ ") {
+        ("+ ", b)
+    } else {
+        return format!("{}{}{}{}{}", base_bg, base_fg, row, RESET, RESET);
+    };
+    let peer_body = peer_raw
+        .strip_prefix("- ")
+        .or_else(|| peer_raw.strip_prefix("+ "))
+        .unwrap_or(peer_raw);
+    if body == peer_body || body.is_empty() || peer_body.is_empty() {
+        return format!("{}{}{}{}{}", base_bg, base_fg, row, RESET, RESET);
+    }
+    let a_chars: Vec<char> = body.chars().collect();
+    let b_chars: Vec<char> = peer_body.chars().collect();
+    let mut pref = 0usize;
+    while pref < a_chars.len() && pref < b_chars.len() && a_chars[pref] == b_chars[pref] {
+        pref += 1;
+    }
+    let mut suff = 0usize;
+    while suff < (a_chars.len() - pref)
+        && suff < (b_chars.len() - pref)
+        && a_chars[a_chars.len() - 1 - suff] == b_chars[b_chars.len() - 1 - suff]
+    {
+        suff += 1;
+    }
+    // Only use intra-line highlight when the two lines share a meaningful anchor (prefix or suffix)
+    // and the changed span is a sub-segment of the line.
+    if pref + suff < 2 || (pref == 0 && suff == 0) || pref + suff >= a_chars.len() {
+        return format!("{}{}{}{}{}", base_bg, base_fg, row, RESET, RESET);
+    }
+    let prefix_str: String = a_chars[..pref].iter().collect();
+    let mid_str: String = a_chars[pref..a_chars.len() - suff].iter().collect();
+    let suffix_str: String = a_chars[a_chars.len() - suff..].iter().collect();
+    format!(
+        "{}{}{}{}{}{}\x1b[22m{}{}{}{}{}",
+        base_bg,
+        base_fg,
+        sign,
+        prefix_str,
+        word_bg,
+        mid_str,
+        base_bg,
+        base_fg,
+        suffix_str,
+        RESET,
+        RESET
+    )
+}
 
 /// Colors `- `/`+ ` change rows, leaving everything else dim.
 pub fn style_body_row(row: &str) -> String {
@@ -291,6 +550,16 @@ pub fn diff_row(number: Option<usize>, row: &str, cols: usize) -> String {
 /// `diff_row` with an explicit gutter width, so a 12-line hunk does not spend four cells on
 /// padding while a 1 200-line file would otherwise lose its number.
 pub fn diff_row_sized(number: Option<usize>, row: &str, cols: usize, gutter_w: usize) -> String {
+    diff_row_sized_with_peer(number, row, None, cols, gutter_w)
+}
+
+pub fn diff_row_sized_with_peer(
+    number: Option<usize>,
+    row: &str,
+    peer: Option<&str>,
+    cols: usize,
+    gutter_w: usize,
+) -> String {
     let gutter_w = gutter_w.max(2);
     let gutter = match number {
         Some(n) => format!("{}│{:>width$} {}", DIM, n, RESET, width = gutter_w),
@@ -306,42 +575,107 @@ pub fn diff_row_sized(number: Option<usize>, row: &str, cols: usize, gutter_w: u
     } else {
         let t = row.trim_start();
         if t.starts_with("- ") {
-            format!("{}{}{}{}{}", BG_REMOVED, RED, row, RESET, RESET)
+            style_word_diff_line(row, peer, BG_REMOVED, RED, BG_REMOVED_WORD)
         } else if t.starts_with("+ ") {
-            format!("{}{}{}{}{}", BG_ADDED, GREEN, row, RESET, RESET)
+            style_word_diff_line(row, peer, BG_ADDED, GREEN, BG_ADDED_WORD)
         } else {
             row.to_string()
         }
     };
-    let (trunc, _) = crate::ansi::truncate_ansi_to_width(&styled, cols.saturating_sub(7).max(8));
+    let budget = cols.saturating_sub(gutter_w + 5).max(8);
+    let (trunc, _) = crate::ansi::truncate_ansi_to_width(&styled, budget);
     format!("{}{}", gutter, trunc)
 }
 
-/// Numbers each run of preview rows from 1, restarting after any marker.
-///
-/// The removed and added sides of a hunk are two different snapshots of the same lines, so a
-/// single running counter would show `7 8 9` on the green side of a three-line replacement and
-/// imply the file grew. A marker is a jump in the sequence, so it ends a run either way.
-///
-/// The number is a *row index inside the block*, not a file line number — the executor does not
-/// carry original line numbers through the preview, and inventing them would be worse than
-/// showing none.
+/// Numbers each run of preview rows from 1 (or from the resolved file starting lines in
+/// `hunk_starts`), restarting after any marker and pairing `-`/`+` lines within each hunk for
+/// word-level intra-line diff emphasis.
 pub fn numbered_diff_rows(rows: &[String], cols: usize) -> Vec<String> {
-    let per_block = rows
-        .split(|r| r.trim_start().starts_with('⋯'))
-        .map(|b| b.iter().filter(|r| !is_marker_row(r)).count())
+    numbered_diff_rows_at(rows, cols, &[])
+}
+
+pub fn numbered_diff_rows_for_call(
+    tool_name: &str,
+    args_json: &str,
+    rows: &[String],
+    cols: usize,
+) -> Vec<String> {
+    let starts = resolve_hunk_start_lines(tool_name, args_json);
+    numbered_diff_rows_at(rows, cols, &starts)
+}
+
+pub fn numbered_diff_rows_at(rows: &[String], cols: usize, hunk_starts: &[usize]) -> Vec<String> {
+    // Split into contiguous non-marker runs so we can:
+    // 1. Know whether a `+` run is the replacement half of the preceding `-` run (same hunk),
+    //    so both sides share the same file starting line and pair line-by-line for word diff.
+    // 2. Size the gutter width for the highest line number across all runs.
+    let mut blocks: Vec<Vec<usize>> = Vec::new();
+    let mut cur_block: Vec<usize> = Vec::new();
+    for (idx, row) in rows.iter().enumerate() {
+        if is_marker_row(row) {
+            if !cur_block.is_empty() {
+                blocks.push(std::mem::take(&mut cur_block));
+            }
+        } else {
+            cur_block.push(idx);
+        }
+    }
+    if !cur_block.is_empty() {
+        blocks.push(cur_block);
+    }
+
+    let mut block_start_lines: Vec<usize> = Vec::with_capacity(blocks.len());
+    let mut peer_map: Vec<Option<usize>> = vec![None; rows.len()];
+    let mut hunk_idx = 0usize;
+    let mut bi = 0usize;
+    while bi < blocks.len() {
+        let base_line = hunk_starts.get(hunk_idx).copied().unwrap_or(1).max(1);
+        let b_is_minus = blocks[bi]
+            .first()
+            .is_some_and(|&r| rows[r].trim_start().starts_with("- "));
+        let next_is_plus = blocks.get(bi + 1).is_some_and(|nb| {
+            nb.first()
+                .is_some_and(|&r| rows[r].trim_start().starts_with("+ "))
+        });
+        block_start_lines.push(base_line);
+        if b_is_minus && next_is_plus {
+            // Pair corresponding lines between the `-` block and `+` block of the same hunk.
+            block_start_lines.push(base_line);
+            let pair_len = blocks[bi].len().min(blocks[bi + 1].len());
+            for (&r_minus, &r_plus) in blocks[bi].iter().zip(blocks[bi + 1].iter()).take(pair_len) {
+                peer_map[r_minus] = Some(r_plus);
+                peer_map[r_plus] = Some(r_minus);
+            }
+            bi += 2;
+        } else {
+            bi += 1;
+        }
+        hunk_idx += 1;
+    }
+
+    let max_line_num = blocks
+        .iter()
+        .zip(block_start_lines.iter())
+        .map(|(b, &start)| start + b.len().saturating_sub(1))
         .max()
-        .unwrap_or(0);
-    let gutter_w = per_block.max(1).to_string().len().max(2);
-    let mut n = 0usize;
+        .unwrap_or(1);
+    let gutter_w = max_line_num.max(1).to_string().len().max(2);
+
+    let mut line_numbers: Vec<Option<usize>> = vec![None; rows.len()];
+    for (b, &start) in blocks.iter().zip(block_start_lines.iter()) {
+        for (offset, &row_idx) in b.iter().enumerate() {
+            line_numbers[row_idx] = Some(start + offset);
+        }
+    }
+
     rows.iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(idx, row)| {
             if is_marker_row(row) {
-                n = 0;
                 diff_row_sized(None, row, cols, gutter_w)
             } else {
-                n += 1;
-                diff_row_sized(Some(n), row, cols, gutter_w)
+                let peer = peer_map[idx].map(|p| rows[p].as_str());
+                diff_row_sized_with_peer(line_numbers[idx], row, peer, cols, gutter_w)
             }
         })
         .collect()
@@ -549,6 +883,37 @@ mod tests {
             visible_width(&out[0]) <= 48,
             "{} cells",
             visible_width(&out[0])
+        );
+    }
+
+    #[test]
+    fn numbered_diff_rows_at_uses_real_file_line_numbers_and_word_level_highlights() {
+        let r = rows(&["- let count = 10;", "  ⋯", "+ let count = 20;"]);
+        let out = numbered_diff_rows_at(&r, 80, &[420]);
+        assert!(out[0].contains("│420 "), "expected line 420: {:?}", out[0]);
+        assert!(out[2].contains("│420 "), "expected line 420: {:?}", out[2]);
+        assert!(
+            out[0].contains(BG_REMOVED_WORD),
+            "expected intra-line removed word highlight: {:?}",
+            out[0]
+        );
+        assert!(
+            out[2].contains(BG_ADDED_WORD),
+            "expected intra-line added word highlight: {:?}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn osc8_links_have_zero_display_width_and_auto_close_on_truncation() {
+        let linked = crate::ansi::osc8_link("file:///tmp/demo.rs", "src/demo.rs:42");
+        assert_eq!(visible_width(&linked), "src/demo.rs:42".len());
+        let (trunc, w) = crate::ansi::truncate_ansi_to_width(&linked, 7);
+        assert_eq!(w, 7);
+        assert!(
+            trunc.contains("\x1b]8;;\x07"),
+            "truncated OSC 8 link must auto-close: {:?}",
+            trunc
         );
     }
 }

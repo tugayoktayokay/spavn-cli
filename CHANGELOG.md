@@ -1,5 +1,19 @@
 # Değişiklik Günlüğü
 
+## 2026-11-06 — `v0.2.0`: Modüler Çekirdek, Otonom Harness Zekası, JSON-RPC 2.0 Köprüsü & Tazelik Koruması
+
+### Mimari Modülerleştirme & Masaüstü Köprüsü (`src/tools/`, `src/router/`, `src/hud/`, `src/bridge.rs`)
+- **Modüler Çekirdek**: Monolitik `tools.rs`, `router.rs`, `hud/` ve `main.rs` odaklanmış alt modüllere (`tools/{edit,read,search,shell,mcp_subagent,schema,web}.rs`, `router/{anthropic,openai,vision}.rs`, `turn.rs`) ayrıldı.
+- **JSON-RPC 2.0 Köprüsü (`--rpc`, `bridge.rs`, `events.rs`, `approval.rs`)**: `spavn-desktop` (Tauri) ve IDE eklentileri için çift yönlü stdio JSON-RPC 2.0 protokolü, yapılandırılmış `AgentEvent` yayınları ve etkileşimli araç onay (`approval`) altyapısı eklendi.
+- **Terminal Başlığı & Görev Seçici (`hud/title.rs`, `hud/pickers.rs`)**: Canlı çalışma durumu için pencere başlığı yönetimi (`WorkingGuard`) ve `/todo done` için ok tuşlarıyla etkileşimli görev seçici eklendi.
+
+### Otonom Harness Zekası (`tools/edit.rs`, `tools/mod.rs`, `turn.rs`)
+- **İmza & Parametre Sayısı (Arity) Duyarlı Impact Graph**: Kelime sınırı (`contains_word_boundary_ident`) ve parametre sayısı (`extract_function_arity`) analiziyle, bir fonksiyonun imzası değiştiğinde etkilenen dış çağrı noktaları `[SPAVN Impact Graph — SIGNATURE ARITY SHIFT]` olarak anında raporlanır.
+- **`FS_STALE_VERSION` Tazelik Koruması**: Okunan veya düzenlenen dosyaların 64-bit `FNV-1a` içerik özeti (`read_hashes`) ve `mtime` bilgisi kaydedilir; dosya dışarıdan değiştirilmişse kör `write` ve satır aralığı `edit` işlemleri durdurularak dış değişikliklerin ezilmesi engellenir.
+- **Kanonik Argüman & Şeffaf Zincir Döngü Kırıcı (`canonical_tool_call_sig`)**: JSON anahtar sırasından bağımsız kanonik imza üretimi ve yan araçları (`memory`, `skill`) şeffaf sayan döngü algılayıcı ile ardışık veya dönüşümlü (`A-B-A-B`) araç döngüleri kırılır.
+- **AST-Duyarlı Bağlam Sıkıştırma & Bütçe-Göreli Budama**: Eski araç çıktıları sıkıştırılırken içlerindeki `fn`, `struct`, `enum`, `trait`, `def`, `class`, `interface` imzaları (`extract_compact_ast_skeleton`) korunur; budama eşiği modelin bağlam penceresine göre (`max_ctx_tokens / 4`) dinamik ölçeklenir.
+- **Sıfır-Bağımlılıklı Arama/Glob & Yerel LLM Mikro-Şema**: `rg` olmadığında saf Rust dizin/içerik arama yedeği, özyinelemeli `grep`/`find`/`cat` kabuk engelleyicisi ve yerel modeller için 6 araçlık dinamik mikro-şema (`tool_definitions_for_turn`) devreye alındı.
+
 ## 2026-11-05 — Sürüm denetimi, crates.io & Homebrew paketleme
 
 ### Dağıtım kanalları

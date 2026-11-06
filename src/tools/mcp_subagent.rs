@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(crate) fn run_single_subagent_worker(
     model_key: &str,
     default_host: &str,
@@ -314,7 +313,11 @@ pub(crate) fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
     )
 }
 
-pub(crate) fn format_mcp_jsonrpc_response(server_name: &str, tool_name: &str, raw_json: &str) -> String {
+pub(crate) fn format_mcp_jsonrpc_response(
+    server_name: &str,
+    tool_name: &str,
+    raw_json: &str,
+) -> String {
     let Ok(v) = serde_json::from_str::<Value>(raw_json) else {
         return raw_json.chars().take(12_000).collect();
     };
@@ -436,7 +439,11 @@ pub(crate) const MCP_READ_VERBS: &[&str] = &[
 ];
 
 /// True when `server:tool` may have side effects and so needs the phase/approval gate.
-pub(crate) fn is_mutating_mcp_tool(server_name: &str, tool_name: &str, server_is_read_only: bool) -> bool {
+pub(crate) fn is_mutating_mcp_tool(
+    server_name: &str,
+    tool_name: &str,
+    server_is_read_only: bool,
+) -> bool {
     if tool_name.trim().is_empty() || server_is_read_only {
         return false;
     }
@@ -539,7 +546,7 @@ pub(crate) fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
         }
     };
     if op == "symbols" || (symbol.is_empty() && !raw_path.is_empty()) {
-        let target = expand_tilde(raw_path);
+        let target = ctx.resolve_local_path(raw_path);
         if target.is_file() {
             if let Ok(content) = fs::read_to_string(&target) {
                 let mut syms = Vec::new();
@@ -554,15 +561,16 @@ pub(crate) fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                 return syms.join("\n");
             }
         }
-        return build_live_project_signatures(raw_path);
+        return build_live_project_signatures(&target.to_string_lossy());
     }
 
     if symbol.is_empty() {
         return "LSP error: missing 'symbol' parameter.".to_string();
     }
-    let pattern = if op == "definition" || op == "def" {
+    let is_def = op == "definition" || op == "def";
+    let pattern = if is_def {
         format!(
-            r"(fn|struct|enum|trait|type|const|static|def|class|function|interface|func)\s+{}\b",
+            r"(fn|struct|enum|trait|type|const|let|static|def|class|function|interface|func)\s+{}\b",
             symbol
         )
     } else {
@@ -572,7 +580,8 @@ pub(crate) fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
         ctx,
         &json!({
             "pattern": pattern,
-            "path": raw_path
+            "path": raw_path,
+            "context": if is_def { 6 } else { 0 }
         }),
     )
 }

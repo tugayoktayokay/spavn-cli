@@ -411,6 +411,89 @@ pub fn render_markdown_table(raw_rows: &[String], term_cols: usize) -> String {
     out
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodeLang {
+    Generic,
+    Json,
+    Yaml,
+    Toml,
+    Sql,
+    Diff,
+    Markup,
+}
+
+impl CodeLang {
+    fn from_fence(tag: &str) -> Self {
+        let lower = tag
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match lower.as_str() {
+            "json" | "jsonc" | "jsonl" => Self::Json,
+            "yaml" | "yml" => Self::Yaml,
+            "toml" | "ini" => Self::Toml,
+            "sql" | "postgres" | "postgresql" | "sqlite" | "mysql" => Self::Sql,
+            "diff" | "patch" => Self::Diff,
+            "html" | "xml" | "svg" => Self::Markup,
+            _ => Self::Generic,
+        }
+    }
+}
+
+fn highlight_code_line_lang(line: &str, lang: CodeLang) -> String {
+    let trimmed = line.trim_start();
+    match lang {
+        CodeLang::Diff => {
+            if trimmed.starts_with("+++") || trimmed.starts_with("---") || trimmed.starts_with("@@")
+            {
+                return format!("\x1b[36m{}{}", line, RESET);
+            } else if line.starts_with('+') {
+                return format!("\x1b[32m{}{}", line, RESET);
+            } else if line.starts_with('-') {
+                return format!("\x1b[31m{}{}", line, RESET);
+            }
+        }
+        CodeLang::Yaml | CodeLang::Toml => {
+            if trimmed.starts_with('#') {
+                return format!("{}{}{}", DIM, line, RESET);
+            }
+            if lang == CodeLang::Toml && trimmed.starts_with('[') && trimmed.ends_with(']') {
+                return format!("\x1b[1;36m{}{}", line, RESET);
+            }
+            if let Some(sep_idx) = line.find(if lang == CodeLang::Yaml { ':' } else { '=' }) {
+                let key_part = &line[..sep_idx];
+                if !key_part.contains('"') && !key_part.contains('\'') {
+                    let sep = &line[sep_idx..sep_idx + 1];
+                    let val_part = &line[sep_idx + 1..];
+                    return format!(
+                        "\x1b[36m{}{}{}{}{}",
+                        key_part,
+                        DIM,
+                        sep,
+                        RESET,
+                        highlight_code_line(val_part)
+                    );
+                }
+            }
+        }
+        CodeLang::Json => {
+            if let Some(colon_idx) = line.find("\":") {
+                let key_part = &line[..colon_idx + 1];
+                let rest = &line[colon_idx + 1..];
+                return format!("\x1b[36m{}{}{}", key_part, RESET, highlight_code_line(rest));
+            }
+        }
+        CodeLang::Sql => {
+            if trimmed.starts_with("--") {
+                return format!("{}{}{}", DIM, line, RESET);
+            }
+        }
+        CodeLang::Markup | CodeLang::Generic => {}
+    }
+    highlight_code_line(line)
+}
+
 fn highlight_code_line(line: &str) -> String {
     let trimmed = line.trim_start();
     if trimmed.starts_with("//") || (trimmed.starts_with('#') && !trimmed.starts_with("#[")) {
@@ -615,6 +698,7 @@ pub struct MarkdownStreamRenderer {
     at_line_start: bool,
     prefix_buf: String,
     in_code_block: bool,
+    code_lang: CodeLang,
     in_heading: bool,
     in_quote: bool,
     in_bold: bool,
@@ -637,6 +721,7 @@ impl MarkdownStreamRenderer {
             at_line_start: true,
             prefix_buf: String::new(),
             in_code_block: false,
+            code_lang: CodeLang::Generic,
             in_heading: false,
             in_quote: false,
             in_bold: false,
@@ -675,6 +760,7 @@ impl MarkdownStreamRenderer {
                 let line = pending.trim_end_matches(['\r', '\n']);
                 if line.trim().starts_with("```") {
                     self.in_code_block = false;
+                    self.code_lang = CodeLang::Generic;
                     let rule_w = term_size().1.saturating_sub(8).clamp(16, 60);
                     self.out_buf
                         .push_str(&format!("  {}╰{}{}\n", DIM, "─".repeat(rule_w), RESET));
@@ -683,7 +769,7 @@ impl MarkdownStreamRenderer {
                         "  {}│{} {}\n",
                         DIM,
                         RESET,
-                        highlight_code_line(line)
+                        highlight_code_line_lang(line, self.code_lang)
                     ));
                 }
             } else if pending.trim_start().starts_with('|') {
@@ -696,6 +782,13 @@ impl MarkdownStreamRenderer {
                     self.emit_inline_char(ch);
                 }
             }
+        }
+        if self.in_code_block {
+            self.in_code_block = false;
+            self.code_lang = CodeLang::Generic;
+            let rule_w = term_size().1.saturating_sub(8).clamp(16, 60);
+            self.out_buf
+                .push_str(&format!("\r  {}╰{}{}\n", DIM, "─".repeat(rule_w), RESET));
         }
         self.flush_table();
         self.flush_stars(true);
@@ -825,6 +918,7 @@ impl MarkdownStreamRenderer {
                 let line = self.prefix_buf.trim_end_matches(['\r', '\n']);
                 if line.trim().starts_with("```") {
                     self.in_code_block = false;
+                    self.code_lang = CodeLang::Generic;
                     let rule_w = term_size().1.saturating_sub(8).clamp(16, 60);
                     self.out_buf
                         .push_str(&format!("  {}╰{}{}\n", DIM, "─".repeat(rule_w), RESET));
@@ -833,7 +927,7 @@ impl MarkdownStreamRenderer {
                         "  {}│{} {}\n",
                         DIM,
                         RESET,
-                        highlight_code_line(line)
+                        highlight_code_line_lang(line, self.code_lang)
                     ));
                 }
                 self.prefix_buf.clear();
@@ -862,6 +956,7 @@ impl MarkdownStreamRenderer {
                 let lang = trimmed.trim_start_matches('`').trim();
                 let label = if lang.is_empty() { "kod" } else { lang };
                 self.in_code_block = true;
+                self.code_lang = CodeLang::from_fence(lang);
                 let rule_w = term_size()
                     .1
                     .saturating_sub(14 + label.chars().count())
@@ -1175,5 +1270,25 @@ mod robustness_tests {
         assert!(h.contains("\x1b[36mcompute\x1b[0m"));
         assert!(h.contains("\x1b[33mString\x1b[0m"));
         assert!(h.contains("// note"));
+    }
+
+    #[test]
+    fn code_line_highlighter_supports_json_yaml_diff_and_unclosed_fence() {
+        let j = super::highlight_code_line_lang("  \"model\": \"qwen\",", super::CodeLang::Json);
+        assert!(j.contains("\x1b[36m  \"model\"\x1b[0m"));
+
+        let y = super::highlight_code_line_lang("host: localhost", super::CodeLang::Yaml);
+        assert!(y.contains("\x1b[36mhost"));
+
+        let d_add = super::highlight_code_line_lang("+added line", super::CodeLang::Diff);
+        let d_del = super::highlight_code_line_lang("-removed line", super::CodeLang::Diff);
+        assert!(d_add.starts_with("\x1b[32m+added line"));
+        assert!(d_del.starts_with("\x1b[31m-removed line"));
+
+        let mut r = MarkdownStreamRenderer::new();
+        r.push("```json\n{\"ok\": true}");
+        assert!(r.in_code_block);
+        r.finish();
+        assert!(!r.in_code_block);
     }
 }

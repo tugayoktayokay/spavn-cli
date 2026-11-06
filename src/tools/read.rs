@@ -3,7 +3,12 @@ use super::*;
 pub(crate) fn is_structural_outline_line(line: &str) -> bool {
     let trimmed = line.trim_start();
     let indent = line.len().saturating_sub(trimmed.len());
-    if indent > 8 || trimmed.starts_with("//") || trimmed.starts_with('#') {
+    if indent > 12
+        || trimmed.starts_with("//")
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+    {
         return false;
     }
     const PREFIXES: &[&str] = &[
@@ -37,16 +42,46 @@ pub(crate) fn is_structural_outline_line(line: &str) -> bool {
         "def ",
         "async def ",
         "class ",
+        "func ",
         "export function ",
         "export async function ",
         "export default function ",
         "export class ",
         "export interface ",
         "export type ",
+        "export const ",
         "function ",
         "interface ",
     ];
-    PREFIXES.iter().any(|p| trimmed.starts_with(p))
+    if PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+    // React / TS / JS arrow functions & hooks (`const handleSend = async () => {`, `const Screen: FC =`)
+    if (trimmed.starts_with("const ") || trimmed.starts_with("let "))
+        && (trimmed.contains("=>")
+            || trimmed.contains("= async")
+            || trimmed.contains(": FC")
+            || trimmed.contains("React.memo(")
+            || trimmed.contains(" forwardRef("))
+    {
+        return true;
+    }
+    // C# / Java / Kotlin / Swift class & method declarations
+    const OO_MODIFIERS: &[&str] = &[
+        "public ",
+        "private ",
+        "protected ",
+        "internal ",
+        "override ",
+        "@objc ",
+    ];
+    if OO_MODIFIERS.iter().any(|m| trimmed.starts_with(m))
+        && (trimmed.contains('(') || trimmed.contains("class ") || trimmed.contains("interface "))
+        && !trimmed.ends_with(';')
+    {
+        return true;
+    }
+    false
 }
 
 /// One `N-M` (or bare `N`) span from a `path:N-M,K-L` selector.
@@ -110,6 +145,55 @@ pub(crate) fn expand_line_spans(spans: Vec<LineSpan>) -> Vec<LineSpan> {
         }
     }
     merged
+}
+
+pub(crate) fn split_inline_raw_query(raw: &str) -> (&str, Option<String>) {
+    if Path::new(raw).exists() || expand_tilde(raw).exists() {
+        return (raw, None);
+    }
+    if let Some((base, query_part)) = raw.split_once("?q=") {
+        if !base.is_empty() && !query_part.trim().is_empty() {
+            return (base, Some(query_part.trim().to_string()));
+        }
+    }
+    (raw, None)
+}
+
+pub(crate) fn normalize_json_pointer(q: &str) -> String {
+    let trimmed = q.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == "/" {
+        return String::new();
+    }
+    if trimmed.starts_with('/') {
+        return trimmed.to_string();
+    }
+    let stripped = trimmed.trim_start_matches('.');
+    format!(
+        "/{}",
+        stripped
+            .replace('[', "/")
+            .replace(']', "")
+            .split('.')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("/")
+    )
+}
+
+/// Splits `path:-N` tail selector (last `N` lines of a file) when the literal path does not exist.
+pub(crate) fn split_inline_tail_lines(raw: &str) -> Option<(&str, usize)> {
+    if Path::new(raw).exists() || expand_tilde(raw).exists() {
+        return None;
+    }
+    let (base, suffix) = raw.rsplit_once(":-")?;
+    if base.is_empty() || base.ends_with(':') {
+        return None;
+    }
+    let n = suffix.trim().parse::<usize>().ok()?;
+    if n == 0 {
+        return None;
+    }
+    Some((base, n.min(250)))
 }
 
 /// Splits `path:ranges` into the path and the merged, ordered spans.
@@ -189,7 +273,11 @@ pub(crate) fn format_spans(content: &str, spans: &[LineSpan]) -> String {
     out
 }
 
-pub(crate) fn format_lines(content: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+pub(crate) fn format_lines(
+    content: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
     let s = start_line.unwrap_or(1).max(1);
@@ -261,27 +349,36 @@ pub(crate) fn format_lines(content: &str, start_line: Option<usize>, end_line: O
     }
     if e == total {
         out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
-    } else if s == 1 && total > e + 30 {
+    } else if total > e + 20 {
         let tail_start = total.saturating_sub(15).max(e);
         out.push_str(&format!(
-            "... [Showing lines 1..{} of {} total; Structural Outline of {}..{} + final 15 lines below] ...\n",
+            "... [Showing lines {}..{} of {} total; Structural Outline of remaining lines {}..{} below — jump directly with start_line/end_line] ...\n",
+            s,
             e,
             total,
             e + 1,
             tail_start
         ));
+        let mut shown_syms = 0usize;
         for (idx, line) in lines.iter().enumerate().take(tail_start).skip(e) {
             if is_structural_outline_line(line) {
                 out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+                shown_syms += 1;
+                if shown_syms >= 45 {
+                    out.push_str("  .. [remaining symbols elided] ..\n");
+                    break;
+                }
             }
         }
-        out.push_str(&format!(
-            "... [Final lines {}..{}] ...\n",
-            tail_start + 1,
-            total
-        ));
-        for (idx, line) in lines.iter().enumerate().skip(tail_start) {
-            out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+        if s == 1 {
+            out.push_str(&format!(
+                "... [Final lines {}..{}] ...\n",
+                tail_start + 1,
+                total
+            ));
+            for (idx, line) in lines.iter().enumerate().skip(tail_start) {
+                out.push_str(&format!("{:>4}: {}\n", idx + 1, line));
+            }
         }
         out.push_str(&format!("... [EOF: line {}/{}]\n", total, total));
     } else {
@@ -304,7 +401,7 @@ pub(crate) fn get_str_alias<'a>(args: &'a Value, keys: &[&str]) -> &'a str {
     ""
 }
 
-/// Guards context against accidental reads of compiled JS bundles (`dist/index.android.bundle`),
+/// Guards context against accidental reads of compiled JS bundles (`dist/app.bundle.js`),
 /// source maps, or minified artifacts that blow up the context window and derail investigation.
 pub(crate) fn check_compiled_artifact_shield(raw_path: &str, content: &str) -> Option<String> {
     let norm = raw_path.replace('\\', "/");
@@ -319,7 +416,8 @@ pub(crate) fn check_compiled_artifact_shield(raw_path: &str, content: &str) -> O
             && (lower.ends_with(".js") || lower.ends_with(".cjs") || lower.ends_with(".mjs")));
     let total_lines = content.lines().count();
     let max_line_chars = content.lines().take(50).map(|l| l.len()).max().unwrap_or(0);
-    let is_minified_giant = content.len() > 200_000 && (total_lines > 8_000 || max_line_chars > 2_500);
+    let is_minified_giant =
+        content.len() > 200_000 && (total_lines > 8_000 || max_line_chars > 2_500);
     if is_bundle_path && (content.len() > 60_000 || total_lines > 2_000 || max_line_chars > 1_500)
         || is_minified_giant
     {
@@ -332,9 +430,53 @@ pub(crate) fn check_compiled_artifact_shield(raw_path: &str, content: &str) -> O
     None
 }
 
+pub(crate) fn eval_json_pointer_view(content: &str, pointer: &str) -> Result<String, String> {
+    let parsed: Value =
+        serde_json::from_str(content).map_err(|e| format!("JSON parse error: {}", e))?;
+    if pointer.is_empty() {
+        return serde_json::to_string_pretty(&parsed).map_err(|e| e.to_string());
+    }
+    if let Some(target) = parsed.pointer(pointer) {
+        return serde_json::to_string_pretty(target).map_err(|e| e.to_string());
+    }
+    let parent_ptr = pointer.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+    let available = parsed
+        .pointer(parent_ptr)
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).take(25).collect();
+            keys.sort_unstable();
+            format!(
+                " (available keys at '{}': {})",
+                if parent_ptr.is_empty() {
+                    "/"
+                } else {
+                    parent_ptr
+                },
+                keys.join(", ")
+            )
+        })
+        .unwrap_or_default();
+    Err(format!("JSON pointer '{}' not found{}", pointer, available))
+}
+
 pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
     let raw_input_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
-    let (raw_path, inline_spans) = split_inline_line_spans(raw_input_path);
+    let (path_no_query, inline_raw_q) = split_inline_raw_query(raw_input_path);
+    let explicit_raw_q = get_str_alias(args, &["q", "json_pointer", "pointer"]);
+    let raw_query = if !explicit_raw_q.is_empty() {
+        Some(explicit_raw_q.trim().to_string())
+    } else {
+        inline_raw_q
+    };
+    let json_query = raw_query.as_deref().map(normalize_json_pointer);
+    let (raw_path, tail_count, inline_spans) =
+        if let Some((base, n)) = split_inline_tail_lines(path_no_query) {
+            (base, Some(n), None)
+        } else {
+            let (base, spans) = split_inline_line_spans(path_no_query);
+            (base, None, spans)
+        };
     let (inline_start, inline_end) = match inline_spans.as_deref() {
         // A single span stays on the plain `start_line`/`end_line` path so the existing
         // head+outline heuristics (and the re-read dedup key) keep working unchanged.
@@ -374,7 +516,17 @@ pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
             .output();
         return match out {
             Ok(o) if o.status.success() => {
-                format_lines(&String::from_utf8_lossy(&o.stdout), start_line, end_line)
+                let text = String::from_utf8_lossy(&o.stdout);
+                let (eff_s, eff_e) = if let Some(n) = tail_count {
+                    let total = text.lines().count().max(1);
+                    (
+                        Some(total.saturating_sub(n.saturating_sub(1)).max(1)),
+                        Some(total),
+                    )
+                } else {
+                    (start_line, end_line)
+                };
+                format_lines(&text, eff_s, eff_e)
             }
             Ok(o) => format!(
                 "Remote read error ({}): {}",
@@ -385,7 +537,7 @@ pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
         };
     }
 
-    let path = expand_tilde(raw_path);
+    let path = ctx.resolve_local_path(raw_path);
     if path.is_dir() {
         let mut entries = Vec::new();
         if let Ok(rd) = fs::read_dir(&path) {
@@ -450,36 +602,108 @@ pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
                 }
             };
         }
-    }
-    if let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
-        if let Some(&(prev_mtime, prev_s, prev_e, prev_step)) = ctx.read_ranges.get(&key) {
-            if prev_mtime == mtime
-                && prev_s == start_line
-                && prev_e == end_line
-                && ctx.tool_step_counter.saturating_sub(prev_step) <= 5
+        if matches!(ext.as_str(), "sqlite" | "sqlite3" | "db") {
+            let q = raw_query
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .trim_start_matches('/');
+            let sql_cmd = if q.is_empty() {
+                "SELECT name, sql FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name;".to_string()
+            } else if q.to_ascii_uppercase().starts_with("SELECT ") || q.starts_with('.') {
+                q.to_string()
+            } else {
+                let safe_tbl: String = q
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                format!(
+                    "PRAGMA table_info({t}); SELECT * FROM {t} LIMIT 40;",
+                    t = safe_tbl
+                )
+            };
+            if let Ok(out) = Command::new("sqlite3")
+                .args(["-header", "-box", path.to_string_lossy().as_ref(), &sql_cmd])
+                .output()
             {
-                return format!(
-                    "[SPAVN Read Dedup: {} is unchanged on disk since your read {} step(s) ago. Its exact content is already in your context — refer to that earlier read result instead of re-reading.]",
-                    raw_path,
-                    ctx.tool_step_counter.saturating_sub(prev_step).max(1)
-                );
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    return format_lines(&text, start_line, end_line);
+                }
+            }
+        }
+        if ext == "pdf" {
+            let py_extract = "import sys\ntry:\n    import pypdf\n    r = pypdf.PdfReader(sys.argv[1])\n    for i, p in enumerate(r.pages):\n        print(f'--- Page {i+1} ---')\n        print(p.extract_text() or '')\nexcept Exception as e:\n    sys.exit(1)\n";
+            if let Ok(out) = Command::new("pdftotext")
+                .args([path.to_string_lossy().as_ref(), "-"])
+                .output()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Ok(o)
+                    } else {
+                        Err(std::io::Error::other("pdftotext failed"))
+                    }
+                })
+                .or_else(|_| {
+                    Command::new("python3")
+                        .args(["-c", py_extract, path.to_string_lossy().as_ref()])
+                        .output()
+                })
+            {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    return format_lines(&text, start_line, end_line);
+                }
+            }
+        }
+    }
+    if json_query.is_none() && tail_count.is_none() {
+        if let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
+            if let Some(&(prev_mtime, prev_s, prev_e, prev_step)) = ctx.read_ranges.get(&key) {
+                if prev_mtime == mtime
+                    && prev_s == start_line
+                    && prev_e == end_line
+                    && ctx.tool_step_counter.saturating_sub(prev_step) <= 5
+                {
+                    return format!(
+                        "[SPAVN Read Dedup: {} is unchanged on disk since your read {} step(s) ago. Its exact content is already in your context — refer to that earlier read result instead of re-reading.]",
+                        raw_path,
+                        ctx.tool_step_counter.saturating_sub(prev_step).max(1)
+                    );
+                }
             }
         }
     }
 
     match fs::read_to_string(&path) {
         Ok(content) => {
+            if let Some(ref q) = json_query {
+                ctx.record_file_mtime(raw_path);
+                return match eval_json_pointer_view(&content, q) {
+                    Ok(rendered) => format_lines(&rendered, start_line, end_line),
+                    Err(err_msg) => format!("Read JSON query error ({}): {}", raw_path, err_msg),
+                };
+            }
             if let Some(shield_msg) = check_compiled_artifact_shield(raw_path, &content) {
                 return shield_msg;
             }
             ctx.record_file_mtime(raw_path);
+            let (eff_s, eff_e) = if let Some(n) = tail_count {
+                let total = content.lines().count().max(1);
+                (
+                    Some(total.saturating_sub(n.saturating_sub(1)).max(1)),
+                    Some(total),
+                )
+            } else {
+                (start_line, end_line)
+            };
             if let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) {
                 ctx.read_ranges
-                    .insert(key, (mtime, start_line, end_line, ctx.tool_step_counter));
+                    .insert(key, (mtime, eff_s, eff_e, ctx.tool_step_counter));
             }
             match inline_spans.as_deref() {
                 Some(spans) if spans.len() > 1 => format_spans(&content, spans),
-                _ => format_lines(&content, start_line, end_line),
+                _ => format_lines(&content, eff_s, eff_e),
             }
         }
         Err(e) => {
@@ -488,4 +712,3 @@ pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
         }
     }
 }
-

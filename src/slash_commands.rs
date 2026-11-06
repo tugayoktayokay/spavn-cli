@@ -161,9 +161,19 @@ pub fn dispatch_slash_command(
 
     if input == "/reload" || input == "/r" || input == "/reload bin" || input == "/rb" {
         if !messages.is_empty() {
-            messages[0] =
-                ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
-            rewrite_session(session_file, messages);
+            messages.retain(|m| {
+                !(m.role == "assistant"
+                    && m.tool_calls.is_none()
+                    && m.content
+                        .as_deref()
+                        .map(|c| c.contains("DSML") && c.contains("invoke"))
+                        .unwrap_or(false))
+            });
+            if !messages.is_empty() {
+                messages[0] =
+                    ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
+                rewrite_session(session_file, messages);
+            }
         }
         reset_scroll_region();
         let skill_count = discover_skills().len();
@@ -897,10 +907,11 @@ pub fn dispatch_slash_command(
             return SlashOutcome::Handled;
         }
         if let Some(rest) = arg
-            .strip_prefix("done ")
-            .or_else(|| arg.strip_prefix("check "))
+            .strip_prefix("done")
+            .or_else(|| arg.strip_prefix("check"))
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
         {
-            if let Ok(idx) = rest.trim().parse::<usize>() {
+            let report = |idx: usize| {
                 if crate::toggle_live_task(idx) {
                     println!(
                         "\n{}✓ #{}: {}{}",
@@ -918,8 +929,32 @@ pub fn dispatch_slash_command(
                         RESET
                     );
                 }
-                return SlashOutcome::Handled;
+            };
+            match rest.trim().parse::<usize>() {
+                Ok(idx) => report(idx),
+                Err(_) => match hud::interactive_select_live_task() {
+                    Some(idx) => report(idx),
+                    None if crate::list_live_tasks().is_empty() => println!(
+                        "\n{}📋 {}{}",
+                        DIM,
+                        tr_en(
+                            "Aktif görev yok. Eklemek için `/todo <görev>` yazın.",
+                            "No active tasks. Run `/todo <task>` to add one."
+                        ),
+                        RESET
+                    ),
+                    None => println!(
+                        "\n{}📋 {}{}",
+                        DIM,
+                        tr_en(
+                            "Seçim yapılmadı. Numarayla kapatmak için `/todo done <n>`.",
+                            "Nothing selected. Close by number with `/todo done <n>`."
+                        ),
+                        RESET
+                    ),
+                },
             }
+            return SlashOutcome::Handled;
         }
         if let Some(rest) = arg.strip_prefix("add ") {
             crate::add_live_task(rest.trim().to_string());
@@ -943,7 +978,7 @@ pub fn dispatch_slash_command(
                 .filter(|t| t.status == crate::LiveTaskStatus::Done)
                 .count();
             println!(
-                "\n{}╭─ 📋 {} [{}/{}] (/todo done <n> · /todo clear){}",
+                "\n{}╭─ 📋 {} [{}/{}] (/todo done ← ↑↓ · /todo clear){}",
                 CYAN,
                 tr_en("Canlı Görev Takibi", "Live Task Tracker"),
                 done_cnt,
@@ -1273,6 +1308,21 @@ pub fn dispatch_slash_command(
         rewrite_session(session_file, messages);
         setup_scroll_region();
         render_welcome_header(endpoint, ctx.access, &ctx.default_host, cwd, session_name);
+        return SlashOutcome::Handled;
+    }
+
+    if input == "/jobs"
+        || input == "/ps"
+        || input.starts_with("/jobs ")
+        || input.starts_with("/ps ")
+    {
+        let rest = input
+            .strip_prefix("/jobs")
+            .or_else(|| input.strip_prefix("/ps"))
+            .unwrap_or("")
+            .trim();
+        let out = crate::tools::handle_bg_job_slash(rest);
+        println!("\n{}{}{}", CYAN, out, RESET);
         return SlashOutcome::Handled;
     }
 

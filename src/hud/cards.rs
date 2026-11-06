@@ -339,7 +339,7 @@ pub fn render_assistant_footer(
         DIM
     };
     spinner_print(&format!(
-        "{}╰─{} {}✓ {}{} {}· {} · TTFT {}ms · {:.1}s · {}{:.1} tok/s{}\n",
+        "\r{}╰─{} {}✓ {}{} {}· {} · TTFT {}ms · {:.1}s · {}{:.1} tok/s{}\n",
         CYAN,
         RESET,
         GREEN,

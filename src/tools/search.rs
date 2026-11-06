@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Directory patterns that ripgrep must never descend into. Shared by `search` and `glob` so a
 /// file-hunting call cannot accidentally walk a home directory into a multi-minute stall.
 ///
@@ -128,9 +127,15 @@ pub(crate) fn glob_pattern_matches(pattern: &str, rel_path: &str) -> bool {
 }
 
 /// Native zero-dependency Rust file globber used when `rg` is not installed on the host.
-pub(crate) fn native_glob_fallback(root: &Path, pattern: &str, limit: usize, hidden: bool) -> String {
+pub(crate) fn native_glob_fallback(
+    root: &Path,
+    pattern: &str,
+    limit: usize,
+    hidden: bool,
+) -> String {
     let mut matches: Vec<String> = Vec::new();
     let mut hit_limit = false;
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         base: &Path,
         cur: &Path,
@@ -214,21 +219,60 @@ pub(crate) fn native_glob_fallback(root: &Path, pattern: &str, limit: usize, hid
     out
 }
 
-/// Native zero-dependency content search used when `rg` is not installed on the host.
-/// Supports literal substrings and `|` / `\|` alternations, caps per-file matches at 10,
-/// and skips binary/minified/ignored files.
-pub(crate) fn native_search_fallback(root: &Path, pattern: &str) -> String {
-    let normalized_pat = pattern.replace("\\|", "|");
-    let terms: Vec<&str> = normalized_pat
-        .split('|')
-        .map(str::trim)
+/// Simplifies common regex idioms (`\b`, `\s+`, `(fn|struct|...)\s+`) into literal search terms
+/// when falling back to the built-in zero-dependency Rust scanner.
+fn extract_native_search_terms(pattern: &str) -> Vec<String> {
+    let mut p = pattern.replace("\\|", "|").replace("\\b", "");
+    // Strip leading grouped keyword prefixes like `(fn|struct|...)\s+symbol` from `lsp` definition queries
+    if let Some(idx) = p.find(")\\s+") {
+        p = p[idx + 4..].to_string();
+    } else if let Some(idx) = p.find(") ") {
+        if p.starts_with('(') {
+            p = p[idx + 2..].to_string();
+        }
+    }
+    p = p.replace("\\s+", " ").replace("\\s*", "");
+    p.split('|')
+        .map(|s| {
+            s.trim()
+                .trim_start_matches('^')
+                .trim_end_matches('$')
+                .to_string()
+        })
         .filter(|s| !s.is_empty())
-        .collect();
+        .collect()
+}
+
+/// Native zero-dependency content search used when `rg` is not installed on the host.
+/// Supports literal substrings, `|` / `\|` alternations, optional filename `glob`, and
+/// `context` lines around matches, capping per-file matches at 10.
+pub(crate) fn native_search_fallback(
+    root: &Path,
+    pattern: &str,
+    file_glob: &str,
+    context_lines: usize,
+) -> String {
+    let terms = extract_native_search_terms(pattern);
     if terms.is_empty() {
         return "(no matches)".to_string();
     }
     let mut results: Vec<String> = Vec::new();
-    fn search_file(path: &Path, terms: &[&str], out: &mut Vec<String>) {
+    fn search_file(
+        path: &Path,
+        terms: &[String],
+        file_glob: &str,
+        ctx_n: usize,
+        out: &mut Vec<String>,
+    ) {
+        if !file_glob.is_empty() {
+            let fname = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !glob_pattern_matches(file_glob, &fname) {
+                return;
+            }
+        }
         let Ok(meta) = fs::metadata(path) else {
             return;
         };
@@ -238,15 +282,27 @@ pub(crate) fn native_search_fallback(root: &Path, pattern: &str) -> String {
         let Ok(content) = fs::read_to_string(path) else {
             return;
         };
+        let all_lines: Vec<&str> = content.lines().collect();
         let mut file_hits = 0usize;
         let disp = path.to_string_lossy();
-        for (idx, line) in content.lines().enumerate() {
+        for (idx, &line) in all_lines.iter().enumerate() {
             if line.len() > 500 {
                 continue;
             }
-            if terms.iter().any(|t| line.contains(t)) {
-                let clipped: String = line.chars().take(220).collect();
-                out.push(format!("{}:{}:{}", disp, idx + 1, clipped));
+            if terms.iter().any(|t| line.contains(t.as_str())) {
+                if ctx_n > 0 {
+                    let start = idx.saturating_sub(ctx_n);
+                    let end = (idx + ctx_n).min(all_lines.len().saturating_sub(1));
+                    for (c_idx, &c_line) in all_lines[start..=end].iter().enumerate() {
+                        let abs_idx = start + c_idx;
+                        let sep = if abs_idx == idx { ':' } else { '-' };
+                        let clipped: String = c_line.chars().take(220).collect();
+                        out.push(format!("{}{}{}{}{}", disp, sep, abs_idx + 1, sep, clipped));
+                    }
+                } else {
+                    let clipped: String = line.chars().take(220).collect();
+                    out.push(format!("{}:{}:{}", disp, idx + 1, clipped));
+                }
                 file_hits += 1;
                 if file_hits >= 10 || out.len() >= 80 {
                     break;
@@ -254,7 +310,14 @@ pub(crate) fn native_search_fallback(root: &Path, pattern: &str) -> String {
             }
         }
     }
-    fn walk_search(cur: &Path, depth: usize, terms: &[&str], out: &mut Vec<String>) {
+    fn walk_search(
+        cur: &Path,
+        depth: usize,
+        terms: &[String],
+        file_glob: &str,
+        ctx_n: usize,
+        out: &mut Vec<String>,
+    ) {
         if depth > 6 || out.len() >= 80 {
             return;
         }
@@ -275,22 +338,319 @@ pub(crate) fn native_search_fallback(root: &Path, pattern: &str) -> String {
                 if is_ignored_dir_name(&name, false) {
                     continue;
                 }
-                walk_search(&p, depth + 1, terms, out);
+                walk_search(&p, depth + 1, terms, file_glob, ctx_n, out);
             } else if !name.starts_with('.') {
-                search_file(&p, terms, out);
+                search_file(&p, terms, file_glob, ctx_n, out);
             }
         }
     }
     if root.is_file() {
-        search_file(root, &terms, &mut results);
+        search_file(root, &terms, file_glob, context_lines, &mut results);
     } else {
-        walk_search(root, 0, &terms, &mut results);
+        walk_search(root, 0, &terms, file_glob, context_lines, &mut results);
     }
     if results.is_empty() {
-        "(no matches)".to_string()
+        bm25_ast_block_search(root, pattern, file_glob)
+            .unwrap_or_else(|| "(no matches)".to_string())
     } else {
         results.join("\n")
     }
+}
+
+pub(crate) fn normalize_tr_ascii(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            'İ' | 'I' | 'ı' | 'i' => out.push('i'),
+            'Ş' | 'ş' => out.push('s'),
+            'Ğ' | 'ğ' => out.push('g'),
+            'Ü' | 'ü' => out.push('u'),
+            'Ö' | 'ö' => out.push('o'),
+            'Ç' | 'ç' => out.push('c'),
+            c => out.push(c.to_ascii_lowercase()),
+        }
+    }
+    out
+}
+
+pub(crate) fn tokenize_identifier_and_query(raw: &str) -> Vec<String> {
+    let mut expanded = String::with_capacity(raw.len() + 16);
+    let mut prev_lower = false;
+    for ch in raw.chars() {
+        if ch.is_uppercase() && prev_lower {
+            expanded.push(' ');
+        }
+        prev_lower = ch.is_lowercase();
+        expanded.push(ch);
+    }
+    let norm = normalize_tr_ascii(&expanded);
+    let mut tokens: Vec<String> = Vec::new();
+    for part in norm.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if part.len() >= 2
+            && !matches!(
+                part,
+                "fn" | "def"
+                    | "let"
+                    | "const"
+                    | "var"
+                    | "pub"
+                    | "the"
+                    | "and"
+                    | "for"
+                    | "ile"
+                    | "icin"
+                    | "bir"
+            )
+            && !tokens.iter().any(|t| t == part)
+        {
+            tokens.push(part.to_string());
+        }
+    }
+    tokens
+}
+
+fn is_ast_block_boundary(trimmed: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub async fn ",
+        "pub(crate) async fn ",
+        "async fn ",
+        "fn ",
+        "pub struct ",
+        "pub(crate) struct ",
+        "struct ",
+        "pub enum ",
+        "enum ",
+        "pub trait ",
+        "trait ",
+        "impl ",
+        "impl<",
+        "def ",
+        "async def ",
+        "class ",
+        "export function ",
+        "export async function ",
+        "export default function ",
+        "function ",
+        "export class ",
+        "export interface ",
+        "interface ",
+        "export type ",
+        "export const ",
+        "func ",
+    ];
+    PREFIXES.iter().any(|p| trimmed.starts_with(p))
+}
+
+#[derive(Debug)]
+struct AstCodeBlock {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    signature: String,
+    norm_sig: String,
+    norm_body: String,
+    preview_line: Option<(usize, String)>,
+}
+
+/// Zero-latency (<5ms) Rust BM25 + AST block semantic fallback when regex/literal `search` finds 0 matches.
+pub(crate) fn bm25_ast_block_search(root: &Path, pattern: &str, file_glob: &str) -> Option<String> {
+    let query_tokens = tokenize_identifier_and_query(pattern);
+    if query_tokens.is_empty() {
+        return None;
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    fn collect_source_files(dir: &Path, depth: usize, file_glob: &str, out: &mut Vec<PathBuf>) {
+        if depth > 6 || out.len() >= 250 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= 250 {
+                break;
+            }
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if name.starts_with('.') || is_ignored_dir_name(&name, false) {
+                    continue;
+                }
+                collect_source_files(&p, depth + 1, file_glob, out);
+            } else if !name.starts_with('.')
+                && (file_glob.is_empty() || glob_pattern_matches(file_glob, &name))
+            {
+                let ext = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if matches!(
+                    ext.as_str(),
+                    "rs" | "ts"
+                        | "tsx"
+                        | "js"
+                        | "jsx"
+                        | "py"
+                        | "go"
+                        | "swift"
+                        | "kt"
+                        | "java"
+                        | "c"
+                        | "cpp"
+                        | "h"
+                        | "rb"
+                        | "php"
+                        | "md"
+                        | "toml"
+                ) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    if root.is_file() {
+        files.push(root.to_path_buf());
+    } else {
+        collect_source_files(root, 0, file_glob, &mut files);
+    }
+    if files.is_empty() {
+        return None;
+    }
+
+    let mut blocks: Vec<AstCodeBlock> = Vec::new();
+    for file_path in &files {
+        let Ok(meta) = fs::metadata(file_path) else {
+            continue;
+        };
+        if meta.len() > 512 * 1024 {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(file_path) else {
+            continue;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.is_empty() {
+            continue;
+        }
+        let display_path = file_path.display().to_string();
+        let mut boundaries: Vec<usize> = Vec::new();
+        for (idx, line) in lines.iter().enumerate() {
+            if is_ast_block_boundary(line.trim_start()) {
+                boundaries.push(idx);
+            }
+        }
+        if boundaries.is_empty() {
+            let chunk = 35usize;
+            let mut idx = 0;
+            while idx < lines.len() {
+                boundaries.push(idx);
+                idx += chunk;
+            }
+        }
+        for (b_idx, &start_idx) in boundaries.iter().enumerate() {
+            let end_idx = boundaries
+                .get(b_idx + 1)
+                .map(|&next| next.saturating_sub(1))
+                .unwrap_or_else(|| lines.len().saturating_sub(1))
+                .min(start_idx + 80);
+            let slice = &lines[start_idx..=end_idx];
+            let sig = lines[start_idx].trim().to_string();
+            let norm_sig = normalize_tr_ascii(&format!("{} {}", display_path, sig));
+            let body_joined = slice.join("\n");
+            let norm_body = normalize_tr_ascii(&body_joined);
+            if !query_tokens
+                .iter()
+                .any(|t| norm_body.contains(t.as_str()) || norm_sig.contains(t.as_str()))
+            {
+                continue;
+            }
+            let mut preview_line = None;
+            for (offset, raw_l) in slice.iter().enumerate().skip(1) {
+                let norm_l = normalize_tr_ascii(raw_l);
+                if query_tokens.iter().any(|t| norm_l.contains(t.as_str())) {
+                    preview_line = Some((start_idx + 1 + offset, raw_l.trim().to_string()));
+                    break;
+                }
+            }
+            blocks.push(AstCodeBlock {
+                path: display_path.clone(),
+                start_line: start_idx + 1,
+                end_line: end_idx + 1,
+                signature: sig,
+                norm_sig,
+                norm_body,
+                preview_line,
+            });
+        }
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+
+    let n_docs = (blocks.len() as f64).max(1.0);
+    let avg_dl = (blocks.iter().map(|b| b.norm_body.len()).sum::<usize>() as f64 / n_docs).max(1.0);
+    let mut df: Vec<usize> = vec![0; query_tokens.len()];
+    for b in &blocks {
+        for (i, t) in query_tokens.iter().enumerate() {
+            if b.norm_body.contains(t.as_str()) || b.norm_sig.contains(t.as_str()) {
+                df[i] += 1;
+            }
+        }
+    }
+
+    let k1 = 1.5_f64;
+    let b_param = 0.75_f64;
+    let mut scored: Vec<(f64, usize, &AstCodeBlock)> = Vec::new();
+    for b in &blocks {
+        let dl = b.norm_body.len() as f64;
+        let mut score = 0.0_f64;
+        let mut matched_terms = 0usize;
+        for (i, t) in query_tokens.iter().enumerate() {
+            let tf_body = b.norm_body.matches(t.as_str()).count() as f64;
+            let tf_sig = b.norm_sig.matches(t.as_str()).count() as f64;
+            let tf = tf_body + tf_sig * 2.5;
+            if tf > 0.0 {
+                matched_terms += 1;
+                let doc_freq = df[i] as f64;
+                let idf = ((n_docs - doc_freq + 0.5) / (doc_freq + 0.5) + 1.0).ln();
+                let denom = tf + k1 * (1.0 - b_param + b_param * (dl / avg_dl));
+                score += idf * ((tf * (k1 + 1.0)) / denom.max(0.001));
+            }
+        }
+        // Require either >=2 distinct query tokens or a single token >=4 chars that hits a symbol/body
+        if matched_terms >= 2
+            || (matched_terms == 1 && query_tokens[0].len() >= 3 && query_tokens.len() == 1)
+        {
+            scored.push((score, matched_terms, b));
+        }
+    }
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut out_lines = Vec::new();
+    out_lines.push(format!(
+        "[SPAVN BM25+AST Semantic Fallback — regex matched 0 lines; top {} symbol block(s) for `{}`]:",
+        scored.len().min(8),
+        pattern
+    ));
+    for (score, _, blk) in scored.into_iter().take(8) {
+        out_lines.push(format!(
+            "{}:{}-{}: [score={:.2}] {}",
+            blk.path, blk.start_line, blk.end_line, score, blk.signature
+        ));
+        if let Some((ln, ref text)) = blk.preview_line {
+            out_lines.push(format!("  L{}: {}", ln, text));
+        }
+    }
+    Some(out_lines.join("\n"))
 }
 
 /// Locates `rg`, preferring PATH so any install manager works.
@@ -373,10 +733,34 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
         };
     }
 
-    if let Err(blocked) = ctx.enforce_path(raw_path, false, "search") {
-        return blocked;
+    let raw_paths: Vec<&str> = raw_path
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut resolved_paths: Vec<PathBuf> = Vec::new();
+    for rp in &raw_paths {
+        if let Err(blocked) = ctx.enforce_path(rp, false, "search") {
+            return blocked;
+        }
+        resolved_paths.push(ctx.resolve_local_path(rp));
     }
-    let path = expand_tilde(raw_path);
+    let path = resolved_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ctx.resolve_local_path("."));
+    let file_glob = get_str_alias(args, &["glob", "file_pattern", "include"]);
+    let case_sensitive = args
+        .get("case_sensitive")
+        .or_else(|| args.get("case"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let context_lines = args
+        .get("context")
+        .or_else(|| args.get("context_lines"))
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).min(8))
+        .unwrap_or(0);
     let mut cmd = Command::new(rg_binary());
     cmd.args([
         "-n",
@@ -389,9 +773,20 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
         "--max-columns",
         "220",
     ]);
+    if !case_sensitive {
+        cmd.arg("-i");
+    }
+    if context_lines > 0 {
+        cmd.args(["-C", &context_lines.to_string()]);
+    }
+    if !file_glob.is_empty() {
+        cmd.args(["-g", file_glob]);
+    }
     push_ignore_globs(&mut cmd);
-    cmd.arg(pattern).arg(path.as_os_str());
-
+    cmd.arg(pattern);
+    for p in &resolved_paths {
+        cmd.arg(p.as_os_str());
+    }
     match run_command_with_timeout(cmd, 8) {
         Ok((_, stdout, _, timed_out)) => {
             let raw = String::from_utf8_lossy(&stdout);
@@ -400,12 +795,15 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
                 lines.push("[SPAVN Search: 8s zaman sınırı doldu, ilk eşleşmeler gösteriliyor]");
             }
             if lines.is_empty() {
-                "(no matches)".to_string()
+                bm25_ast_block_search(&path, pattern, file_glob)
+                    .unwrap_or_else(|| "(no matches)".to_string())
             } else {
                 lines.join("\n")
             }
         }
-        Err(e) if e.contains("not installed") => native_search_fallback(&path, pattern),
+        Err(e) if e.contains("not installed") => {
+            native_search_fallback(&path, pattern, file_glob, context_lines)
+        }
         Err(e) => format!("Search error: {}", e),
     }
 }
@@ -495,7 +893,7 @@ pub(crate) fn exec_glob(ctx: &mut ToolContext, args: &Value) -> String {
     if let Err(blocked) = ctx.enforce_path(raw_path, false, "glob") {
         return blocked;
     }
-    let path = expand_tilde(raw_path);
+    let path = ctx.resolve_local_path(raw_path);
 
     // Order matters: ripgrep applies `-g` overrides last-match-wins, and a *positive* glob also
     // bypasses the implicit hidden filter. So the pattern goes first, and the negations that

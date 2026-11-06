@@ -22,13 +22,14 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "read",
-                "description": "Read a file or directory. Supports several disjoint ranges in one call via `path:N-M,K-L` — prefer that over repeated reads or `bash sed`.",
+                "description": "Read a file, directory, SQLite DB (`.db`/`.sqlite`), PDF, or image. Supports disjoint line ranges (`path:1-12,640-665`), tail lines (`path:-50`), JSON pointer queries (`file.json?q=.a.b`), and SQLite table/SQL queries (`app.db?q=SELECT ...` or `app.db?q=users`).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Path (optional `<host>:` prefix); may embed ranges, e.g. `src/x.rs:1-12,640-665`" },
+                        "path": { "type": "string", "description": "Path (optional `<host>:` prefix); may embed ranges (`src/x.rs:1-12,640-665`), tail (`log.txt:-50`), or query (`config.json?q=.a.b`, `data.db?q=users`)" },
                         "start_line": { "type": "integer", "description": "Start line (1-based)" },
-                        "end_line": { "type": "integer", "description": "End line (1-based, inclusive)" }
+                        "end_line": { "type": "integer", "description": "End line (1-based, inclusive)" },
+                        "q": { "type": "string", "description": "Optional JSON pointer (`.a.b`) for `.json` or table/SQL query for `.db`/`.sqlite`" }
                     },
                     "required": ["path"]
                 }
@@ -38,23 +39,42 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Replace `old_text` with `new_text` in a file, or apply several non-overlapping edits atomically via `edits`.",
+                "description": "Replace `old_text` with `new_text`, or replace/insert by line range (`start_line`..`end_line`, `path:10-25`, or `insert_after_line` without `old_text`), apply in-memory multi-hunk `edits` with automatic line-delta tracking, or apply a cross-file atomic transaction via `files`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "File to edit" },
-                        "old_text": { "type": "string", "description": "Exact existing snippet (single edit)" },
+                        "path": { "type": "string", "description": "File to edit (single-file mode; supports inline `src/x.rs:10-25`)" },
+                        "old_text": { "type": "string", "description": "Exact existing snippet (optional when `start_line`/`end_line` or `insert_after_line` is used)" },
                         "new_text": { "type": "string", "description": "Replacement snippet (single edit)" },
+                        "start_line": { "type": "integer", "description": "1-based start line for token-free range replacement" },
+                        "end_line": { "type": "integer", "description": "1-based inclusive end line for token-free range replacement" },
+                        "insert_after_line": { "type": "integer", "description": "Insert `new_text` after this 1-based line (0 = top of file)" },
                         "edits": {
                             "type": "array",
-                            "description": "Batch of `{old_text, new_text}` applied atomically to the same file",
+                            "description": "Batch of hunks (`{old_text, new_text}` or `{start_line, end_line, new_text}` or `{insert_after_line, new_text}`) applied in-memory with auto line-delta tracking and single atomic disk write",
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "old_text": { "type": "string" },
+                                    "new_text": { "type": "string" },
+                                    "start_line": { "type": "integer" },
+                                    "end_line": { "type": "integer" },
+                                    "insert_after_line": { "type": "integer" }
+                                },
+                                "required": ["new_text"]
+                            }
+                        },
+                        "files": {
+                            "type": "array",
+                            "description": "Cross-file atomic transaction: array of `{path, old_text, new_text}` applied across multiple files with full rollback on error",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string" },
+                                    "old_text": { "type": "string" },
                                     "new_text": { "type": "string" }
                                 },
-                                "required": ["old_text", "new_text"]
+                                "required": ["path", "old_text", "new_text"]
                             }
                         }
                     },
@@ -81,17 +101,19 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Run a shell command locally or on a configured remote host.",
+                "description": "Run a shell command or zero-quoting `py`/`js` script via stdin locally or on a configured remote host.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "Command" },
+                        "command": { "type": "string", "description": "Shell command, or raw Python/Node script when `lang` is `py` or `js`" },
+                        "lang": { "type": "string", "enum": ["sh", "py", "js"], "description": "Optional runtime (`py` pipes `command` to `python3 -` via stdin with zero quote escaping; `js` pipes to `node -`)" },
                         "host": { "type": "string", "description": "Host alias (default: local)" },
                         "cwd": { "type": "string", "description": "Working directory" },
-                        "timeout_sec": { "type": "integer", "description": "Timeout seconds (default 120)" },
-                        "background": { "type": "boolean", "description": "Run detached; returns PID + log path" }
-                    },
-                    "required": ["command"]
+                        "timeout_sec": { "type": "integer", "description": "Timeout seconds (default 45)" },
+                        "background": { "type": "boolean", "description": "Run detached; returns `bg_N` job ID, PID, and log path" },
+                        "op": { "type": "string", "enum": ["run", "status", "list", "kill"], "description": "Background job control (`status`, `list`, `kill`); omit for normal execution" },
+                        "job_id": { "type": "string", "description": "Target `bg_N` or PID for `status`/`kill`" }
+                    }
                 }
             }
         },
@@ -99,12 +121,15 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "search",
-                "description": "Regex content search (ripgrep).",
+                "description": "Case-insensitive regex/symbol content search across files (`;` joins multiple paths) with automatic Rust BM25+AST block semantic fallback when regex finds 0 matches. Supports `glob` filter, `case` sensitivity, and `context` lines.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string", "description": "Regex pattern" },
-                        "path": { "type": "string", "description": "Path to search (default `.`)" }
+                        "pattern": { "type": "string", "description": "Regex, symbol pattern, or natural-language/Turkish symbol query" },
+                        "path": { "type": "string", "description": "File or `;`-separated directories to search (default `.`)" },
+                        "glob": { "type": "string", "description": "Optional filename glob filter, e.g. `*.tsx` or `*.rs`" },
+                        "case": { "type": "boolean", "description": "Case-sensitive match (default false)" },
+                        "context": { "type": "integer", "description": "Surrounding context lines per match (0..8, default 0)" }
                     },
                     "required": ["pattern"]
                 }

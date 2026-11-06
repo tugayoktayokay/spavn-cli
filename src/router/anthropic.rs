@@ -141,7 +141,22 @@ pub(crate) fn build_anthropic_payload(
     messages: &[ChatMessage],
     tools: &Value,
 ) -> Result<Value, String> {
-    let (system, converted) = split_and_convert_messages(messages);
+    let (system, mut converted) = split_and_convert_messages(messages);
+    // Mark the conversation prefix anchor (second-to-last message block) as an ephemeral
+    // prompt-cache breakpoint so multi-step tool loops hit >90% cache read on Anthropic/proxies.
+    if converted.len() >= 2 {
+        let anchor_idx = converted.len() - 2;
+        if let Some(content_arr) = converted[anchor_idx]
+            .get_mut("content")
+            .and_then(|c| c.as_array_mut())
+        {
+            if let Some(last_block) = content_arr.last_mut() {
+                if last_block.is_object() {
+                    last_block["cache_control"] = json!({ "type": "ephemeral" });
+                }
+            }
+        }
+    }
     let mut payload = json!({
         "model": endpoint.model,
         "max_tokens": 16384,
@@ -149,7 +164,13 @@ pub(crate) fn build_anthropic_payload(
         "stream": true,
     });
     if !system.trim().is_empty() {
-        payload["system"] = json!(system);
+        payload["system"] = json!([
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": { "type": "ephemeral" }
+            }
+        ]);
     }
     if let Some(arr) = tools.as_array() {
         if !arr.is_empty() {
@@ -167,6 +188,9 @@ pub(crate) fn build_anthropic_payload(
                     }
                     converted_tools.push(out);
                 }
+            }
+            if let Some(last_tool) = converted_tools.last_mut() {
+                last_tool["cache_control"] = json!({ "type": "ephemeral" });
             }
             if !converted_tools.is_empty() {
                 payload["tools"] = json!(converted_tools);
@@ -209,6 +233,7 @@ where
             .header("Content-Type", "application/json")
             .header("x-api-key", &api_key)
             .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "prompt-caching-2024-07-31")
             .send(body_str.as_str());
         let mut response = match response {
             Ok(response) => response,
@@ -328,7 +353,11 @@ where
                         if let Some(p) = v.pointer("/delta/partial_json").and_then(|x| x.as_str()) {
                             if let Some(slot) = tool_blocks.get_mut(&idx) {
                                 slot.2.push_str(p);
-                                crate::hud::notify_tool_call_streaming(&slot.1, slot.2.len());
+                                crate::hud::notify_tool_call_streaming_args(
+                                    &slot.1,
+                                    &slot.2,
+                                    slot.2.len(),
+                                );
                             }
                         }
                     }

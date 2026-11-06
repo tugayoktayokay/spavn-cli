@@ -440,6 +440,10 @@ pub fn install_sigint_handler() {
     unsafe {
         let _ = signal(2, handle_sigint);
         let _ = signal(28, handle_sigwinch);
+        // Ignore SIGTTIN (21) and SIGTTOU (22) (SIG_IGN = 1) so child shells (`zsh -i`) that
+        // steal the foreground process group cannot suspend the SPAVN HUD/spinner on TTY I/O.
+        let _ = signal(21, std::mem::transmute::<usize, extern "C" fn(i32)>(1));
+        let _ = signal(22, std::mem::transmute::<usize, extern "C" fn(i32)>(1));
     }
     #[cfg(windows)]
     unsafe {

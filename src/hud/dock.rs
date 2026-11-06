@@ -146,7 +146,8 @@ pub(crate) struct ConsoleScreenBufferInfo {
 #[link(name = "kernel32")]
 extern "system" {
     pub(crate) fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
-    pub(crate) fn GetConsoleMode(h_console_handle: *mut std::ffi::c_void, lp_mode: *mut u32) -> i32;
+    pub(crate) fn GetConsoleMode(h_console_handle: *mut std::ffi::c_void, lp_mode: *mut u32)
+        -> i32;
     pub(crate) fn SetConsoleMode(h_console_handle: *mut std::ffi::c_void, dw_mode: u32) -> i32;
     pub(crate) fn GetConsoleScreenBufferInfo(
         h_console_output: *mut std::ffi::c_void,
@@ -258,7 +259,15 @@ pub fn term_size() -> (usize, usize) {
             ws_ypixel: 0,
         };
         if ioctl(1, TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
-            return (ws.ws_row as usize, ws.ws_col as usize);
+            let rows = (ws.ws_row as usize).max(12);
+            let raw_cols = ws.ws_col as usize;
+            let cols = if raw_cols < 48 {
+                LAST_TERM_COLS.load(Ordering::Relaxed).max(60)
+            } else {
+                LAST_TERM_COLS.store(raw_cols, Ordering::Relaxed);
+                raw_cols
+            };
+            return (rows, cols);
         }
     }
     #[cfg(windows)]
@@ -565,7 +574,10 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
     Vec::new()
 }
 
-pub(crate) fn image_token_span_before_cursor(chars: &[char], cursor_pos: usize) -> Option<(usize, usize)> {
+pub(crate) fn image_token_span_before_cursor(
+    chars: &[char],
+    cursor_pos: usize,
+) -> Option<(usize, usize)> {
     if cursor_pos == 0 || cursor_pos > chars.len() || chars[cursor_pos - 1] != ']' {
         return None;
     }
@@ -582,7 +594,10 @@ pub(crate) fn image_token_span_before_cursor(chars: &[char], cursor_pos: usize) 
     None
 }
 
-pub(crate) fn image_token_span_at_cursor(chars: &[char], cursor_pos: usize) -> Option<(usize, usize)> {
+pub(crate) fn image_token_span_at_cursor(
+    chars: &[char],
+    cursor_pos: usize,
+) -> Option<(usize, usize)> {
     if cursor_pos + 1 >= chars.len() || chars[cursor_pos] != '[' || chars[cursor_pos + 1] != '🖼'
     {
         return None;
@@ -743,14 +758,28 @@ pub(crate) fn render_inline_dock(
     let top_count = top_lines.len().max(1);
     let top_joined = top_lines.join("\n");
 
+    const MAX_VISIBLE_INPUT_ROWS: usize = 4;
     let max_input_cols = full_w.saturating_sub(5).max(8);
     let (wrapped_input_lines, cursor_row, cursor_col_offset) =
         wrap_input_lines_with_cursor(input_chars, cursor_pos, sel_range, max_input_cols);
-    let formatted_input_lines: Vec<String> = wrapped_input_lines
+    let total_wrapped_rows = wrapped_input_lines.len().max(1);
+    let win_start = if total_wrapped_rows <= MAX_VISIBLE_INPUT_ROWS {
+        0
+    } else {
+        cursor_row
+            .saturating_add(1)
+            .saturating_sub(MAX_VISIBLE_INPUT_ROWS)
+            .min(total_wrapped_rows - MAX_VISIBLE_INPUT_ROWS)
+    };
+    let win_end = (win_start + MAX_VISIBLE_INPUT_ROWS).min(total_wrapped_rows);
+    let visible_input_slice = &wrapped_input_lines[win_start..win_end];
+    let visible_cursor_row = cursor_row.saturating_sub(win_start);
+    let formatted_input_lines: Vec<String> = visible_input_slice
         .iter()
         .enumerate()
         .map(|(idx, line)| {
-            let raw = if idx == 0 {
+            let abs_idx = win_start + idx;
+            let raw = if abs_idx == 0 {
                 if input_chars.is_empty() && suggestions.is_empty() {
                     format!(
                         "{}│{} {}❯{} {}█{} {}{}{}",
@@ -796,6 +825,18 @@ pub(crate) fn render_inline_dock(
         format!("{}/diff{}", DIM, RESET),
         format!("{}/commit{}", DIM, RESET),
     ];
+    if total_wrapped_rows > MAX_VISIBLE_INPUT_ROWS {
+        h_items.insert(
+            1,
+            format!(
+                "{}📋 {} {}{}",
+                CYAN,
+                total_wrapped_rows,
+                tr_en("satır", "lines"),
+                RESET
+            ),
+        );
+    }
     if suggestions.is_empty() {
         h_items.push(format!(
             "{}{}{}",
@@ -881,7 +922,7 @@ pub(crate) fn render_inline_dock(
         top_count,
         input_line_count,
         bottom_count,
-        cursor_row,
+        visible_cursor_row,
     );
     let cursor_col = (5 + cursor_col_offset).min(full_w);
     print!(
@@ -897,4 +938,3 @@ pub(crate) fn render_inline_dock(
     *prev_top_w = geometry.next_top_w;
     *prev_cursor_col = cursor_col;
 }
-

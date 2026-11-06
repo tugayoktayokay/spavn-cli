@@ -87,7 +87,10 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
         .filter(|s| !s.is_empty())
     {
         let low = pre.to_ascii_lowercase();
-        if matches!(low.as_str(), "local" | "m3" | "llama" | "vllm" | "lmstudio") {
+        if matches!(
+            low.as_str(),
+            "local" | "llama" | "vllm" | "lmstudio" | "mlx"
+        ) {
             "local-server".to_string()
         } else if matches!(low.as_str(), "custom" | "url") {
             "custom-provider".to_string()
@@ -854,6 +857,57 @@ pub fn interactive_select_session(current_path: &Path) -> Option<PathBuf> {
     let chosen_idx = items.iter().position(|it| it.key == chosen_key)?;
     sessions.get(chosen_idx).map(|s| s.path.clone())
 }
+
+/// Arrow-key picker over the live task list: the way to close a task without memorising its index.
+///
+/// Every Enter toggles the highlighted task and the menu is rebuilt from the shared list, so one
+/// run can close several tasks in a row. Esc/q leaves whatever was already toggled in place and
+/// returns it, letting the caller print a single confirmation line instead of one per toggle.
+/// Returns the 1-based index of the last toggled task, or `None` when there is nothing to pick
+/// (empty list, no TTY, or an immediate cancel).
+pub fn interactive_select_live_task() -> Option<usize> {
+    if !stdin_is_tty() || crate::list_live_tasks().is_empty() {
+        return None;
+    }
+    let mut anchor = 0usize;
+    let mut last_toggled: Option<usize> = None;
+    loop {
+        let items: Vec<MenuItem> = crate::list_live_tasks()
+            .iter()
+            .enumerate()
+            .map(|(idx, t)| {
+                let (icon, color, label) = match t.status {
+                    crate::LiveTaskStatus::Done => ("✓", GREEN, tr_en("tamam", "done")),
+                    crate::LiveTaskStatus::InProgress => ("▶", YELLOW, tr_en("sürüyor", "running")),
+                    crate::LiveTaskStatus::Pending => ("○", DIM, tr_en("bekliyor", "pending")),
+                };
+                MenuItem {
+                    key: format!("#{:02}", idx + 1),
+                    badge: format!("{}{} {}{}", color, icon, label, RESET),
+                    desc: t.title.clone(),
+                }
+            })
+            .collect();
+
+        let Some(chosen) = select_interactive_menu(
+            tr_en("📋 GÖREV DURUMU (/todo)", "📋 TASK STATUS (/todo)"),
+            &items,
+            anchor,
+        ) else {
+            break;
+        };
+        let Ok(idx) = chosen.trim_start_matches('#').parse::<usize>() else {
+            break;
+        };
+        if !crate::toggle_live_task(idx) {
+            break;
+        }
+        last_toggled = Some(idx);
+        anchor = idx.saturating_sub(1);
+    }
+    last_toggled
+}
+
 #[cfg(test)]
 mod menu_tests {
     use super::*;
@@ -920,5 +974,12 @@ mod menu_tests {
         // Vertical movement keeps the column that already has focus.
         assert!(step_column(NavKey::Up, true));
         assert!(!step_column(NavKey::Down, false));
+    }
+
+    #[test]
+    fn live_task_picker_stays_silent_without_a_tty() {
+        crate::add_live_task("tatlı test görevi".to_string());
+        assert_eq!(interactive_select_live_task(), None);
+        crate::clear_live_tasks();
     }
 }

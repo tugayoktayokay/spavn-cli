@@ -26,6 +26,7 @@
 //! - [`update`] — version check and the upgrade advice shown to the user.
 
 pub mod ansi;
+pub mod approval;
 pub mod config;
 pub mod guard;
 pub mod http;

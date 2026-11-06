@@ -264,6 +264,55 @@ mod timeout_tests {
         c.args(["-c", "kill -9 $$"]);
         assert_eq!(run_command_with_timeout(c, 5).unwrap().0, 137);
     }
+
+    #[test]
+    fn interactive_subshell_is_detached_from_controlling_tty() {
+        let mut c = Command::new("zsh");
+        c.args(["-i", "-c", "exit"]);
+        let (code, _, _, timed_out) = run_command_with_timeout(c, 5).unwrap();
+        assert!(!timed_out);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn background_job_lifecycle_status_list_and_kill() {
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            std::env::temp_dir(),
+            crate::spavn_engine::AgentPhase::Code,
+        );
+        let start_out = exec_bash(
+            &mut c,
+            &json!({ "command": "echo READY_BG && sleep 30", "background": true }),
+        );
+        assert!(start_out.contains("bg_"), "start output: {start_out}");
+        let id_start = start_out.find("bg_").unwrap();
+        let job_id: String = start_out[id_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+
+        let list_out = exec_bash(&mut c, &json!({ "op": "list" }));
+        assert!(list_out.contains(&job_id), "list output: {list_out}");
+
+        let status_out = exec_bash(&mut c, &json!({ "op": "status", "job_id": job_id }));
+        assert!(
+            status_out.contains("READY_BG"),
+            "status output: {status_out}"
+        );
+        assert!(
+            status_out.contains("running"),
+            "status output: {status_out}"
+        );
+
+        let kill_out = exec_bash(&mut c, &json!({ "op": "kill", "job_id": job_id }));
+        assert!(
+            kill_out.contains("Killed background job"),
+            "kill output: {kill_out}"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1023,16 +1072,36 @@ mod harness_intelligence_tests {
         assert!(globbed.contains("Billing.tsx"), "{globbed}");
         assert!(!globbed.contains("node_modules"), "{globbed}");
 
-        let searched = native_search_fallback(&dir, "UploadInboxFile\\|uploadInboxFile");
+        let searched =
+            native_search_fallback(&dir, "UploadInboxFile\\|uploadInboxFile", "*.tsx", 1);
         assert!(searched.contains("Billing.tsx:2:"), "{searched}");
+        assert!(
+            searched.contains("Billing.tsx-1-const x = 1;"),
+            "{searched}"
+        );
         assert!(!searched.contains("node_modules"), "{searched}");
+        assert!(is_structural_outline_line(
+            "  const handleSendRequest = async () => {"
+        ));
+        assert!(is_structural_outline_line(
+            "    private String getMimeType(String url) {"
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn bash_interceptor_blocks_recursive_grep_find_and_standalone_cat() {
         assert!(intercept_shell_anti_pattern("grep -rn \"UploadInboxFile\" src/").is_some());
+        assert!(intercept_shell_anti_pattern(
+            "grep -rn \"headless\" ~/.spavn 2>/dev/null | head -n 10"
+        )
+        .is_some());
+        assert!(intercept_shell_anti_pattern("rg \"foo\" src/").is_some());
         assert!(intercept_shell_anti_pattern("find . -name \"*.rs\"").is_some());
+        assert!(
+            intercept_shell_anti_pattern("find /tmp -name \"*.log\" 2>/dev/null | head -n 20")
+                .is_some()
+        );
         assert!(intercept_shell_anti_pattern("cat src/main.rs").is_some());
         assert!(intercept_shell_anti_pattern("sed -n '10,40p' src/main.rs").is_some());
         // Legitimate shell commands and pipelines pass untouched
@@ -1040,6 +1109,47 @@ mod harness_intelligence_tests {
         assert!(intercept_shell_anti_pattern("cargo test --quiet").is_none());
         assert!(intercept_shell_anti_pattern("sed -i '' 's/a/b/g' foo.txt").is_none());
         assert!(intercept_shell_anti_pattern("ps aux | grep spavn").is_none());
+    }
+
+    #[test]
+    fn read_edit_search_resolve_relative_paths_against_last_cwd_and_sqlite_query_stays_intact() {
+        let root_a = std::env::temp_dir().join(format!("spavn-cwd-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("spavn-cwd-b-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root_a);
+        let _ = fs::remove_dir_all(&root_b);
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(root_b.join("sub")).unwrap();
+        fs::write(root_b.join("sub/hello.txt"), "alpha\nbeta\ngamma\n").unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            root_a.clone(),
+            AgentPhase::Code,
+        );
+        // Simulate `bash` having `cd`'d into `root_b` while process CWD is still elsewhere
+        c.last_cwd = root_b.clone();
+
+        let read_out = exec_read(&mut c, &json!({ "path": "sub/hello.txt" }));
+        assert!(read_out.contains("beta"), "read output: {read_out}");
+
+        let edit_out = exec_edit(
+            &mut c,
+            &json!({ "path": "sub/hello.txt", "old_text": "beta", "new_text": "BETA_UPDATED" }),
+        );
+        assert!(
+            edit_out.starts_with("Successfully edited"),
+            "edit output: {edit_out}"
+        );
+
+        let search_out = exec_search(&mut c, &json!({ "pattern": "beta_updated", "path": "sub" }));
+        assert!(
+            search_out.contains("BETA_UPDATED"),
+            "search output: {search_out}"
+        );
+
+        let _ = fs::remove_dir_all(&root_a);
+        let _ = fs::remove_dir_all(&root_b);
     }
 
     #[test]
@@ -1053,13 +1163,17 @@ mod harness_intelligence_tests {
 
     #[test]
     fn local_model_micro_schema_prunes_domain_tools_until_requested() {
-        let default_local = tool_definitions_for_turn(AgentPhase::Code, true, "fix the bug in main.rs");
+        let default_local =
+            tool_definitions_for_turn(AgentPhase::Code, true, "fix the bug in main.rs");
         let arr = default_local.as_array().unwrap();
         let names: Vec<&str> = arr
             .iter()
             .filter_map(|v| v["function"]["name"].as_str())
             .collect();
-        assert_eq!(names, vec!["read", "edit", "write", "bash", "search", "glob"]);
+        assert_eq!(
+            names,
+            vec!["read", "edit", "write", "bash", "search", "glob"]
+        );
 
         let with_mem_and_web = tool_definitions_for_turn(
             AgentPhase::Code,
@@ -1074,5 +1188,282 @@ mod harness_intelligence_tests {
             .collect();
         assert!(names2.contains(&"memory"));
         assert!(names2.contains(&"web"));
+    }
+
+    #[test]
+    fn cross_file_atomic_edit_applies_and_rolls_back_on_error_with_impact_graph() {
+        let dir = std::env::temp_dir().join(format!("spavn-xfile-edit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let api_file = dir.join("api.ts");
+        let screen_file = dir.join("Screen.tsx");
+        fs::write(
+            &api_file,
+            "export const uploadInvoice = async (id: string) => {\n  return id;\n};\n",
+        )
+        .unwrap();
+        fs::write(
+            &screen_file,
+            "import { uploadInvoice } from './api';\nexport function renderScreen() {\n  return uploadInvoice('1');\n}\n",
+        )
+        .unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        // 1. Failing 2nd file rolls back 1st file atomically
+        let bad_tx = json!({
+            "files": [
+                {
+                    "path": api_file.to_string_lossy(),
+                    "old_text": "return id;",
+                    "new_text": "return id.trim();"
+                },
+                {
+                    "path": screen_file.to_string_lossy(),
+                    "old_text": "NON_EXISTENT_ANCHOR",
+                    "new_text": "x"
+                }
+            ]
+        });
+        let err_out = exec_edit(&mut c, &bad_tx);
+        assert!(err_out.contains("atomic rollback"), "{err_out}");
+        assert!(
+            fs::read_to_string(&api_file)
+                .unwrap()
+                .contains("return id;\n"),
+            "api.ts was not rolled back!"
+        );
+
+        // 2. Valid cross-file edit succeeds and emits Impact Graph hint for `uploadInvoice`
+        let ok_tx = json!({
+            "files": [
+                {
+                    "path": api_file.to_string_lossy(),
+                    "old_text": "export const uploadInvoice = async (id: string) => {",
+                    "new_text": "export const uploadInvoice = async (id: string, token?: string) => {"
+                },
+                {
+                    "path": screen_file.to_string_lossy(),
+                    "old_text": "return uploadInvoice('1');",
+                    "new_text": "return uploadInvoice('1', 'tok');"
+                }
+            ]
+        });
+        let ok_out = exec_edit(&mut c, &ok_tx);
+        assert!(
+            ok_out.starts_with("Successfully edited 2 file(s) atomically"),
+            "{ok_out}"
+        );
+        assert!(ok_out.contains("SPAVN Impact Graph"), "{ok_out}");
+        assert!(ok_out.contains("Screen.tsx"), "{ok_out}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_memory_multi_hunk_edit_with_line_delta_and_token_free_ranges() {
+        let dir = std::env::temp_dir().join(format!("spavn-hunk-delta-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("sample.rs");
+        fs::write(
+            &f,
+            "fn one() {\n    let a = 1;\n}\nfn two() {\n    let b = 2;\n}\n",
+        )
+        .unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+
+        // Multi-hunk edit using original line numbers: hunk #1 expands line 2 into 3 lines (+2 delta),
+        // hunk #2 still targets original line 5 (`let b = 2;`) without the caller recalculating offsets!
+        let out = exec_edit(
+            &mut c,
+            &json!({
+                "path": f.to_string_lossy(),
+                "edits": [
+                    {
+                        "start_line": 2,
+                        "end_line": 2,
+                        "new_text": "    let a = 10;\n    let a2 = 20;\n    let a3 = 30;"
+                    },
+                    {
+                        "start_line": 5,
+                        "end_line": 5,
+                        "new_text": "    let b = 200;"
+                    }
+                ]
+            }),
+        );
+        assert!(out.contains("2 hunks applied in-memory"), "{out}");
+        let updated = fs::read_to_string(&f).unwrap();
+        assert!(updated.contains("let a3 = 30;"), "{updated}");
+        assert!(updated.contains("let b = 200;"), "{updated}");
+        assert!(!updated.contains("let b = 2;"), "{updated}");
+
+        // Also test inline `path:1-1` and `insert_after_line`
+        let out2 = exec_edit(
+            &mut c,
+            &json!({
+                "path": format!("{}:1-1", f.to_string_lossy()),
+                "new_text": "pub fn one() {"
+            }),
+        );
+        assert!(out2.contains("Successfully edited"), "{out2}");
+        let out3 = exec_edit(
+            &mut c,
+            &json!({
+                "path": f.to_string_lossy(),
+                "insert_after_line": 0,
+                "new_text": "// header comment"
+            }),
+        );
+        assert!(out3.contains("Successfully edited"), "{out3}");
+        let final_text = fs::read_to_string(&f).unwrap();
+        assert!(
+            final_text.starts_with("// header comment\npub fn one() {"),
+            "{final_text}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_bm25_ast_semantic_fallback_with_turkish_normalization() {
+        let dir = std::env::temp_dir().join(format!("spavn-bm25-search-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("invoice_service.rs"),
+            "pub fn fatura_yukle_ve_dogrula(musteri_id: &str) -> bool {\n    let durum = kredi_kontrol(musteri_id);\n    durum\n}\n",
+        )
+        .unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        // Query uses Turkish diacritics and natural word order not matching literal substring
+        let out = exec_search(
+            &mut c,
+            &json!({
+                "pattern": "müşteri fatura yükle doğrula",
+                "path": dir.to_string_lossy()
+            }),
+        );
+        assert!(out.contains("BM25+AST"), "{out}");
+        assert!(out.contains("fatura_yukle_ve_dogrula"), "{out}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bash_lang_py_stdin_execution_without_quote_hell() {
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            std::env::temp_dir(),
+            AgentPhase::Code,
+        );
+        let script = "import json\ndata = {'quote': \"it's \\\"fine\\\"\", 'n': 42}\nprint(json.dumps(data, sort_keys=True))";
+        let out = exec_bash(
+            &mut c,
+            &json!({
+                "lang": "py",
+                "command": script
+            }),
+        );
+        assert!(
+            out.contains(r#"{"n": 42, "quote": "it's \"fine\""}"#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn read_tail_and_json_pointer_zero_latency_selectors() {
+        let dir = std::env::temp_dir().join(format!("spavn-read-sel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log_file = dir.join("app.log");
+        let lines: Vec<String> = (1..=20).map(|i| format!("line-{i}")).collect();
+        fs::write(&log_file, lines.join("\n")).unwrap();
+
+        let json_file = dir.join("config.json");
+        fs::write(
+            &json_file,
+            r#"{"router":{"primary":"argon","fallbacks":["local","flash"]}}"#,
+        )
+        .unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        let tail_out = exec_read(
+            &mut c,
+            &json!({
+                "path": format!("{}:-3", log_file.to_string_lossy())
+            }),
+        );
+        assert!(tail_out.contains("18: line-18"), "{tail_out}");
+        assert!(tail_out.contains("20: line-20"), "{tail_out}");
+        assert!(!tail_out.contains("17: line-17"), "{tail_out}");
+
+        let jq_out = exec_read(
+            &mut c,
+            &json!({
+                "path": format!("{}?q=.router.fallbacks.1", json_file.to_string_lossy())
+            }),
+        );
+        assert!(jq_out.contains("\"flash\""), "{jq_out}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_stale_version_blocks_blind_overwrite_when_file_changed_externally() {
+        let dir = std::env::temp_dir().join(format!("spavn-stale-guard-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("state.rs");
+        fs::write(&file, "fn alpha() -> i32 {\n    1\n}\n").unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        let file_str = file.to_string_lossy().to_string();
+        let _ = exec_read(&mut c, &json!({ "path": file_str }));
+        assert!(!c.is_external_stale_version(&file_str));
+
+        // Simulate external modification after `read` (even within the same millisecond)
+        fs::write(&file, "fn alpha() -> i32 {\n    42\n}\n").unwrap();
+        assert!(c.is_external_stale_version(&file_str));
+
+        let blocked_write = execute_tool(
+            &mut c,
+            "write",
+            &serde_json::to_string(&json!({
+                "path": file_str,
+                "content": "fn alpha() -> i32 { 0 }\n"
+            }))
+            .unwrap(),
+        );
+        assert!(
+            blocked_write.contains("FS_STALE_VERSION"),
+            "{blocked_write}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

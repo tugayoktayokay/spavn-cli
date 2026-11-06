@@ -2,6 +2,7 @@ mod turn;
 use turn::*;
 
 use spavn::config::{load_user_config, tr_en};
+use spavn::hud;
 use spavn::hud::{
     draw_bottom_dock, fetch_quick_quota_line, interactive_select_session,
     interactive_select_slash_command, read_bottom_dock_input, render_welcome_header,
@@ -21,7 +22,6 @@ use spavn::spavn_engine::{
 };
 use spavn::state::{install_sigint_handler, push_queued_message, queued_message_count};
 use spavn::tools::{AccessMode, ToolContext};
-use spavn::hud;
 use std::path::PathBuf;
 
 const CYAN: &str = "\x1b[36m";
@@ -36,6 +36,7 @@ fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         reset_scroll_region();
+        hud::restore_window_title();
         default_hook(info);
     }));
     install_sigint_handler();
@@ -297,6 +298,7 @@ fn main() {
             show_thinking = false;
         }
         let raw_text = prompt_parts.join(" ");
+        hud::set_window_topic(&raw_text);
         let (mut expanded_text, activated_skills) = expand_inline_skills(&raw_text);
         if !activated_skills.is_empty() && !quiet {
             println!(
@@ -444,6 +446,17 @@ fn main() {
         }
     } else if resume_last {
         hud::render_session_resume_preview(&session_file, &messages);
+    }
+
+    // A resumed session already has a topic in its last user turn; a fresh one keeps the
+    // brand-only title until the first prompt arrives.
+    if let Some(topic) = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_deref())
+    {
+        hud::set_window_topic(topic);
     }
 
     loop {
@@ -641,6 +654,7 @@ fn main() {
         println!("{}╰─{}", CYAN, RESET);
         ctx.current_model = endpoint.key.clone();
         ctx.current_prompt = input.clone();
+        hud::set_window_topic(&input);
         let undo_before = ctx.undo_stack.len();
 
         let user_msg = ChatMessage::user(expanded_input);
@@ -667,5 +681,6 @@ fn main() {
         }
         draw_bottom_dock(&endpoint, ctx.access, &ctx.default_host, &quota_badge, "");
     }
-}
 
+    hud::restore_window_title();
+}
