@@ -477,6 +477,7 @@ fn main() {
                 );
                 queued_msg
             } else {
+                let draft = hud::take_spinner_draft();
                 let ev = read_bottom_dock_input(
                     &endpoint,
                     &mut ctx.access,
@@ -484,7 +485,7 @@ fn main() {
                     &ctx.default_host,
                     &quota_badge,
                     &cmd_history,
-                    None,
+                    draft.as_deref(),
                     &cwd,
                     &session_name,
                     &messages,

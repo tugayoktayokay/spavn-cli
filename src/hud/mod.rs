@@ -1,5 +1,5 @@
 use crate::config::{
-    byok_catalog, expand_user_path, is_en, load_user_config, resolve_api_key, save_user_config,
+    byok_catalog, expand_user_path, load_user_config, resolve_api_key, save_user_config,
     tr_en, upsert_spavn_secret, ModelConfigEntry, ProviderGroupConfig,
 };
 use crate::router::{ChatMessage, ModelEndpoint};
@@ -327,6 +327,15 @@ pub(crate) static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
         steer_mode: None,
     });
 
+/// Draft typed into the busy spinner input but not submitted before the turn
+/// ended. Transferred to the main prompt as prefill so the user's in-progress
+/// text is never lost.
+static SPINNER_DRAFT: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn take_spinner_draft() -> Option<String> {
+    SPINNER_DRAFT.lock().ok()?.take()
+}
+
 pub(crate) fn rebuild_spinner_dock_lines(
     state: &mut SpinnerScreenState,
     status_hdr: &str,
@@ -494,11 +503,10 @@ pub(crate) fn rebuild_spinner_dock_lines(
             (s < e).then_some(e - s)
         });
         if let Some(len) = sel_len {
-            if is_en() {
-                format!("Selected: {} chars (Backspace: Delete)", len)
-            } else {
-                format!("Selected: {} chars (Backspace: Delete)", len)
-            }
+            let template =
+                tr_en("Seçili: {} karakter (Backspace: Sil)", "Selected: {} chars (Backspace: Delete)")
+                    .replace("{}", &len.to_string());
+            template
         } else {
             tr_en(
                 "Tab: Mod · Shift+←/→: Seç · Esc: Temizle",
@@ -929,3 +937,49 @@ pub use crate::ansi::{
     truncate_ansi_to_width_ellipsis, truncate_ansi_to_width_middle, visible_width,
     wrap_input_lines_with_cursor, BOLD, CYAN, DIM, GREEN, MAGENTA, RED, RESET, YELLOW,
 };
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+
+    /// SPINNER_DRAFT is process-global; serialize draft-touching tests.
+    static DRAFT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_draft() {
+        if let Ok(mut slot) = SPINNER_DRAFT.lock() {
+            *slot = None;
+        }
+    }
+
+    #[test]
+    fn take_on_empty_slot_returns_none() {
+        let _g = DRAFT_TEST_LOCK.lock().unwrap();
+        reset_draft();
+        assert_eq!(take_spinner_draft(), None);
+    }
+
+    #[test]
+    fn take_returns_draft_once_then_none() {
+        let _g = DRAFT_TEST_LOCK.lock().unwrap();
+        reset_draft();
+        if let Ok(mut slot) = SPINNER_DRAFT.lock() {
+            *slot = Some("merhaba dünya".to_string());
+        }
+        assert_eq!(take_spinner_draft(), Some("merhaba dünya".to_string()));
+        // Consume-once: second read must not duplicate the prefill.
+        assert_eq!(take_spinner_draft(), None);
+    }
+
+    #[test]
+    fn last_write_wins_on_overwrite() {
+        let _g = DRAFT_TEST_LOCK.lock().unwrap();
+        reset_draft();
+        if let Ok(mut slot) = SPINNER_DRAFT.lock() {
+            *slot = Some("eski taslak".to_string());
+        }
+        if let Ok(mut slot) = SPINNER_DRAFT.lock() {
+            *slot = Some("yeni taslak".to_string());
+        }
+        assert_eq!(take_spinner_draft(), Some("yeni taslak".to_string()));
+    }
+}

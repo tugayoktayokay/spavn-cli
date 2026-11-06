@@ -1277,7 +1277,28 @@ pub(crate) fn run_agent_turn(
             total_turn_steps,
             !modified_files_in_turn.is_empty(),
         );
-        if (looks_like_premature_stop || looks_like_phantom_code) && premature_stop_retries < 2 {
+        // An explicit "report only" directive from the user outranks both nudges: after
+        // "sadece söyle bana" a code block without an edit is what was asked for.
+        let report_only_directive = messages
+            .iter()
+            .rev()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.as_deref().unwrap_or(""))
+            .find(|c| !c.trim_start().starts_with("[SPAVN"))
+            .map(|c| {
+                let c = c.trim();
+                c.strip_prefix("[LIVE USER STEERING INSTRUCTION — Prioritize this immediately]: ")
+                    .or_else(|| {
+                    c.strip_prefix("[Active User Request — MUST complete all items]:\n")
+                    .map(str::trim)
+                    })
+                    .unwrap_or(c)
+            })
+            .is_some_and(user_asked_report_only);
+        if (looks_like_premature_stop || looks_like_phantom_code)
+            && !report_only_directive
+            && premature_stop_retries < 2
+        {
             premature_stop_retries += 1;
             if !quiet {
                 println!(

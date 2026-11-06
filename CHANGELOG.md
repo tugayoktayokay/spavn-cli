@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-11-07 — `v0.2.4`: Busy-Draft Preservation, HUD Polish & Markdown Expansion Fixes
+
+### Busy-Draft Preservation (`src/hud/mod.rs`, `src/hud/input.rs`, `src/main.rs`)
+- **Bug**: Text typed into the busy-spinner input while a turn was running was silently discarded when the spinner tore down — the main prompt re-opened with a `None` prefill and hours of mid-flight typing vanished ("şak diye siliniyor").
+- **Fix**: New process-global draft slot (`SPINNER_DRAFT: Mutex<Option<String>>` + `take_spinner_draft()`). On spinner teardown, a non-empty `typing_buf` (plus cursor/selection/`is_typing` state) is transferred to the draft slot; the main prompt loop (`main.rs`) now feeds it back as `initial_prefill`. Draft is consume-once and survives every spinner→prompt transition (only a full process exit discards it).
+- **Tests** (`hud::draft_tests`): empty-slot → `None`, consume-once semantics, last-write-wins overwrite — serialized behind a test lock since the slot is process-global.
+
+### Markdown Link/Table Rendering Fixes (`src/markdown.rs`)
+- **Nested-image links**: `[![img](imgurl)](linkurl)` now render correctly — the link-target scan no longer stops at the first `]` (image's closer) and mis-corrupts nested links (common in contributors/README tables).
+- **Balanced bracket scanning** + probe regression: link/table inline expansion edge cases covered by probe-verified table cell rendering.
+
+### Spinner & HUD Polish (`src/hud/input.rs`, `src/hud/mod.rs`, `src/hud/pickers.rs`, `src/session.rs`)
+- Removed a provably dead clamp on `tail_start` (invariant already guarantees ≥ 1 via the teardown loop).
+- Unified the duplicated `tr_en("Turkish", "English")` phase-label branches in the HUD into a single ternary; dropped the now-unused `is_en` import (`pickers.rs` picked up the tr_en import instead).
+- `/model` picker busy-mode label and live-draft behavior kept intact.
+
+### Context Quality (`src/turn.rs`, `src/session.rs`)
+- This release rides on the `v0.2.3` model-aware prune budget (local models keep full tool output up to ~50% of window, cloud unchanged at ~25%).
+
 ## 2026-11-06 — `v0.2.3`: Local Model Context Retention Fix (Forget-on-Compaction)
 
 ### Root Cause — Early Skeletonization on Local Models (`src/turn.rs`)

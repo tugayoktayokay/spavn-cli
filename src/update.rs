@@ -543,7 +543,7 @@ mod tests {
             "spavn-find-nested-{}",
             std::process::id()
         ));
-        let _ = std::fs::create_dir_all(&dir.join("pkg"));
+        let _ = std::fs::create_dir_all(dir.join("pkg"));
         let found_path = dir.join("pkg").join("spawn");
         let _ = std::fs::File::create(&found_path);
         assert_eq!(find_binary(&dir), Some(found_path));

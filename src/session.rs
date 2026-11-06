@@ -192,12 +192,9 @@ fn format_relative_age(now_secs: u64, mtime_secs: u64) -> String {
     } else if diff < 86400 {
         let hrs = (diff / 3600).to_string();
         let mins = ((diff % 3600) / 60).to_string();
-        format!(
-            "{}",
-            tr_en("{}sa {}dk önce", "{}h {}m ago")
+        tr_en("{}sa {}dk önce", "{}h {}m ago")
                 .replace("{0}", &hrs)
-                .replace("{1}", &mins)
-        )
+                .replace("{1}", &mins).to_string()
     } else {
         format!("{}{}", diff / 86400, tr_en("gün önce", "d ago").to_owned())
     }
@@ -576,7 +573,9 @@ pub fn perform_manual_compact(
     if messages.len() > 6 {
         let sys = messages[0].clone();
         let mut transcript_lines = Vec::new();
-        for m in &messages[1..tail_start] {
+        // tail_start 0 kalabiliyor (system'siz oturum): [1..0] panic yerine boş aralık.
+        let shake_end = tail_start.max(1).min(messages.len());
+        for m in &messages[1..shake_end] {
             if m.role == "user" || m.role == "assistant" {
                 if let Some(c) = &m.content {
                     if m.role == "user"

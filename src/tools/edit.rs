@@ -1068,7 +1068,7 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                         "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
                         "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
                     )
-                    .replace("{0}", &raw_path)
+                    .replace("{0}", raw_path)
                     .replace("{1}", &leaked_secrets.join(", "));
                     if !prompt_user_approval(ctx, &secret_msg, sub_new) {
                         return format!(
@@ -1087,7 +1087,7 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                         "Multi-File Edit ({} hunk): {}"
                     )
                     .replace("{0}", &edits_arr.len().to_string())
-                    .replace("{1}", &raw_path),
+                    .replace("{1}", raw_path),
                     raw_path,
                 )
             {
@@ -1273,7 +1273,7 @@ fn exec_edit_single_with_range(
             "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
             "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
         )
-        .replace("{0}", &raw_path)
+        .replace("{0}", raw_path)
         .replace("{1}", &leaked_secrets.join(", "));
         if !prompt_user_approval(ctx, &secret_msg, new_text) {
             return format!(
@@ -1291,7 +1291,7 @@ fn exec_edit_single_with_range(
                 "Dosya Düzenleme (edit): {}",
                 "File Edit (edit): {}"
             )
-            .replace("{0}", &raw_path),
+            .replace("{0}", raw_path),
             new_text,
         )
     {
@@ -1952,7 +1952,7 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
             "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
             "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
         )
-        .replace("{0}", &raw_path)
+        .replace("{0}", raw_path)
         .replace("{1}", &leaked_secrets.join(", "));
         if !prompt_user_approval(ctx, &secret_msg, content) {
             return format!(

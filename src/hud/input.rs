@@ -1398,6 +1398,17 @@ impl LiveSpinner {
             }
             SPINNER_PAUSED.store(false, Ordering::SeqCst);
             if let Ok(mut state) = SPINNER_SCREEN.lock() {
+                // Preserve unsent busy-mode input for the next prompt cycle.
+                if !state.typing_buf.is_empty() {
+                    let draft: String = state.typing_buf.iter().collect();
+                    if let Ok(mut slot) = super::SPINNER_DRAFT.lock() {
+                        *slot = Some(draft.trim().to_string());
+                    }
+                    state.typing_buf.clear();
+                    state.typing_cursor = 0;
+                    state.typing_sel_anchor = None;
+                    state.is_typing = false;
+                }
                 close_thinking_box_locked(&mut state);
                 if state.active && !state.paused {
                     let mut out = String::from("\x1b[?2026h\x1b[?7l\r\x1b[J");

@@ -1,5 +1,6 @@
 use super::menus::*;
 use super::*;
+use crate::config::is_en;
 
 pub(crate) fn prompt_inline_line(prompt_label: &str) -> Option<String> {
     print!("{}{}{}: {}", CYAN, BOLD, prompt_label, RESET);

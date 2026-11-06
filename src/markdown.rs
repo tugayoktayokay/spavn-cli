@@ -16,6 +16,19 @@ fn parse_table_row_cells(line: &str) -> Vec<String> {
     let mut cur = String::new();
     let mut in_code = false;
     let mut chars = inner.chars().peekable();
+    let push_cell = |cur: &mut String, cells: &mut Vec<String>| {
+        let raw = cur.trim();
+        // Code spans display raw markdown by design; plain cells collapse
+        // `[label](url)` / `![alt](url)` to their visible label so column
+        // widths and wrapping measure what the reader actually sees.
+        let cell = if raw.contains('`') {
+            raw.to_string()
+        } else {
+            strip_md_links(raw)
+        };
+        cells.push(cell.trim().to_string());
+        cur.clear();
+    };
     while let Some(ch) = chars.next() {
         if ch == '\\' {
             if let Some(&next_c) = chars.peek() {
@@ -34,14 +47,72 @@ fn parse_table_row_cells(line: &str) -> Vec<String> {
             continue;
         }
         if ch == '|' && !in_code {
-            cells.push(cur.trim().to_string());
-            cur.clear();
+            push_cell(&mut cur, &mut cells);
         } else {
             cur.push(ch);
         }
     }
-    cells.push(cur.trim().to_string());
+    push_cell(&mut cur, &mut cells);
     cells
+}
+
+/// Collapses markdown image/link syntax to the label the reader sees:
+/// `![alt](url)` and `[label](url)` become `alt` / `label`. Unmatched
+/// brackets (a literal `[` or an unclosed link) pass through untouched.
+fn strip_md_links(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let is_image = chars[i] == '!' && i + 1 < chars.len() && chars[i + 1] == '[';
+        let open = if is_image {
+            i + 1
+        } else if chars[i] == '[' {
+            i
+        } else {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        };
+        let mut close = open + 1;
+        // Nested-label aware: `[![img](imgurl)](linkurl)` must close at the
+        // outermost `]`, not the image one.
+        let mut depth = 0usize;
+        while close < chars.len() {
+            match chars[close] {
+                '[' => depth += 1,
+                ']' if depth == 0 => break,
+                ']' => depth -= 1,
+                _ => {}
+            }
+            close += 1;
+        }
+        if close < chars.len() && close + 1 < chars.len() && chars[close + 1] == '(' {
+            let mut end = close + 2;
+            // Balanced parens: `[a](b_(c))` closes at the final `)`, so a
+            // wiki-style URL never leaks a stray `)` into the cell.
+            let mut paren_depth = 0usize;
+            while end < chars.len() {
+                match chars[end] {
+                    '(' => paren_depth += 1,
+                    ')' if paren_depth == 0 => break,
+                    ')' => paren_depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            if end < chars.len() {
+                let label: String = chars[open + 1..close].iter().collect();
+                // The label may itself carry `[![img](u)]` pieces — collapse them too.
+                out.push_str(&strip_md_links(label.trim()));
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 fn is_table_separator_row(cells: &[String]) -> bool {
@@ -1121,7 +1192,40 @@ impl MarkdownStreamRenderer {
 
 #[cfg(test)]
 mod markdown_tests {
+    use super::{parse_table_row_cells, strip_md_links};
     use super::*;
+
+    #[test]
+    fn table_cells_collapse_links_and_images_to_labels() {
+        // Screenshot case: a contributors table with avatar image + profile link
+        // must measure the visible labels, not the raw markdown URLs.
+        let row = "| ![av](https://x/y.png) | [tugayokayokay](https://github.com/tugayokayokay) | Tugay Oktay Okay |";
+        let cells = parse_table_row_cells(row);
+        assert_eq!(
+            cells,
+            vec!["av", "tugayokayokay", "Tugay Oktay Okay"]
+        );
+
+        // Code spans keep their raw markdown by design.
+        assert_eq!(
+            parse_table_row_cells("| `[a](b)` | plain |"),
+            vec!["`[a](b)`", "plain"]
+        );
+        // Unmatched brackets pass through untouched.
+        assert_eq!(
+            parse_table_row_cells("| a [literal | b |"),
+            vec!["a [literal", "b"]
+        );
+        assert_eq!(strip_md_links("[](empty) label"), " label");
+        // Nested image-in-link closes at the outermost bracket and recurses into the label.
+        assert_eq!(
+            strip_md_links("[![img](https://a/i.png)](https://b/u)"),
+            "img"
+        );
+        // Wiki-style URL with balanced parens leaks no stray `)`.
+        assert_eq!(strip_md_links("[a](https://b/x_(y)) ab"), "a ab");
+        assert_eq!(strip_md_links("no links here"), "no links here");
+    }
 
     #[test]
     fn parse_row_cells_splits_on_plain_pipes_only() {

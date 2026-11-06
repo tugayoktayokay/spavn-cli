@@ -209,7 +209,39 @@ pub fn is_phantom_code_block_stop(
     has_code_signature && code_lines >= 6
 }
 
-/// Detects when a model output is a premature stop — it announces an upcoming action
+/// Whether the user's latest genuine instruction asked for findings only ("sadece söyle bana",
+/// "report only", "don't apply", ...). Recovery gates that force a tool call must stay dormant
+/// then: after an explicit report-only directive a missing edit is compliance, not a stall.
+pub fn user_asked_report_only(user_text: &str) -> bool {
+    // to_lowercase maps İ to i + U+0307; strip the combining dot and normalize the curly
+    // apostrophe so "İşlem yapma" / "don’t edit" still match their markers.
+    let t = user_text
+        .to_lowercase()
+        .replace('\u{307}', "")
+        .replace('\u{2019}', "'");
+    const TR: &[&str] = &[
+        "sadece söyle",
+        "sadece anlat",
+        "sadece bak",
+        "sadece göster",
+        "işlem yapma",
+        "değişiklik yapma",
+        "sadece cevapla",
+    ];
+    const EN: &[&str] = &[
+        "just tell",
+        "just report",
+        "report only",
+        "don't apply",
+        "do not apply",
+        "don't modify",
+        "do not modify",
+        "don't edit",
+        "no edits",
+    ];
+    TR.iter().chain(EN.iter()).any(|m| t.contains(m))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +343,17 @@ mod tests {
         for n in no {
             assert!(!is_premature_stop(n), "should NOT be premature stop for: {n}");
         }
+    }
+
+    #[test]
+    fn report_only_directive_is_detected_for_recovery_gate() {
+        assert!(user_asked_report_only("neyi var onun sadece söyle bana"));
+        assert!(user_asked_report_only("İşlem yapma, sadece rapor ver"));
+        assert!(user_asked_report_only(
+            "Just tell me what's wrong, don't apply anything"
+        ));
+        assert!(!user_asked_report_only("kardeş kaldır ozaman o modelleri"));
+        assert!(!user_asked_report_only("genel bi ak bakalım sorun olabilecek yerlere"));
     }
 
     #[test]

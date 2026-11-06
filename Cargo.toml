@@ -1,6 +1,6 @@
 [package]
 name = "spavn"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Terminal-native coding agent that ships as one Rust binary: no async runtime, three direct dependencies"
 license = "MIT"
