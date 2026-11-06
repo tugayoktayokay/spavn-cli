@@ -414,7 +414,12 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                     ),
                     _ if recursive => push(
                         out,
-                        ShellRisk::Destructive(format!("özyinelemeli silme: {}", target.text)),
+                        ShellRisk::Destructive(format!(
+                            "{}", tr_en(
+                                "özyinelemeli silme: {}",
+                                "recursive deletion: {}"
+                            )
+                        )),
                     ),
                     _ if force => push(
                         out,
