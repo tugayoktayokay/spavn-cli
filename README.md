@@ -1,6 +1,8 @@
 <div align="center">
 
-# ⚡ spavn-cli
+<img src="docs/favicon.svg" width="84" height="84" alt="SPAVN Logo" />
+
+# spavn-cli
 
 **The terminal-native coding agent that ships as one Rust binary.**
 

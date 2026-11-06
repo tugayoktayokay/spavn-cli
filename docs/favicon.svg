@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-label="SPAVN">
+  <rect width="256" height="256" rx="56" fill="#0b0c14"/>
+  <rect x="6" y="6" width="244" height="244" rx="50" stroke="url(#spavn-border)" stroke-opacity="0.35" stroke-width="4"/>
+  <defs>
+    <linearGradient id="spavn-border" x1="20" y1="20" x2="236" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B45CFF"/>
+      <stop offset="1" stop-color="#6EDFFF"/>
+    </linearGradient>
+    <linearGradient id="spavn-a" x1="30" y1="26" x2="224" y2="225" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B45CFF"/>
+      <stop offset="0.52" stop-color="#7968FF"/>
+      <stop offset="1" stop-color="#6EDFFF"/>
+    </linearGradient>
+    <linearGradient id="spavn-b" x1="226" y1="30" x2="34" y2="226" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6EDFFF"/>
+      <stop offset="0.5" stop-color="#7A68FF"/>
+      <stop offset="1" stop-color="#6750FF"/>
+    </linearGradient>
+  </defs>
+  <path d="M44 96V44H96L212 160V212H160" stroke="url(#spavn-a)" stroke-width="24" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M160 44H212V96L96 212H44V160" stroke="url(#spavn-b)" stroke-width="24" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M128 102C131.5 118 138 124.5 154 128C138 131.5 131.5 138 128 154C124.5 138 118 131.5 102 128C118 124.5 124.5 118 128 102Z" fill="#78EDFF"/>
+</svg>
