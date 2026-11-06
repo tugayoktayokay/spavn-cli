@@ -1,23 +1,34 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-label="SPAVN">
-  <rect width="256" height="256" rx="56" fill="#0b0c14"/>
-  <rect x="6" y="6" width="244" height="244" rx="50" stroke="url(#spavn-border)" stroke-opacity="0.35" stroke-width="4"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <rect width="256" height="256" rx="58" fill="#0b0c14"/>
+  <rect x="6" y="6" width="244" height="244" rx="52" stroke="url(#spavn-border)" stroke-opacity="0.28" stroke-width="4"/>
   <defs>
-    <linearGradient id="spavn-border" x1="20" y1="20" x2="236" y2="236" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#B45CFF"/>
+    <linearGradient id="spavn-border" x1="24" y1="24" x2="232" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B95CFF"/>
+      <stop offset="0.5" stop-color="#7968FF"/>
       <stop offset="1" stop-color="#6EDFFF"/>
     </linearGradient>
-    <linearGradient id="spavn-a" x1="30" y1="26" x2="224" y2="225" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#B45CFF"/>
-      <stop offset="0.52" stop-color="#7968FF"/>
-      <stop offset="1" stop-color="#6EDFFF"/>
+    <linearGradient id="spavn-base" x1="24" y1="24" x2="232" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B95CFF"/>
+      <stop offset="0.55" stop-color="#8B63FF"/>
+      <stop offset="1" stop-color="#6366FF"/>
     </linearGradient>
-    <linearGradient id="spavn-b" x1="226" y1="30" x2="34" y2="226" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#6EDFFF"/>
-      <stop offset="0.5" stop-color="#7A68FF"/>
-      <stop offset="1" stop-color="#6750FF"/>
-    </linearGradient>
+    <radialGradient id="spavn-core" cx="128" cy="128" r="92" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#84F2FF" stop-opacity="0.95"/>
+      <stop offset="0.45" stop-color="#76C8FF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#8B63FF" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <path d="M44 96V44H96L212 160V212H160" stroke="url(#spavn-a)" stroke-width="24" stroke-linecap="square" stroke-linejoin="miter"/>
-  <path d="M160 44H212V96L96 212H44V160" stroke="url(#spavn-b)" stroke-width="24" stroke-linecap="square" stroke-linejoin="miter"/>
-  <path d="M128 102C131.5 118 138 124.5 154 128C138 131.5 131.5 138 128 154C124.5 138 118 131.5 102 128C118 124.5 124.5 118 128 102Z" fill="#78EDFF"/>
+  <g fill="url(#spavn-base)">
+    <path d="M24 24H87L151 88L178 61H191V75L151 115L80 44H44V78L73 107L59 121L24 86Z"/>
+    <path d="M232 24V87L168 151L195 178V191H181L141 151L212 80V44H178L149 73L135 59L170 24Z"/>
+    <path d="M232 232H169L105 168L78 195H65V181L105 141L176 212H212V178L183 149L197 135L232 170Z"/>
+    <path d="M24 232V169L88 105L61 78V65H75L115 105L44 176V212H78L107 183L121 197L86 232Z"/>
+  </g>
+  <g fill="url(#spavn-core)">
+    <path d="M24 24H87L151 88L178 61H191V75L151 115L80 44H44V78L73 107L59 121L24 86Z"/>
+    <path d="M232 24V87L168 151L195 178V191H181L141 151L212 80V44H178L149 73L135 59L170 24Z"/>
+    <path d="M232 232H169L105 168L78 195H65V181L105 141L176 212H212V178L183 149L197 135L232 170Z"/>
+    <path d="M24 232V169L88 105L61 78V65H75L115 105L44 176V212H78L107 183L121 197L86 232Z"/>
+  </g>
+  <path d="M128 106C131 120 136 125 150 128C136 131 131 136 128 150C125 136 120 131 106 128C120 125 125 120 128 106Z" fill="#78EDFF"/>
 </svg>

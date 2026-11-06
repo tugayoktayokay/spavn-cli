@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/favicon.svg" width="84" height="84" alt="SPAVN Logo" />
+<img src="docs/logo.png" width="88" height="88" alt="SPAVN Logo" />
 
 # spavn-cli
 

@@ -134,20 +134,38 @@ pub fn render_welcome_header(
     let row2_info = if let Some(br) = git_branch {
         format!(
             "📂 {}{}{}{}🌿 {}{}{}",
-            DIM, short_cwd, RESET, sep, GREEN, br, RESET
+            CYAN, short_cwd, RESET, sep, GREEN, br, RESET
         )
     } else {
-        format!("📂 {}{}{}", DIM, short_cwd, RESET)
+        format!("📂 {}{}{}", CYAN, short_cwd, RESET)
     };
     let row3_info = format!(
-        "🧠 {}\x1b[38;2;120;237;255m{}{}{}💬 {}{}{}",
-        BOLD, endpoint.key, RESET, sep, DIM, short_session, RESET
+        "🧠 {}{}{}{}💬 {}{}{}",
+        MAGENTA, endpoint.key, RESET, sep, DIM, short_session, RESET
     );
 
+    let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let lc_term = std::env::var("LC_TERMINAL").unwrap_or_default();
+    let supports_osc1337 = term_prog == "iTerm.app"
+        || term_prog == "WezTerm"
+        || lc_term == "iTerm2";
+
     println!();
-    println!("  {}   {}", logo_r1, row1_info);
-    println!("  {}   {}", logo_r2, row2_info);
-    println!("  {}   {}", logo_r3, row3_info);
+    if supports_osc1337 {
+        const LOGO_PNG_B64: &str = include_str!("logo_b64.txt");
+        print!(
+            "  \x1b]1337;File=inline=1;size=3660;width=6;height=3;preserveAspectRatio=1:{}\x07\x1b[2A\x1b[10G{}\r\n\x1b[10G{}\r\n\x1b[10G{}\r\n",
+            LOGO_PNG_B64.trim(),
+            row1_info,
+            row2_info,
+            row3_info
+        );
+    } else {
+        println!("  {}   {}", logo_r1, row1_info);
+        println!("  {}   {}", logo_r2, row2_info);
+        println!("  {}   {}", logo_r3, row3_info);
+    }
+    let _ = io::stdout().flush();
 }
 
 /// Boxed upgrade notice for the welcome banner and the input loop.
