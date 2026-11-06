@@ -656,7 +656,16 @@ fn main() {
         println!("{}╰─{}", CYAN, RESET);
         ctx.current_model = endpoint.key.clone();
         ctx.current_prompt = input.clone();
-        hud::set_window_topic(&input);
+        // Before the auto title lands the newest user line stays the topic; after it only the
+        // title is, so a follow-up prompt never rewrites it (OMP `session/title.ts` behaviour).
+        if let Some(title) = spavn::session_title::session_title() {
+            hud::set_window_topic(&title);
+        } else {
+            if messages.is_empty() {
+                spavn::session_title::spawn_auto_title(&endpoint, &input);
+            }
+            hud::set_window_topic(&input);
+        }
         let undo_before = ctx.undo_stack.len();
 
         let user_msg = ChatMessage::user(expanded_input);

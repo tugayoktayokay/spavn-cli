@@ -36,6 +36,7 @@ pub mod markdown;
 pub mod memory;
 pub mod router;
 pub mod session;
+pub mod session_title;
 pub mod skills;
 pub mod slash_commands;
 pub mod spavn_engine;
