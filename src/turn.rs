@@ -8,6 +8,7 @@ use spavn::session::{
     append_message, evict_old_skill_blocks, perform_manual_compact, rewrite_session,
     safe_utf8_prefix, safe_utf8_suffix, summarize_tool_args, tool_progress_target,
 };
+use spavn::harness::*;
 use spavn::spavn_engine::AgentPhase;
 use spavn::state::{
     advance_live_tasks_on_tool, clear_finished_live_tasks, clear_interrupted, is_interrupted,
@@ -122,6 +123,11 @@ pub(crate) fn compact_messages_for_model(
     let raw_tok = hud::estimate_messages_tokens(messages);
     let prune_budget = if max_ctx_tokens == 0 {
         16_000
+    } else if is_local {
+        // Local models degrade badly on truncated context, so skeletonizing early tool output
+        // makes them forget prior work. Delay skeletonization to ~50% of the window (vs ~25%
+        // for cloud) and cap it so small-window local models never get an oversized budget.
+        (max_ctx_tokens / 2).clamp(8_000, 96_000)
     } else {
         (max_ctx_tokens / 4).clamp(4_000, 64_000)
     };
@@ -369,96 +375,6 @@ fn extract_compact_ast_skeleton(content: &str) -> String {
     } else {
         format!(" | AST Signatures: {}", sigs.join(" ; "))
     }
-}
-
-/// True when the reply announces an action ("let me read...", "şimdi ... okuyacağım", trailing `:`)
-/// but stops without calling a tool. Questions and "let me know" sign-offs are final answers.
-pub(crate) fn is_premature_stop(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.contains('?') || trimmed.ends_with("```") {
-        return false;
-    }
-    let tail_lines: Vec<&str> = trimmed
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .rev()
-        .take(3)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let last_line = tail_lines.last().copied().unwrap_or("");
-    let lower_tail = tail_lines.join(" ").to_lowercase();
-    let announces_en = (lower_tail.contains("let me ") && !lower_tail.contains("let me know"))
-        || lower_tail.contains("i will now ")
-        || lower_tail.contains("i'll now ");
-    let announces_tr = lower_tail.contains("şimdi ")
-        && (lower_tail.contains("yapacağım")
-            || lower_tail.contains("düzenleyeceğim")
-            || lower_tail.contains("okuyacağım")
-            || lower_tail.contains("inceleyeceğim"));
-    last_line.ends_with(':') || announces_tr || announces_en
-}
-
-/// Detects when a model in CODE phase investigated files (`total_turn_steps > 0`), made zero file
-/// mutations, and dumped a multi-line fenced code block with file/symbol markers instead of calling `edit`/`write`.
-pub(crate) fn is_phantom_code_block_stop(
-    text: &str,
-    phase: AgentPhase,
-    total_turn_steps: usize,
-    has_mutations: bool,
-) -> bool {
-    if phase != AgentPhase::Code || total_turn_steps == 0 || has_mutations {
-        return false;
-    }
-    let trimmed = text.trim();
-    if trimmed.contains('?') {
-        return false;
-    }
-    let mut in_fence = false;
-    let mut code_lines = 0usize;
-    let mut has_code_signature = false;
-    for line in trimmed.lines() {
-        let t = line.trim();
-        if let Some(lang) = t.strip_prefix("```") {
-            if !in_fence {
-                in_fence = true;
-                let l = lang.trim().to_ascii_lowercase();
-                if matches!(
-                    l.as_str(),
-                    "rust"
-                        | "rs"
-                        | "go"
-                        | "python"
-                        | "py"
-                        | "ts"
-                        | "tsx"
-                        | "js"
-                        | "jsx"
-                        | "c"
-                        | "cpp"
-                ) {
-                    has_code_signature = true;
-                }
-            } else {
-                in_fence = false;
-            }
-            continue;
-        }
-        if in_fence {
-            code_lines += 1;
-            if t.starts_with("fn ")
-                || t.starts_with("pub fn ")
-                || t.starts_with("func ")
-                || t.starts_with("def ")
-                || t.starts_with("export ")
-            {
-                has_code_signature = true;
-            }
-        }
-    }
-    has_code_signature && code_lines >= 6
 }
 
 pub(crate) fn run_agent_turn(
@@ -1463,7 +1379,7 @@ pub(crate) fn run_agent_turn(
 
 #[cfg(test)]
 mod premature_stop_tests {
-    use super::is_premature_stop;
+    use spavn::harness::is_premature_stop;
 
     #[test]
     fn detects_announcements_not_final_answers() {
@@ -1576,6 +1492,88 @@ mod premature_stop_tests {
         }
     }
 
+
+    #[test]
+    fn local_prune_budget_keeps_full_tool_output_until_50pct_window() {
+        // Regression: local models used to skeletonize prior tool output at ~25% of the window,
+        // hiding the very content they need to reason about and forgetting earlier work. The
+        // budget must now be ~50% of the window for local models (cloud stays at ~25%).
+        use spavn::router::ChatMessage;
+        let mut msgs = vec![ChatMessage::system("sys".to_string())];
+        // ~190k chars -> estimate ~50k tokens. That sits ABOVE the old local budget (32768,
+        // 25% of a 131072 window) but BELOW the new one (~65536, 50%). Old behavior would
+        // skeletonize here and forget; the fix keeps it full.
+        for i in 0..160 {
+            msgs.push(ChatMessage::user(format!("q{i}")));
+            msgs.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: Some("ok".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                thought_signature: None,
+                reasoning_content: None,
+            });
+            msgs.push(ChatMessage::tool_result(
+                format!("c{i}"),
+                "read",
+                "x".repeat(1200),
+            ));
+        }
+        // 40 * 1200 = 48000 tool chars; add enough to push raw estimate near/above the old 32k
+        // threshold but below the new ~65k local budget.
+        let view = super::compact_messages_for_model(&msgs, true, 131_072);
+        // The bulk of early tool results must NOT be skeletonized (no "[SPAVN Shaken" marker).
+        let skeleton_count: usize = view
+            .iter()
+            .filter(|m| {
+                m.content
+                    .as_deref()
+                    .map(|c| c.contains("[SPAVN Context Compactor"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert!(
+            skeleton_count <= 2,
+            "local model skeletonized too early: {skeleton_count} tool outputs truncated"
+        );
+    }
+
+    #[test]
+    fn cloud_prune_budget_stays_at_25pct_window() {
+        // Cloud models keep the original ~25% (clamped 64k) budget so their behavior is unchanged.
+        use spavn::router::ChatMessage;
+        let mut msgs = vec![ChatMessage::system("sys".to_string())];
+        for i in 0..240 {
+            msgs.push(ChatMessage::user(format!("q{i}")));
+            msgs.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: Some("ok".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                thought_signature: None,
+                reasoning_content: None,
+            });
+            msgs.push(ChatMessage::tool_result(
+                format!("c{i}"),
+                "read",
+                "x".repeat(1200),
+            ));
+        }
+        // ~96k tool chars on a 1M window: past the 64k cloud budget -> skeletonization expected.
+        let view = super::compact_messages_for_model(&msgs, false, 1_000_000);
+        let skeleton_count: usize = view
+            .iter()
+            .filter(|m| {
+                m.content
+                    .as_deref()
+                    .map(|c| c.contains("[SPAVN Context Compactor"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert!(skeleton_count > 10, "cloud model should skeletonize past 64k budget",)
+    }
     #[test]
     fn supersede_prune_replaces_stale_reads_before_turn_anchor() {
         use spavn::router::{ChatMessage, ToolCall, ToolFunction};

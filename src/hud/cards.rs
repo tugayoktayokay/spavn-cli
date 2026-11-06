@@ -1,5 +1,31 @@
 use super::*;
 
+/// Caches the git branch per working directory so state-change renders
+/// (/model, /clear, /reload) don't re-spawn `git rev-parse` when cwd is unchanged.
+static GIT_BRANCH_CACHE: std::sync::Mutex<Option<(String, String)>> =
+    std::sync::Mutex::new(None);
+
+fn cached_git_branch(cwd: &str) -> Option<String> {
+    if let Ok(hit) = GIT_BRANCH_CACHE.lock() {
+        if let Some((ref c, ref b)) = *hit {
+            if c == cwd {
+                return Some(b.clone());
+            }
+        }
+    }
+    let branch = Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|b| !b.is_empty());
+    if let Ok(mut guard) = GIT_BRANCH_CACHE.lock() {
+        *guard = Some((cwd.to_string(), branch.clone().unwrap_or_default()));
+    }
+    branch
+}
+
 pub fn strip_internal_tags_for_display(raw: &str) -> String {
     let mut s = raw.trim();
     loop {
@@ -63,7 +89,7 @@ pub fn fetch_quick_quota_line() -> String {
 }
 
 pub fn render_welcome_header(
-    endpoint: &ModelEndpoint,
+    _endpoint: &ModelEndpoint,
     _access: AccessMode,
     _default_host: &str,
     cwd: &str,
@@ -83,13 +109,7 @@ pub fn render_welcome_header(
     let short_session = session_name
         .trim_end_matches(".jsonl")
         .trim_start_matches("session-");
-    let git_branch = Command::new("git")
-        .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|b| !b.is_empty());
+    let git_branch = cached_git_branch(cwd);
 
     // TrueColor 24-bit gradient from spavn-symbol.svg (#B45CFF -> #7968FF -> #6EDFFF, center star #78EDFF)
     let logo_r1 = concat!(
@@ -140,8 +160,8 @@ pub fn render_welcome_header(
         format!("📂 {}{}{}", CYAN, short_cwd, RESET)
     };
     let row3_info = format!(
-        "🧠 {}{}{}{}💬 {}{}{}",
-        MAGENTA, endpoint.key, RESET, sep, DIM, short_session, RESET
+        "💬 {}{}{}",
+        DIM, short_session, RESET
     );
 
     let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();

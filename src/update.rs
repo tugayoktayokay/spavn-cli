@@ -1,8 +1,10 @@
 //! Release-update awareness.
 //!
-//! There is no auto-updater and no daemon: the binary compares its own
-//! `CARGO_PKG_VERSION` against the newest published tag and, when it is behind, tells the user
-//! which command to run. Nothing is downloaded or executed on the user's behalf.
+//! There is no auto-updater and no daemon that runs without you: the binary compares its own
+//! `CARGO_PKG_VERSION` against the newest published tag and, when it is behind, can both *tell*
+//! you which command to run (the narrow background check) and, on `/update`, *do* it — download
+//! the prebuilt release asset for this platform, replace the installed binary in place, and
+//! re-exec into it. Nothing is downloaded or executed on your behalf until you run `/update`.
 //!
 //! The check is deliberately narrow. It is one `GET` to the release endpoint derived from
 //! `CARGO_PKG_REPOSITORY` (or `updateCheckUrl`), it runs at most once per
@@ -90,7 +92,9 @@ pub fn repo_slug() -> Option<&'static str> {
 
 /// Release endpoint used by the background check: `updateCheckUrl`, else the GitHub API for the
 /// packaged repository. `None` means this build has nowhere to ask, so the check stays off.
-fn release_endpoint() -> Option<String> {
+/// Release endpoint used by the background check: `updateCheckUrl`, else the GitHub API for the
+/// packaged repository. `None` means this build has nowhere to ask, so the check stays off.
+pub fn release_endpoint() -> Option<String> {
     if let Some(custom) = load_user_config().update_check_url {
         let custom = custom.trim().to_string();
         return if custom.is_empty() {
@@ -150,7 +154,106 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     compare_versions(candidate, current) == Ordering::Greater
 }
 
-/// Upgrade command for the install channel this binary was launched from.
+/// Full cargo target triple for this host, matching the asset names `install.sh` builds.
+///
+/// A tiny OS+ARCH map keeps `/update` zero-dependency and deterministic (no `rustc` round-trip),
+/// and covers every platform whose prebuilt asset exists. `None` leaves the check-only path intact.
+pub fn target_triple() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        _ => None,
+    }
+}
+
+/// URL of the latest release's prebuilt asset for this platform: `spavn-{target}.tar.gz`.
+///
+/// A deterministic URL (no GitHub API round-trip) so `/update` can download in place directly.
+/// Returns `None` on platforms whose asset naming is unknown, leaving the check-only path intact.
+pub fn asset_url() -> Option<String> {
+    let slug = repo_slug()?;
+    let target = target_triple()?;
+    Some(format!(
+        "https://github.com/{slug}/releases/latest/download/spavn-{target}.tar.gz"
+    ))
+}
+
+/// Downloads and extracts the prebuilt release asset for this platform into a fresh temp dir,
+/// returning the path to the extracted `spavn` binary, or `None` on any failure.
+///
+/// Uses the system `curl` + `tar` (matching `install.sh`) so no Rust dependency is pulled in for
+/// gzip/tar handling. The temp dir is removed before returning so nothing lingers on disk.
+pub fn fetch_asset_binary() -> Option<PathBuf> {
+    let url = asset_url()?;
+    let base = std::env::temp_dir().join(format!(
+        "spavn-update-{}-{}",
+        std::env::consts::ARCH,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    ));
+    let _ = std::fs::create_dir_all(&base);
+    let tarball = base.join("spawn.tar.gz");
+
+    let downloaded = std::process::Command::new("curl")
+        .args(["-fsSL", &url, "-o", tarball.to_string_lossy().as_ref()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let bin_src = if downloaded {
+        let extracted = std::process::Command::new("tar")
+            .args([
+                "-xzf",
+                tarball.to_string_lossy().as_ref(),
+                "-C",
+                base.to_string_lossy().as_ref(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if extracted {
+            find_binary(&base)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let _ = std::fs::remove_dir_all(&base);
+    bin_src
+}
+
+/// Locates the extracted `spawn` binary: a flat one at the archive root first, then a recursive
+/// search under nested folders. Keeps `/update` resilient to how a release tarball is laid out.
+fn find_binary(dir: &std::path::Path) -> Option<PathBuf> {
+    let flat = dir.join("spawn");
+    if flat.exists() {
+        return Some(flat);
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find_binary(&path) {
+                    return Some(found);
+                }
+            } else if entry.file_name().to_str() == Some("spawn") {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 ///
 /// Detected from the executable path so the advice matches reality: a Homebrew or `cargo install`
 /// binary must not be told to run the curl installer, which would drop a second copy next to it.
@@ -401,5 +504,49 @@ mod tests {
         assert!(!should_park(Some("0.2.0"), "0.2.0"));
         assert!(should_park(Some("0.2.0"), "0.3.0"));
         assert!(should_park(None, "0.2.0"));
+    }
+
+    #[test]
+    fn target_triple_matches_install_sh_assets() {
+        let triple = target_triple().expect("known platform");
+        // Matches the TARGET values install.sh builds assets for.
+        assert!(triple.starts_with(std::env::consts::ARCH));
+        assert!(triple.contains("darwin") || triple.contains("linux"));
+    }
+
+    #[test]
+    fn asset_url_points_at_the_platform_asset() {
+        // repo_slug() is read from CARGO_PKG_REPOSITORY at compile time; the URL must embed it and
+        // the platform asset suffix so `/update` downloads the right tarball.
+        let url = asset_url().expect("known platform + repo");
+        assert!(url.starts_with("https://github.com/"));
+        assert!(url.contains("/releases/latest/download/spavn-"));
+        assert!(url.ends_with(".tar.gz"));
+    }
+
+    #[test]
+    fn find_binary_prefers_flat_archive_root() {
+        let dir = std::env::temp_dir().join(format!("spavn-find-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // A nested copy must be ignored when a flat one exists.
+        let nested = dir.join("pkg");
+        let _ = std::fs::create_dir_all(&nested);
+        let _ = std::fs::File::create(nested.join("spawn"));
+        let _ = std::fs::File::create(dir.join("spawn"));
+        assert_eq!(find_binary(&dir), Some(dir.join("spawn")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_binary_walks_nested_folders() {
+        let dir = std::env::temp_dir().join(format!(
+            "spavn-find-nested-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir.join("pkg"));
+        let found_path = dir.join("pkg").join("spawn");
+        let _ = std::fs::File::create(&found_path);
+        assert_eq!(find_binary(&dir), Some(found_path));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

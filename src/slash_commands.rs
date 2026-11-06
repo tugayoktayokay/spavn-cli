@@ -557,6 +557,7 @@ pub fn dispatch_slash_command(
                 "\n{}🧠 Active Model Selected: {}{}{}",
                 GREEN, BOLD, endpoint.label, RESET
             );
+            render_welcome_header(endpoint, ctx.access, &ctx.default_host, cwd, session_name);
         }
         return SlashOutcome::Handled;
     }
@@ -570,6 +571,7 @@ pub fn dispatch_slash_command(
             "\n{}🧠 Active Model: {}{}{}",
             GREEN, BOLD, endpoint.label, RESET
         );
+        render_welcome_header(endpoint, ctx.access, &ctx.default_host, cwd, session_name);
         return SlashOutcome::Handled;
     }
 
@@ -1355,8 +1357,80 @@ pub fn dispatch_slash_command(
             );
             return SlashOutcome::Handled;
         }
+
+        // OMP-style in-place upgrade: ask the release endpoint what is newest (this also refreshes
+        // the cache the banner reads), and when a native prebuilt asset exists for this platform,
+        // download it, replace the installed binary on a fresh inode, verify it execs, then re-exec
+        // into it — no manual command. Falls back to status/advice for cargo/brew/custom installs.
         match crate::update::check_now() {
-            Ok(Some(info)) => render_update_notice(&info),
+            Ok(Some(info)) => {
+                let Some(bin_src) = crate::update::fetch_asset_binary() else {
+                    render_update_notice(&info);
+                    return SlashOutcome::Handled;
+                };
+                let home = std::env::var("HOME").unwrap_or_default();
+                let home_bin = PathBuf::from(&home).join(".local/bin/spavn");
+                println!(
+                    "\n{}⬇️  v{} → v{} ...{}",
+                    GREEN, info.current, info.latest, RESET
+                );
+                if home_bin.parent().map(|p| p.exists()).unwrap_or(false)
+                    && stage_binary(&bin_src, &home_bin)
+                    && probe_binary(&home_bin)
+                {
+                    link_alias(&home_bin);
+                    let access_str = match ctx.access {
+                        AccessMode::Safe => "safe",
+                        AccessMode::Auto => "auto",
+                        AccessMode::Sovereign => "sovereign",
+                    };
+                    let session_path_str = session_file.to_string_lossy().to_string();
+                    let reload_args = [
+                        "-s",
+                        &session_path_str,
+                        "-m",
+                        &endpoint.key,
+                        "-a",
+                        access_str,
+                        "-P",
+                        active_phase.as_str(),
+                        "--host",
+                        &ctx.default_host,
+                    ];
+                    println!(
+                        "\n{}🔄 [SPAVN Update]: v{} installed, restarting...{}",
+                        GREEN, info.latest, RESET
+                    );
+                    #[cfg(unix)]
+                    {
+                        let _ = std::process::Command::new(&home_bin)
+                            .args(reload_args)
+                            .exec();
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        if let Ok(mut child) = std::process::Command::new(&home_bin)
+                            .args(reload_args)
+                            .spawn()
+                        {
+                            let _ = child.wait();
+                            std::process::exit(0);
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "{}⚠️ {} {}{}",
+                        YELLOW,
+                        home_bin.display(),
+                        tr_en(
+                            "çalıştırılamıyor, mevcut sürümle devam ediliyor.",
+                            "cannot exec, continuing on the current version."
+                        ),
+                        RESET
+                    );
+                }
+                return SlashOutcome::ExitLoop;
+            }
             Ok(None) => println!(
                 "\n{}✅ SPAVN v{} is up to date.{} ({}/{})",
                 GREEN,

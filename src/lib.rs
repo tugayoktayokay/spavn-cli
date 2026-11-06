@@ -29,6 +29,7 @@ pub mod ansi;
 pub mod approval;
 pub mod config;
 pub mod guard;
+pub mod harness;
 pub mod http;
 pub mod hud;
 pub mod markdown;

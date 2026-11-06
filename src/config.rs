@@ -534,22 +534,6 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
                     context_window: Some(1_000_000),
                 },
                 ModelConfigEntry {
-                    key: "claude-opus-4-6".to_string(),
-                    model_id: "claude-opus-4-6".to_string(),
-                    label: "Claude Opus 4.6".to_string(),
-                    badge: "🧠 Deep".to_string(),
-                    desc: "Anthropic Claude Opus 4.6 (1M context)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "claude-sonnet-4-6".to_string(),
-                    model_id: "claude-sonnet-4-6".to_string(),
-                    label: "Claude Sonnet 4.6".to_string(),
-                    badge: "⚡ Balanced".to_string(),
-                    desc: "Anthropic Claude Sonnet 4.6 (1M context)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
                     key: "sonnet".to_string(),
                     model_id: "claude-sonnet-5-5".to_string(),
                     label: "Sonnet (short name)".to_string(),

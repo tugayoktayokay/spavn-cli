@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-06 — `v0.2.3`: Local Model Context Retention Fix (Forget-on-Compaction)
+
+### Root Cause — Early Skeletonization on Local Models (`src/turn.rs`)
+- **Bug**: `compact_messages_for_model` computed the skeletonization budget as `(max_ctx_tokens / 4).clamp(4_000, 64_000)` for *all* models. For a 128k-window local model that threshold was **32k tokens (25% of the window)** — far too low. Compaction would hide prior tool results (`read`/`edit` output) before the turn anchor, and local models (which degrade badly on truncated context) forgot earlier work within a single session.
+- **Fix**: Budget is now model-aware. Local models skeletonize only at ~**50% of the window** (`(max_ctx_tokens / 2).clamp(8_000, 96_000)`), cloud stays at ~**25%** (unchanged). Small-window local models are clamped to a sane 8k–96k range so they never get an oversized budget.
+
+### Regression Tests (`src/turn.rs`)
+- `local_prune_budget_keeps_full_tool_output_until_50pct_window`: 160 tool steps (~50k tokens) sit above the old 32k local budget but below the new ~65k one — must stay full (was skeletonizing, now preserved).
+- `cloud_prune_budget_stays_at_25pct_window`: 240 tool steps (~74k tokens) past the 64k cloud budget still skeletonize — cloud behavior unchanged.
+
+### Bundled Changes in This Release
+- **In-session `/update` (`/upgrade`, `/upd`)**: On-demand version check with install-channel detection (Homebrew / cargo / `install.sh`).
+- **Automatic update notice**: Single background release check on startup at `updateCheckIntervalHours` intervals; never downloads or executes code automatically.
+- **i18n**: Remaining standalone Turkish strings wrapped in `tr_en()`.
+- **Installer**: Fixed prebuilt-asset fetch and source-build fallback in `install.sh`.
+
 ## 2026-11-06 — `v0.2.0`: Modular Core, Autonomous Harness Intelligence, JSON-RPC 2.0 Bridge & Stale-File Guard
 
 ### Architecture & Desktop Bridge (`src/tools/`, `src/router/`, `src/hud/`, `src/bridge.rs`)
