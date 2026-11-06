@@ -63,14 +63,12 @@ pub fn fetch_quick_quota_line() -> String {
 }
 
 pub fn render_welcome_header(
-    _endpoint: &ModelEndpoint,
+    endpoint: &ModelEndpoint,
     _access: AccessMode,
     _default_host: &str,
     cwd: &str,
     session_name: &str,
 ) {
-    let (_, cols) = term_size();
-    let full_w = cols.saturating_sub(2).max(6);
     let home = std::env::var("HOME").unwrap_or_default();
     let short_cwd = if !home.is_empty() && cwd.starts_with(&home) {
         let rest = &cwd[home.len()..];
@@ -82,7 +80,9 @@ pub fn render_welcome_header(
     } else {
         cwd.to_string()
     };
-    let short_session = session_name.trim_end_matches(".jsonl");
+    let short_session = session_name
+        .trim_end_matches(".jsonl")
+        .trim_start_matches("session-");
     let git_branch = Command::new("git")
         .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
         .output()
@@ -91,27 +91,63 @@ pub fn render_welcome_header(
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|b| !b.is_empty());
 
-    let p_top = format!("{}╭─{} ", CYAN, RESET);
-    let p_bot = format!("{}╰─{} ", CYAN, RESET);
+    // TrueColor 24-bit gradient from spavn-symbol.svg (#B45CFF -> #7968FF -> #6EDFFF, center star #78EDFF)
+    let logo_r1 = concat!(
+        "\x1b[38;2;180;92;255m▛",
+        "\x1b[38;2;166;96;255m▀",
+        "\x1b[38;2;148;100;255m▚",
+        " ",
+        "\x1b[38;2;128;118;255m▞",
+        "\x1b[38;2;118;150;255m▀",
+        "\x1b[38;2;110;185;255m▜\x1b[0m",
+    );
+    let logo_r2 = concat!(
+        "\x1b[38;2;166;96;255m▀",
+        " ",
+        "\x1b[38;2;135;140;255m▚",
+        "\x1b[1;38;2;120;237;255m✦\x1b[22m",
+        "\x1b[38;2;118;195;255m▞",
+        " ",
+        "\x1b[38;2;108;150;255m▀\x1b[0m",
+    );
+    let logo_r3 = concat!(
+        "\x1b[38;2;148;98;255m▙",
+        "\x1b[38;2;135;102;255m▄",
+        "\x1b[38;2;125;120;255m▞",
+        " ",
+        "\x1b[38;2;114;165;255m▚",
+        "\x1b[38;2;108;130;255m▄",
+        "\x1b[38;2;103;95;255m▟\x1b[0m",
+    );
+
     let sep = format!(" {}·{} ", DIM, RESET);
-    let mut row1_items = vec![
-        format!("{}⚡ SPAVN v{}{}", BOLD, env!("CARGO_PKG_VERSION"), RESET),
-        format!("📂 {}{}{}", DIM, short_cwd, RESET),
-    ];
-    if let Some(br) = git_branch {
-        row1_items.push(format!("🌿 {}{}{}", GREEN, br, RESET));
-    }
-    row1_items.push(format!(
-        "💬 {}{}{}",
-        DIM,
-        short_session.trim_start_matches("session-"),
+    let row1_info = format!(
+        "{}\x1b[38;2;180;92;255mS\x1b[38;2;156;98;255mP\x1b[38;2;132;112;255mA\x1b[38;2;118;162;255mV\x1b[38;2;120;237;255mN{} {}\x1b[38;2;166;96;255mv{}{}{}Autonomous Engineering Harness{}",
+        BOLD,
+        RESET,
+        BOLD,
+        env!("CARGO_PKG_VERSION"),
+        RESET,
+        sep,
         RESET
-    ));
+    );
+    let row2_info = if let Some(br) = git_branch {
+        format!(
+            "📂 {}{}{}{}🌿 {}{}{}",
+            DIM, short_cwd, RESET, sep, GREEN, br, RESET
+        )
+    } else {
+        format!("📂 {}{}{}", DIM, short_cwd, RESET)
+    };
+    let row3_info = format!(
+        "🧠 {}\x1b[38;2;120;237;255m{}{}{}💬 {}{}{}",
+        BOLD, endpoint.key, RESET, sep, DIM, short_session, RESET
+    );
 
     println!();
-    for line in flex_wrap_items(&p_top, &p_bot, &sep, &row1_items, full_w) {
-        println!("{}", line);
-    }
+    println!("  {}   {}", logo_r1, row1_info);
+    println!("  {}   {}", logo_r2, row2_info);
+    println!("  {}   {}", logo_r3, row3_info);
 }
 
 /// Boxed upgrade notice for the welcome banner and the input loop.
