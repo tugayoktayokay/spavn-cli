@@ -593,6 +593,22 @@ spavn --help                     # every flag, path and env var</code></pre></di
         catalog → free tier</strong>.
       </p>
 
+      <h3>Built-in frontier &amp; local model catalog</h3>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Provider</th><th>Key / Alias</th><th>Context Window</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Anthropic</strong></td><td><code>claude-opus-5-5</code> · <code>opus</code></td><td><code>1,000,000</code> (1M)</td><td>Claude Opus 5.5 flagship reasoning + native prompt caching</td></tr>
+            <tr><td><strong>Anthropic</strong></td><td><code>claude-sonnet-5-5</code> · <code>sonnet</code></td><td><code>1,000,000</code> (1M)</td><td>Claude Sonnet 5.5 high-speed engineering + native prompt caching</td></tr>
+            <tr><td><strong>Anthropic</strong></td><td><code>claude-opus-4-6</code> · <code>claude-sonnet-4-6</code></td><td><code>1,000,000</code> (1M)</td><td>Previous generation 1M context window models</td></tr>
+            <tr><td><strong>OpenAI</strong></td><td><code>gpt-5.4</code> · <code>gpt-5.3-codex</code> · <code>o4-mini</code></td><td><code>272K</code> – <code>400K</code></td><td>API key or OAuth PKCE via <code>/login</code></td></tr>
+            <tr><td><strong>Google Gemini</strong></td><td><code>gemini-2.5-pro</code> · <code>gemini-2.5-flash</code></td><td><code>1,048,576</code> (1M)</td><td><code>GEMINI_API_KEY</code></td></tr>
+            <tr><td><strong>DeepSeek / Groq / xAI</strong></td><td><code>deepseek-reasoner</code> · <code>llama-3.3-70b</code> · <code>grok-3</code></td><td><code>128K</code> – <code>131K</code></td><td>Native OpenAI-compatible SSE + reasoning stream</td></tr>
+            <tr><td><strong>Local GPU</strong></td><td><code>local:&lt;id&gt;</code> · <code>ollama:&lt;id&gt;</code></td><td>Auto-detected</td><td><code>llama-swap</code>, <code>llama.cpp</code>, Ollama, LM Studio with 1.5s warm-up retry</td></tr>
+          </tbody>
+        </table>
+      </div>
+
       <h3>Local models</h3>
       <div class="cb"><button class="copy" type="button">copy</button><pre><code># Ollama ships as a provider group at http://127.0.0.1:11434/v1 — zero config
 spavn --model ollama:qwen2.5-coder "refactor the spill module"
@@ -652,7 +668,7 @@ export SPAVN_LOCAL_BASE_URL=http://localhost:8080/v1</code></pre></div>
             <tr><td><code>/role</code></td><td>—</td><td><code>auto</code> · <code>coder</code> · <code>reviewer</code> · <code>security</code> · <code>test</code> · <code>docs</code> · <code>refactor</code></td></tr>
             <tr><td><code>/think</code></td><td>—</td><td>Toggle the reasoning stream</td></tr>
             <tr><td><code>/recap</code></td><td>—</td><td>Idle recap; <code>on</code> / <code>off</code> / <code>toggle</code></td></tr>
-            <tr><td><code>/todo</code></td><td><code>/tasks</code></td><td>Live task list; <code>done</code>, <code>clear</code></td></tr>
+            <tr><td><code>/todo</code></td><td><code>/tasks</code></td><td>Live task list; interactive arrow-key <code>/todo done</code> picker, <code>clear</code></td></tr>
             <tr><td><code>/queue</code></td><td><code>/qlist</code> <code>/qedit</code></td><td>Inspect / edit queued prompts</td></tr>
             <tr><td><code>/queue clear</code></td><td><code>/qclear</code> <code>/qcancel</code></td><td>Drop the queue and any steers</td></tr>
             <tr><td><code>/queue pop</code></td><td><code>/qpop</code></td><td>Pop the last queued prompt</td></tr>
@@ -667,7 +683,7 @@ export SPAVN_LOCAL_BASE_URL=http://localhost:8080/v1</code></pre></div>
             <tr><td><code>/stop</code></td><td><code>/cancel</code></td><td>Interrupt a running turn</td></tr>
             <tr><td><code>/diff</code></td><td><code>/d</code></td><td>Working-tree diff</td></tr>
             <tr><td><code>/commit</code></td><td><code>/cm</code></td><td>Commit helper</td></tr>
-            <tr><td><code>/undo</code></td><td><code>/u</code></td><td>Revert the last edit</td></tr>
+            <tr><td><code>/undo</code></td><td><code>/u</code></td><td>Revert the last <code>N</code> edits via transactional <code>UndoStack</code> (<code>/undo [N]</code>)</td></tr>
             <tr><td><code>/janitor</code></td><td><code>/j</code></td><td>Dead code / stray artifact sweep</td></tr>
             <tr><td><code>/audit</code></td><td>—</td><td>HMAC-chained action log, filterable by file</td></tr>
             <tr><td><code>/blame</code></td><td>—</td><td>Attribution for a path</td></tr>
