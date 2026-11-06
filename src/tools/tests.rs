@@ -267,8 +267,8 @@ mod timeout_tests {
 
     #[test]
     fn interactive_subshell_is_detached_from_controlling_tty() {
-        let mut c = Command::new("zsh");
-        c.args(["-i", "-c", "exit"]);
+        let mut c = Command::new("sh");
+        c.args(["-i", "-c", "exit 0"]);
         let (code, _, _, timed_out) = run_command_with_timeout(c, 5).unwrap();
         assert!(!timed_out);
         assert_eq!(code, 0);

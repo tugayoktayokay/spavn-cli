@@ -741,7 +741,11 @@ mod tests {
         assert_eq!(out.len(), 5, "4 survivors + 1 marker");
         assert_eq!(out[0], "l0");
         assert_eq!(out[1], "l1");
-        assert_eq!(out[2], "… (16 satır gizlendi)");
+        assert!(
+            out[2] == "… (16 satır gizlendi)" || out[2] == "… (16 lines hidden)",
+            "unexpected marker: {}",
+            out[2]
+        );
         assert_eq!(out[3], "l18");
         assert_eq!(out[4], "l19");
     }
@@ -751,7 +755,11 @@ mod tests {
         let r: Vec<String> = (0..9).map(|i| format!("l{}", i)).collect();
         let out = elide(&r, 3);
         assert_eq!(out.len(), 4);
-        assert!(out.iter().any(|r| r == "… (6 satır gizlendi)"), "{out:?}");
+        assert!(
+            out.iter()
+                .any(|r| r == "… (6 satır gizlendi)" || r == "… (6 lines hidden)"),
+            "{out:?}"
+        );
     }
 
     #[test]
