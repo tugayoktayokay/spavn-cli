@@ -59,7 +59,7 @@ fn refresh_system_prompt(
 /// Copies `src` onto a fresh inode beside `dest`, ad-hoc signs it on macOS, then renames it into
 /// place. Writing over the inode `dest` already points at leaves a stale code signature in the
 /// kernel cache, and the next `execve()` of that path is killed before `main()` runs.
-fn stage_binary(src: &Path, dest: &Path) -> bool {
+pub(crate) fn stage_binary(src: &Path, dest: &Path) -> bool {
     let Some(parent) = dest.parent() else {
         return false;
     };
@@ -90,7 +90,7 @@ fn stage_binary(src: &Path, dest: &Path) -> bool {
 ///
 /// A copy would be a second inode with its own signature to go stale, which is exactly how a
 /// working `spavn` and a killed `spvn` end up side by side.
-fn link_alias(binary: &Path) {
+pub(crate) fn link_alias(binary: &Path) {
     let Some(parent) = binary.parent() else {
         return;
     };
@@ -104,9 +104,9 @@ fn link_alias(binary: &Path) {
 
 /// True when `path` really execs, checked with `--version`.
 ///
-/// Staging plus a probe is what keeps a broken install from costing the session: without it the
+/// staging plus a probe is what keeps a broken install from costing the session: without it the
 /// loop execs the bad path and the terminal reports nothing but `[1] killed`.
-fn probe_binary(path: &Path) -> bool {
+pub(crate) fn probe_binary(path: &Path) -> bool {
     let mut child = match std::process::Command::new(path)
         .arg("--version")
         .stdin(std::process::Stdio::null())

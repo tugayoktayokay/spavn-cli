@@ -7,12 +7,14 @@
 //! re-exec into it. Nothing is downloaded or executed on your behalf until you run `/update`.
 //!
 //! The check is deliberately narrow. It is one `GET` to the release endpoint derived from
-//! `CARGO_PKG_REPOSITORY` (or `updateCheckUrl`), it runs at most once per
-//! `updateCheckIntervalHours`, it is skipped entirely when `updateCheck` is `false` or
-//! `SPAVN_UPDATE_CHECK=0`, and the result is cached in `<spavn_dir>/update-check.json` so a cold
-//! start never touches the network to render its banner.
+//! `CARGO_PKG_REPOSITORY` (or `updateCheckUrl`), it runs detatched at startup, it is skipped
+//! entirely when `updateCheck` is `false` or `SPAVN_UPDATE_CHECK=0`, and the result is cached in
+//! `<spavn_dir>/update-check.json` so a cold start never touches the network to render its banner.
+//! A cache that already holds a newer release stops further network checks; an "up to date"
+//! answer is re-verified on the next start, because a release published a minute after the last
+//! check must not stay invisible until the next interval elapses.
 
-use crate::config::{load_user_config, set_owner_only_mode, spavn_dir};
+use crate::config::{load_user_config, set_owner_only_mode, spavn_dir, tr_en};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fs;
@@ -385,19 +387,86 @@ fn should_park(already_surfaced: Option<&str>, latest: &str) -> bool {
     already_surfaced != Some(latest)
 }
 
-/// Refreshes the cache in a detached thread, at most once per `updateCheckIntervalHours`.
+/// True when the startup thread must not touch the network at all.
 ///
-/// Called once at startup. The thread is never joined and never prints: the notice surfaces
-/// through [`cached_notice`] on the next banner, so a slow network cannot delay the first prompt.
+/// A cache that already holds a newer release is a complete answer: the banner prints it and
+/// re-asking GitHub changes nothing. A cache that says "up to date" is only certain until the
+/// next release lands; treating it as fresh for a whole interval left releases published right
+/// after a check invisible, so such an answer never suppresses the next check.
+fn should_skip_check(cached: Option<&CachedCheck>) -> bool {
+    cached.is_some_and(|c| is_newer(&c.latest, CURRENT))
+}
+
+/// Result of a headless [`upgrade_installed_binary`] attempt.
+pub enum UpgradeOutcome {
+    /// No newer release published.
+    UpToDate,
+    /// A newer release exists but ships no native asset for this platform.
+    NoAsset(String),
+    /// Downloaded, staged on a fresh inode and probe-verified at `bin`.
+    Staged {
+        latest: String,
+        bin: std::path::PathBuf,
+    },
+    /// Network or release-lookup failure.
+    CheckError(String),
+}
+
+/// Headless in-place upgrade shared by the `spavn update` subcommand and `/update`.
+///
+/// Checks the release endpoint (which also refreshes the banner cache), downloads the prebuilt
+/// native asset when one exists, stages it onto `~/.local/bin/spavn` on a fresh inode, probes it
+/// and refreshes the `spvn` alias. Callers decide what to print and whether to re-exec.
+pub fn upgrade_installed_binary() -> UpgradeOutcome {
+    if is_check_disabled() {
+        return UpgradeOutcome::CheckError(
+            tr_en(
+                "Sürüm denetimi kapalı (updateCheck: false veya SPAVN_UPDATE_CHECK).",
+                "Update check is off (updateCheck: false or SPAVN_UPDATE_CHECK).",
+            )
+            .to_string(),
+        );
+    }
+    let info = match check_now() {
+        Ok(Some(info)) => info,
+        Ok(None) => return UpgradeOutcome::UpToDate,
+        Err(e) => return UpgradeOutcome::CheckError(e),
+    };
+    let Some(bin_src) = fetch_asset_binary() else {
+        return UpgradeOutcome::NoAsset(info.latest);
+    };
+    let home_bin = std::env::var("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".local/bin/spavn"))
+        .unwrap_or_default();
+    if !home_bin.parent().is_some_and(|p| p.exists())
+        || !crate::slash_commands::stage_binary(&bin_src, &home_bin)
+        || !crate::slash_commands::probe_binary(&home_bin)
+    {
+        return UpgradeOutcome::CheckError(
+            tr_en(
+                "ikili dosya yerleştirilemedi; geçerli sürümle devam ediliyor.",
+                "installed binary could not be staged; continuing on the current version.",
+            )
+            .to_string(),
+        );
+    }
+    crate::slash_commands::link_alias(&home_bin);
+    UpgradeOutcome::Staged {
+        latest: info.latest,
+        bin: home_bin,
+    }
+}
+
+/// Refreshes the cache in a detached thread on every startup.
+///
+/// The thread is never joined and never prints: the notice surfaces through [`cached_notice`]
+/// on the next banner, so a slow network cannot delay the first prompt.
 pub fn spawn_background_check() {
     if !check_enabled() {
         return;
     }
-    let interval = load_user_config().update_check_interval_hours.max(1) * 3_600;
-    if let Some(cached) = read_cache() {
-        if now_unix().saturating_sub(cached.checked_at) < interval {
-            return;
-        }
+    if should_skip_check(read_cache().as_ref()) {
+        return;
     }
     let _ = std::thread::Builder::new()
         .name("spavn-update-check".to_string())
@@ -448,6 +517,33 @@ mod tests {
         assert!(!is_newer("", CURRENT));
         assert!(!is_newer("not-a-version", CURRENT));
         assert!(is_newer("999.0.0", CURRENT));
+    }
+
+    #[test]
+    fn skip_check_only_when_cache_holds_a_newer_release() {
+        let now = now_unix();
+        // An "up to date" answer never suppresses the next check: a release published right
+        // after this cache was written must still be noticed on the next start.
+        let fresh = CachedCheck {
+            checked_at: now,
+            latest: CURRENT.to_string(),
+            url: String::new(),
+        };
+        assert!(!should_skip_check(Some(&fresh)));
+        assert!(!should_skip_check(None));
+        let newer = CachedCheck {
+            checked_at: now,
+            latest: "9.9.9".to_string(),
+            url: String::new(),
+        };
+        assert!(should_skip_check(Some(&newer)));
+        // A cache older than the interval is also no excuse when it holds a newer release...
+        let stale_up_to_date = CachedCheck {
+            checked_at: now.saturating_sub(90_000),
+            latest: CURRENT.to_string(),
+            url: String::new(),
+        };
+        assert!(!should_skip_check(Some(&stale_up_to_date)));
     }
 
     #[test]
@@ -539,10 +635,7 @@ mod tests {
 
     #[test]
     fn find_binary_walks_nested_folders() {
-        let dir = std::env::temp_dir().join(format!(
-            "spavn-find-nested-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("spavn-find-nested-{}", std::process::id()));
         let _ = std::fs::create_dir_all(dir.join("pkg"));
         let found_path = dir.join("pkg").join("spawn");
         let _ = std::fs::File::create(&found_path);

@@ -145,6 +145,35 @@ fn main() {
                 );
                 return;
             }
+            "update" | "upgrade" if i == 0 => {
+                match spavn::update::upgrade_installed_binary() {
+                    spavn::update::UpgradeOutcome::UpToDate => println!(
+                        "spavn v{} güncel — daha yeni sürüm yok.",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    spavn::update::UpgradeOutcome::NoAsset(latest) => {
+                        println!(
+                            "v{latest} yayında ama bu platform ({}/{}) için hazır ikili yok.",
+                            std::env::consts::OS,
+                            std::env::consts::ARCH
+                        );
+                        println!(
+                            "Elle güncelle: curl -fsSL https://raw.githubusercontent.com/{}/main/install.sh | sh",
+                            spavn::update::repo_slug().unwrap_or("tugayoktayokay/spavn-cli")
+                        );
+                    }
+                    spavn::update::UpgradeOutcome::Staged { latest, bin } => println!(
+                        "spavn v{} → v{latest} kuruldu ({}) — yeni sürümü bir sonraki başlatışta kullan.",
+                        env!("CARGO_PKG_VERSION"),
+                        bin.display()
+                    ),
+                    spavn::update::UpgradeOutcome::CheckError(e) => {
+                        eprintln!("Güncelleme başarısız: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             "-h" | "--help" => {
                 println!(
                     "SPAVN v{} ({}/{}) — Native Rust Coding Agent & Harness\n\
