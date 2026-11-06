@@ -433,7 +433,7 @@ pub fn interactive_select_slash_command() -> Option<String> {
             ),
             desc: tr_en(
                 "CLI arayüz dilini değiştir (Türkçe ⇄ English)",
-                "Switch CLI interface language (English ⇄ Türkçe)",
+                "Switch CLI interface language (English ⇄ Turkish)",
             )
             .to_string(),
         },
@@ -758,9 +758,19 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
         }
         let has_key = byok_group.is_local || resolve_api_key(&byok_group.api_key_env).is_some();
         let key_status = if has_key {
-            format!("{}🔑 Hazır{}", GREEN, RESET)
+            format!(
+                "{}🔑 {}{}",
+                GREEN,
+                crate::config::tr_en("Hazır", "Ready"),
+                RESET
+            )
         } else {
-            format!("{}🔒 /byok ile anahtar gir{}", YELLOW, RESET)
+            format!(
+                "{}🔒 {}{}",
+                YELLOW,
+                crate::config::tr_en("/byok ile anahtar gir", "/byok to enter key"),
+                RESET
+            )
         };
         let items: Vec<MenuItem> = byok_group
             .models
@@ -850,7 +860,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
             }
             let mut out = format!("\x1b[?2026h\x1b[?7l\x1b[{}A\r\x1b[J", total_lines);
             let raw_hdr = format!(
-                "{}╭─ {} {}(←/→: Sütun · ↑/↓: Seç · Yaz: ara · Enter · Esc){} ",
+                "{}╭─ {} {}(←/→: Column · ↑/↓: Select · Type to search · Enter · Esc){} ",
                 CYAN,
                 tr_en("🧠 MODEL SEÇİMİ", "🧠 SELECT MODEL"),
                 YELLOW,

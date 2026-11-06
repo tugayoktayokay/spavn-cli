@@ -178,7 +178,7 @@ pub fn dispatch_slash_command(
         reset_scroll_region();
         let skill_count = discover_skills().len();
         println!(
-            "\n{}🔄 [SPAVN Canlı Reload]: Binary, sistem çekirdeği ve {} yetenek (skill) oturum korunarak yenileniyor...{}",
+            "\n{}🔄 [SPAVN Live Reload]: Binary, system core and {} skills reloaded with session preserved...{}",
             GREEN, skill_count, RESET
         );
         let exe_path = {
@@ -294,7 +294,7 @@ pub fn dispatch_slash_command(
             let _ = config::save_user_config(&cfg);
             refresh_system_prompt(cwd, endpoint, session_file, messages);
             println!(
-                "\n{}🧠 Aktif Model Seçildi: {}{}{}",
+                "\n{}🧠 Active Model Selected: {}{}{}",
                 GREEN, BOLD, endpoint.label, RESET
             );
         }
@@ -310,7 +310,7 @@ pub fn dispatch_slash_command(
             let label = if chosen_lang == "en" {
                 "🇬🇧 English (EN)"
             } else {
-                "🇹🇷 Türkçe (TR)"
+                tr_en("🇹🇷 Türkçe (TR)", "🇹🇷 Turkish (TR)")
             };
             println!(
                 "\n{}🌐 {}: {}{}{}",
@@ -343,7 +343,7 @@ pub fn dispatch_slash_command(
             if is_en() {
                 "🇬🇧 English (EN)"
             } else {
-                "🇹🇷 Türkçe (TR)"
+                tr_en("🇹🇷 Türkçe (TR)", "🇹🇷 Turkish (TR)")
             },
             RESET
         );
@@ -392,10 +392,10 @@ pub fn dispatch_slash_command(
     if let Some(rest) = input.strip_prefix("/queue ") {
         push_queued_message(rest.trim().to_string());
         println!(
-            "\n{}📥 Mesaj kuyruğa eklendi (#{}): {}{}{}",
+            "\n{}📥 {}: #{}: {}{}",
             GREEN,
+            tr_en("Mesaj kuyruğa eklendi", "Message added to queue"),
             queued_message_count(),
-            BOLD,
             rest.trim(),
             RESET
         );
@@ -406,7 +406,7 @@ pub fn dispatch_slash_command(
         if let Some(chosen_skill) = interactive_select_skill() {
             if let Some((entry, content)) = load_skill_content(&chosen_skill) {
                 let skill_msg = ChatMessage::user(format!(
-                    "<active_skill name=\"{}\" path=\"{}\">\n{}\n</active_skill>\n(Yukarıdaki @{} yeteneği oturuma yüklendi.)",
+                    "<active_skill name=\"{}\" path=\"{}\">\n{}\n</active_skill>\n(The above @{} skill was loaded into the session.)",
                     entry.name,
                     entry.path.display(),
                     content.trim(),
@@ -415,7 +415,7 @@ pub fn dispatch_slash_command(
                 append_message(session_file, &skill_msg);
                 messages.push(skill_msg);
                 println!(
-                    "\n{}🧩 Yetenek aktif oturuma yüklendi: @{}{} ({})",
+                    "\n{}🧩 Skill loaded into active session: @{}{} ({})",
                     GREEN, BOLD, entry.name, entry.summary
                 );
             }
@@ -430,8 +430,13 @@ pub fn dispatch_slash_command(
         let rules = parts.next().unwrap_or("").trim();
         if name.is_empty() || rules.is_empty() {
             println!(
-                "{}Kullanım: /skill add <ad> <talimat/kural metni>{}",
-                YELLOW, RESET
+                "{}{}{}",
+                YELLOW,
+        tr_en(
+                    "Kullanım: /skill add <ad> <talimat/kural metni>",
+                    "Usage: /skill add <name> <instruction/rule text>"
+                ),
+                RESET
             );
         } else {
             match save_custom_skill(name, rules) {
@@ -464,7 +469,7 @@ pub fn dispatch_slash_command(
                 CYAN, RESET
             );
         } else {
-            println!("\n{}Yetenek bulunamadı: {}{}", YELLOW, rest, RESET);
+            println!("\n{}Skill not found: {}{}", YELLOW, rest, RESET);
         }
         return SlashOutcome::Handled;
     }
@@ -480,7 +485,7 @@ pub fn dispatch_slash_command(
         if let Some(chosen_access) = interactive_select_access(ctx.access) {
             ctx.access = chosen_access;
             println!(
-                "\n{}🛡️  Erişim Yetki Modu seçildi: {}{}{}",
+                "\n{}🛡️  Access Mode Selected: {}{}{}",
                 GREEN,
                 BOLD,
                 ctx.access.badge(),
@@ -493,7 +498,7 @@ pub fn dispatch_slash_command(
         if let Some(m) = AccessMode::parse_alias(rest) {
             ctx.access = m;
             println!(
-                "\n{}🛡️  Erişim Yetki Modu ayarlandı: {}{}{}",
+                "\n{}🛡️  Access Mode Set: {}{}{}",
                 GREEN,
                 BOLD,
                 ctx.access.badge(),
@@ -501,8 +506,13 @@ pub fn dispatch_slash_command(
             );
         } else {
             println!(
-                "{}Kullanım: /access <safe | auto | sovereign>{}",
-                YELLOW, RESET
+                "{}{}{}",
+                YELLOW,
+        tr_en(
+                    "Kullanım: /access <safe | auto | sovereign>",
+                    "Usage: /access <safe | auto | sovereign>"
+                ),
+                RESET
             );
         }
         return SlashOutcome::Handled;
@@ -522,12 +532,12 @@ pub fn dispatch_slash_command(
             ctx.phase = next;
             if next == AgentPhase::Plan {
                 println!(
-                    "\n{}📐 PLAN — salt-okunur: write/edit/bash kilitli. Planı yaz, kullanıcı /code ile açar.{}",
+                    "\n{}📐 PLAN — read-only: write/edit/bash locked. Write the plan; the user opens it with /code.{}",
                     MAGENTA, RESET
                 );
             } else {
                 println!(
-                    "\n{}💻 CODE — değişiklikler açık; yukarıdaki plan referans.{}",
+                    "\n{}💻 CODE — changes open; refer to the plan above.{}",
                     GREEN, RESET
                 );
             }
@@ -544,7 +554,7 @@ pub fn dispatch_slash_command(
             let _ = config::save_user_config(&cfg);
             refresh_system_prompt(cwd, endpoint, session_file, messages);
             println!(
-                "\n{}🧠 Aktif Model Seçildi: {}{}{}",
+                "\n{}🧠 Active Model Selected: {}{}{}",
                 GREEN, BOLD, endpoint.label, RESET
             );
         }
@@ -557,7 +567,7 @@ pub fn dispatch_slash_command(
         let _ = config::save_user_config(&cfg);
         refresh_system_prompt(cwd, endpoint, session_file, messages);
         println!(
-            "\n{}🧠 Aktif Model: {}{}{}",
+            "\n{}🧠 Active Model: {}{}{}",
             GREEN, BOLD, endpoint.label, RESET
         );
         return SlashOutcome::Handled;
@@ -567,7 +577,7 @@ pub fn dispatch_slash_command(
         if let Some(chosen_host) = interactive_select_host(&ctx.default_host) {
             ctx.default_host = chosen_host;
             println!(
-                "\n{}🖥️  Varsayılan Hedef Cihaz Seçildi: {}{}{}",
+                "\n{}🖥️  Default Target Device Selected: {}{}{}",
                 MAGENTA, BOLD, ctx.default_host, RESET
             );
         }
@@ -576,7 +586,7 @@ pub fn dispatch_slash_command(
     if let Some(rest) = input.strip_prefix("/host ") {
         ctx.default_host = rest.trim().to_string();
         println!(
-            "\n{}🖥️  Varsayılan Hedef Cihaz: {}{}{}",
+            "\n{}🖥️  Default Target Device: {}{}{}",
             MAGENTA, BOLD, ctx.default_host, RESET
         );
         return SlashOutcome::Handled;
@@ -675,11 +685,12 @@ pub fn dispatch_slash_command(
                     CYAN, RESET, BOLD, bench_ep.label, RESET
                 );
                 println!(
-                    "{}│{}  • TTFT        : {}{} ms{} (VRAM yükleme + prefill)",
-                    CYAN, RESET, CYAN, cr.ttft_ms, RESET
+                    "{}│{}  • TTFT        : {}{} ms{} {}",
+                    CYAN, RESET, CYAN, cr.ttft_ms, RESET,
+                    tr_en("(VRAM yükleme + prefill)", "(VRAM load + prefill)")
                 );
                 println!(
-                    "{}│{}  • Hız (Decode): {}{:.1} tok/s{} ({:.2}s üretim / {:.2}s toplam)",
+                    "{}│{}  • Speed (Decode): {}{:.1} tok/s{} ({:.2}s production / {:.2}s total)",
                     CYAN, RESET, GREEN, tok_per_sec, RESET, decode_sec, total_sec
                 );
                 println!("{}│{}  • Tool-Call   : {}", CYAN, RESET, tool_badge);
@@ -690,7 +701,7 @@ pub fn dispatch_slash_command(
             }
             Err(e) => {
                 println!(
-                    "\n{}✗ Benchmark hatası ({}): {}{}",
+                    "\n{}✗ Benchmark error ({}): {}{}",
                     RED, bench_ep.key, e, RESET
                 );
             }
@@ -748,9 +759,9 @@ pub fn dispatch_slash_command(
             }
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr);
-                println!("\n{}✗ Git diff hatası: {}{}", RED, err.trim(), RESET);
+                println!("\n{}✗ Git diff error: {}{}", RED, err.trim(), RESET);
             }
-            Err(e) => println!("\n{}✗ Git komutu çalıştırılamadı: {}{}", RED, e, RESET),
+            Err(e) => println!("\n{}✗ Git command failed: {}{}", RED, e, RESET),
         }
         return SlashOutcome::Handled;
     }
@@ -845,7 +856,7 @@ pub fn dispatch_slash_command(
         }
         let clean = ans.trim().to_lowercase();
         if !matches!(clean.as_str(), "e" | "evet" | "y" | "yes") {
-            println!("{}✗ Commit iptal edildi.{}\n", YELLOW, RESET);
+            println!("{}✗ Commit cancelled.{}\n", YELLOW, RESET);
             return SlashOutcome::Handled;
         }
 
@@ -855,7 +866,7 @@ pub fn dispatch_slash_command(
             .map(|s| s.success())
             .unwrap_or(false);
         if !add_ok {
-            println!("{}✗ git add başarısız.{}\n", RED, RESET);
+            println!("{}✗ git add failed.{}\n", RED, RESET);
             return SlashOutcome::Handled;
         }
 
@@ -871,9 +882,9 @@ pub fn dispatch_slash_command(
             ),
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr);
-                println!("{}✗ Commit başarısız: {}{}\n", RED, err.trim(), RESET);
+                println!("{}✗ Commit failed: {}{}\n", RED, err.trim(), RESET);
             }
-            Err(e) => println!("{}✗ Git hatası: {}{}\n", RED, e, RESET),
+            Err(e) => println!("{}✗ Git error: {}{}\n", RED, e, RESET),
         }
         return SlashOutcome::Handled;
     }
@@ -881,7 +892,7 @@ pub fn dispatch_slash_command(
     if input == "/undo" || input == "/u" {
         match ctx.pop_undo() {
             Some(msg) => println!("\n{}{}{}", GREEN, msg, RESET),
-            None => println!("\n{}Geri alınacak dosya değişikliği yok.{}", YELLOW, RESET),
+            None => println!("\n{}No file change to undo.{}", YELLOW, RESET),
         }
         return SlashOutcome::Handled;
     }
@@ -1013,7 +1024,7 @@ pub fn dispatch_slash_command(
     if input == "/think" {
         *show_thinking = !*show_thinking;
         println!(
-            "\n{}💭 Düşünce Akışı: {}{}",
+            "\n{}💭 Thinking Flow: {}{}",
             DIM,
             if *show_thinking { "AÇIK" } else { "KAPALI" },
             RESET
@@ -1121,7 +1132,7 @@ pub fn dispatch_slash_command(
         setup_scroll_region();
         render_welcome_header(endpoint, ctx.access, &ctx.default_host, cwd, session_name);
         println!(
-            "\n{}✨ Yeni temiz oturum başlatıldı: {}{}{}",
+            "\n{}✨ Fresh clean session started: {}{}{}",
             GREEN, BOLD, session_name, RESET
         );
         return SlashOutcome::Handled;
@@ -1135,7 +1146,7 @@ pub fn dispatch_slash_command(
             .to_string_lossy()
             .to_string();
         println!(
-            "\n{}🌿 Mevcut oturum yeni dosyaya klonlanıp dallandırıldı: {}{}{} ({} mesaj korundu)",
+            "\n{}🌿 Current session cloned and branched to a new file: {}{}{} ({} messages kept)",
             GREEN,
             BOLD,
             session_name,
@@ -1199,8 +1210,13 @@ pub fn dispatch_slash_command(
             }
         } else {
             println!(
-                "{}Kullanım: /role <auto|coder|reviewer|security|test|docs|refactor> [isteğe bağlı görev]{}",
-                YELLOW, RESET
+                "{}{}{}",
+                YELLOW,
+        tr_en(
+                    "Kullanım: /role <auto|coder|reviewer|security|test|docs|refactor> [isteğe bağlı görev]",
+                    "Usage: /role <auto|coder|reviewer|security|test|docs|refactor> [optional task]"
+                ),
+                RESET
             );
         }
         return SlashOutcome::Handled;
@@ -1243,7 +1259,7 @@ pub fn dispatch_slash_command(
                 ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         }
         println!(
-            "\n{}📌 Proje bağlamına sabitlendi (#{}): {}{}{}",
+            "\n{}📌 Pinned to project context (#{}): {}{}{}",
             GREEN, pin.id, BOLD, pin.content, RESET
         );
         return SlashOutcome::Handled;
@@ -1257,9 +1273,9 @@ pub fn dispatch_slash_command(
                         endpoint.wants_compact_prompt(),
                     ));
                 }
-                println!("\n{}🗑️  Sabitlenmiş not silindi: #{}{}", GREEN, id, RESET);
+                println!("\n{}🗑️  Pinned note deleted: #{}{}", GREEN, id, RESET);
             } else {
-                println!("\n{}Pin bulunamadı: #{}{}", YELLOW, id, RESET);
+                println!("\n{}Pin not found: #{}{}", YELLOW, id, RESET);
             }
         }
         return SlashOutcome::Handled;
@@ -1279,11 +1295,11 @@ pub fn dispatch_slash_command(
                     ));
                 }
                 println!(
-                    "\n{}✅ Hedef tamamlandı olarak işaretlendi: #{}{}",
+                    "\n{}✅ Target marked as completed: #{}{}",
                     GREEN, id, RESET
                 );
             } else {
-                println!("\n{}Hedef bulunamadı: #{}{}", YELLOW, id, RESET);
+                println!("\n{}Target not found: #{}{}", YELLOW, id, RESET);
             }
         }
         return SlashOutcome::Handled;
@@ -1342,53 +1358,53 @@ pub fn dispatch_slash_command(
         match crate::update::check_now() {
             Ok(Some(info)) => render_update_notice(&info),
             Ok(None) => println!(
-                "\n{}✅ SPAVN v{} güncel.{} ({}/{})",
+                "\n{}✅ SPAVN v{} is up to date.{} ({}/{})",
                 GREEN,
                 env!("CARGO_PKG_VERSION"),
                 RESET,
                 std::env::consts::OS,
                 std::env::consts::ARCH
             ),
-            Err(e) => println!("\n{}⚠️  Sürüm denetimi yapılamadı: {}{}", YELLOW, e, RESET),
+            Err(e) => println!("\n{}⚠️  Version check failed: {}{}", YELLOW, e, RESET),
         }
         return SlashOutcome::Handled;
     }
 
     if input == "/help" {
         println!(
-            "\n{}╭─ ⚡ SPAVN v0.1 KOMUTLAR, BYOK & MOTOR ÖZELLİKLERİ ──────────────────────────{}",
+            "\n{}╭─ ⚡ SPAVN v0.1 COMMANDS, BYOK & ENGINE FEATURES ──────────────────────────{}",
             CYAN, RESET
         );
         println!(
-            "{}│{}  {}/ (veya /menu){}                Etkileşimli yön tuşlu ana komut menüsü",
+            "{}│{}  {}/ (veya /menu){}                Interactive arrow-key main command menu",
             CYAN, RESET, BOLD, RESET
         );
-        println!("{}│{}  {}/model (/m) · /local{}          İki sütunlu Sağlayıcı (←/→) & Model (↑/↓) seçici", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/bench [model]{}                Aktif/belirtilen modelde TTFT, tok/s ve Tool-Call testi", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/byok (/b){}                    BYOK API Anahtarı & Özel Sağlayıcı (Base URL) yöneticisi", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/login · /provider (/connect){} Sağlayıcıya doğrudan giriş (CLI Auth, Tarayıcı veya Yerel Sunucu)", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/queue (/qlist){}               Mesaj Kuyruğu düzenleme & Canlı Müdahale (Steer/Queue) modu", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/resume (-r) · /new · /fork{}   Geçmiş oturum seçici, yeni oturum ve dallandırma", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/recap (/recap toggle){}        Oturumun son adım özeti (※ recap:) ve 6s boşta kalma özeti", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/role{}                         Spavn uzmanlık rolü (Auto/Coder/Reviewer/Security/Test/Docs/Refactor)", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/model (/m) · /local{}          Two-column Provider (←/→) & Model (↑/↓) picker", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/bench [model]{}                TTFT, tok/s and Tool-Call test on active/specified model", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/byok (/b){}                    BYOK API Key & Custom Provider (Base URL) manager", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/login · /provider (/connect){} Direct provider login (CLI Auth, Browser or Local Server)", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/queue (/qlist){}               Message queue editing & live steer (Steer/Queue) mode", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/resume (-r) · /new · /fork{}   Session history picker, new session and branching", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/recap (/recap toggle){}        Last-step summary of the session (※ recap:) and 6s idle recap", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/role{}                         Spavn specialist role (Auto/Coder/Reviewer/Security/Test/Docs/Refactor)", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/plan · /code · \\{}             Faz: 📐 PLAN (salt-okunur) ↔ 💻 CODE (uygulama)", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/janitor (/j){}                 Spavn Janitor kalite kapılarını (check/types/lint/test) koş", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}/audit · /blame <dosya>{}       HMAC zincirli AI aksiyon ve dosya değişim izi", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/janitor (/j){}                 Run Spavn Janitor quality gates (check/types/lint/test)", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/audit · /blame <dosya>{}       HMAC-linked AI action and file-change audit trail", CYAN, RESET, BOLD, RESET);
         println!(
-            "{}│{}  {}/diff [/yol] · /commit [mesaj]{} Git değişiklikleri ve onaylı akıllı commit",
+            "{}│{}  {}/diff [/yol] · /commit [mesaj]{} Git changes and approved smart commit",
             CYAN, RESET, BOLD, RESET
         );
-        println!("{}│{}  {}/wiki (/w){}                    Anlık proje modül ve mimari haritası (Repo Wiki)", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/wiki (/w){}                    Live project module & architecture map (Repo Wiki)", CYAN, RESET, BOLD, RESET);
         println!(
-            "{}│{}  {}/pin <not> · /unpin <id>{}      Proje bağlamına kalıcı mimari kural sabitle",
+            "{}│{}  {}/pin <not> · /unpin <id>{}      Pin a permanent architectural rule to the project context",
             CYAN, RESET, BOLD, RESET
         );
         println!(
-            "{}│{}  {}/goal <hedef> · /goal done N{}  Proje hedeflerini kaydet ve takip et",
+            "{}│{}  {}/goal <hedef> · /goal done N{}  Save and track project goals",
             CYAN, RESET, BOLD, RESET
         );
-        println!("{}│{}  {}/update (/upgrade){}           Yeni sürüm denetimi; güncelleme komutunu yazdır", CYAN, RESET, BOLD, RESET);
-        println!("{}│{}  {}Shift+Tab · Esc · Ctrl+R{}      Yetki değiştir · İşlemi/Menüyü iptal et · Canlı Reload", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/update (/upgrade){}           New version check; print the update command", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}Shift+Tab · Esc · Ctrl+R{}      Change permission · Cancel action/menu · Live reload", CYAN, RESET, BOLD, RESET);
         println!(
             "{}╰────────────────────────────────────────────────────────────────────────────{}",
             CYAN, RESET

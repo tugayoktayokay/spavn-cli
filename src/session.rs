@@ -186,13 +186,20 @@ fn clean_user_preview(raw: &str) -> String {
 fn format_relative_age(now_secs: u64, mtime_secs: u64) -> String {
     let diff = now_secs.saturating_sub(mtime_secs);
     if diff < 60 {
-        format!("{}sn önce", diff.max(1))
+        format!("{}{}", diff.max(1), tr_en("sn önce", "s ago").to_owned())
     } else if diff < 3600 {
-        format!("{}dk önce", diff / 60)
+        format!("{}{}", diff / 60, tr_en("dk önce", "m ago").to_owned())
     } else if diff < 86400 {
-        format!("{}sa {}dk önce", diff / 3600, (diff % 3600) / 60)
+        let hrs = (diff / 3600).to_string();
+        let mins = ((diff % 3600) / 60).to_string();
+        format!(
+            "{}",
+            tr_en("{}sa {}dk önce", "{}h {}m ago")
+                .replace("{0}", &hrs)
+                .replace("{1}", &mins)
+        )
     } else {
-        format!("{} gün önce", diff / 86400)
+        format!("{}{}", diff / 86400, tr_en("gün önce", "d ago").to_owned())
     }
 }
 
@@ -248,7 +255,7 @@ pub fn list_recent_sessions(limit: usize) -> Vec<SessionSummary> {
         } else if !first_user.is_empty() {
             first_user
         } else {
-            "(Boş oturum)".to_string()
+            tr_en("(Boş oturum)", "(Empty session)").to_owned()
         };
         let filename = path
             .file_name()
@@ -473,10 +480,14 @@ pub fn perform_manual_compact(
 ) {
     if messages.len() <= 3 {
         println!(
-            "\n{}🗜️  Bağlam zaten çok kısa ({} mesaj, ~{} token).{}",
+            "\n{}🗜️  {}{}",
             DIM,
-            messages.len(),
-            estimate_tokens(messages),
+            tr_en(
+                "Bağlam zaten çok kısa ({} mesaj, ~{} token).",
+                "Context is already very short ({} messages, ~{} tokens)."
+            )
+            .replace("{0}", &messages.len().to_string())
+            .replace("{1}", &estimate_tokens(messages).to_string()),
             RESET
         );
         return;
@@ -727,8 +738,16 @@ pub fn perform_manual_compact(
     let after_tok = estimate_tokens(messages);
     let saved_pct = ((before_tok.saturating_sub(after_tok)) * 100) / before_tok.max(1);
     println!(
-        "\n{}🗜️  [Compact Tamamlandı]: ~{} tok -> ~{} tok (%{} bağlam tasarrufu){}",
-        GREEN, before_tok, after_tok, saved_pct, RESET
+        "\n{}{}{}",
+        GREEN,
+        tr_en(
+            "[Compact Tamamlandı]: ~{} tok -> ~{} tok (%{} bağlam tasarrufu)",
+            "[Compact Done]: ~{} tok -> ~{} tok ({}% context saved)"
+        )
+        .replace("{0}", &before_tok.to_string())
+        .replace("{1}", &after_tok.to_string())
+        .replace("{2}", &saved_pct.to_string()),
+        RESET
     );
 }
 

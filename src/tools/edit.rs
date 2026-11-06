@@ -1064,11 +1064,12 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                     .unwrap_or("");
                 let leaked_secrets = crate::spavn_engine::detect_secrets_in_text(sub_new);
                 if !leaked_secrets.is_empty() && ctx.access != AccessMode::Sovereign {
-                    let secret_msg = format!(
+                    let secret_msg = crate::config::tr_en(
                         "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
-                        raw_path,
-                        leaked_secrets.join(", ")
-                    );
+                        "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
+                    )
+                    .replace("{0}", &raw_path)
+                    .replace("{1}", &leaked_secrets.join(", "));
                     if !prompt_user_approval(ctx, &secret_msg, sub_new) {
                         return format!(
                             "BLOCKED by SPAVN Secret Guard: {} contains potential secret(s): {}. Use environment variables instead.",
@@ -1081,11 +1082,12 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
             if ctx.access == AccessMode::Safe
                 && !prompt_user_approval(
                     ctx,
-                    &format!(
-                        "Çoklu Dosya Düzenleme (edit {} hunk): {}",
-                        edits_arr.len(),
-                        raw_path
-                    ),
+                    &crate::config::tr_en(
+                        "Çoklu Dosya Düzenleme ({} hunk): {}",
+                        "Multi-File Edit ({} hunk): {}"
+                    )
+                    .replace("{0}", &edits_arr.len().to_string())
+                    .replace("{1}", &raw_path),
                     raw_path,
                 )
             {
@@ -1267,11 +1269,12 @@ fn exec_edit_single_with_range(
 
     let leaked_secrets = crate::spavn_engine::detect_secrets_in_text(new_text);
     if !leaked_secrets.is_empty() && ctx.access != AccessMode::Sovereign {
-        let secret_msg = format!(
+        let secret_msg = crate::config::tr_en(
             "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
-            raw_path,
-            leaked_secrets.join(", ")
-        );
+            "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
+        )
+        .replace("{0}", &raw_path)
+        .replace("{1}", &leaked_secrets.join(", "));
         if !prompt_user_approval(ctx, &secret_msg, new_text) {
             return format!(
                 "BLOCKED by SPAVN Secret Guard: {} contains potential secret(s): {}. Use environment variables instead.",
@@ -1284,7 +1287,11 @@ fn exec_edit_single_with_range(
     if ctx.access == AccessMode::Safe
         && !prompt_user_approval(
             ctx,
-            &format!("Dosya Düzenleme (edit): {}", raw_path),
+            &crate::config::tr_en(
+                "Dosya Düzenleme (edit): {}",
+                "File Edit (edit): {}"
+            )
+            .replace("{0}", &raw_path),
             new_text,
         )
     {
@@ -1941,11 +1948,12 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
 
     let leaked_secrets = crate::spavn_engine::detect_secrets_in_text(content);
     if !leaked_secrets.is_empty() && ctx.access != AccessMode::Sovereign {
-        let secret_msg = format!(
+        let secret_msg = crate::config::tr_en(
             "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
-            raw_path,
-            leaked_secrets.join(", ")
-        );
+            "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
+        )
+        .replace("{0}", &raw_path)
+        .replace("{1}", &leaked_secrets.join(", "));
         if !prompt_user_approval(ctx, &secret_msg, content) {
             return format!(
                 "BLOCKED by SPAVN Secret Guard: {} contains potential secret(s): {}. Use environment variables instead.",

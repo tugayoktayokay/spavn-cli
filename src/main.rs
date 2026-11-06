@@ -302,8 +302,9 @@ fn main() {
         let (mut expanded_text, activated_skills) = expand_inline_skills(&raw_text);
         if !activated_skills.is_empty() && !quiet {
             println!(
-                "{}🧩 Aktif Yetenek(ler) Yüklendi: @{}{}",
+                "{}🧩 {} @{}{}",
                 GREEN,
+                tr_en("Aktif Yetenek(ler) Yüklendi", "Active Skill(s) Loaded"),
                 activated_skills.join(", @"),
                 RESET
             );
@@ -335,9 +336,9 @@ fn main() {
                     })
                 );
             } else if quiet {
-                eprintln!("Hata: {}", err);
+                eprintln!("{}: {}", tr_en("Hata", "Error"), err);
             } else {
-                eprintln!("{}✗ Hata: {}{}", RED, err, RESET);
+                eprintln!("{}✗ {}: {}{}", RED, tr_en("Hata", "Error"), err, RESET);
             }
             std::process::exit(1);
         }
@@ -467,7 +468,7 @@ fn main() {
         let mut input = if prefill_input.is_none() {
             if let Some(queued_msg) = spavn::state::pop_next_queued_message() {
                 println!(
-                    "\n{}📥 [Kuyruktan Otomatik Çalıştırılıyor ({} kalan)]: {}{}{}",
+                    "\n{}📥 [Auto-running from queue ({} remaining)]: {}{}{}",
                     GREEN,
                     queued_message_count(),
                     BOLD,
@@ -498,7 +499,7 @@ fn main() {
                         active_phase = active_phase.toggled();
                         ctx.phase = active_phase;
                         println!(
-                            "\n{}{} — phase değişti{}",
+                            "\n{}{} — phase changed{}",
                             CYAN,
                             active_phase.badge(),
                             RESET
@@ -534,7 +535,7 @@ fn main() {
                     active_phase = active_phase.toggled();
                     ctx.phase = active_phase;
                     println!(
-                        "\n{}{} — phase değişti{}",
+                        "\n{}{} — phase changed{}",
                         CYAN,
                         active_phase.badge(),
                         RESET

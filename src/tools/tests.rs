@@ -907,7 +907,7 @@ mod security_tests {
             "x".repeat(400_000)
         );
         let out = format_mcp_jsonrpc_response("srv", "tool", &huge);
-        assert!(out.contains("kırpıldı"), "{} bytes", out.len());
+        assert!(out.contains("truncated"), "{} bytes", out.len());
         assert!(out.len() < 200_000, "{} bytes", out.len());
     }
 }

@@ -98,7 +98,7 @@ pub fn save_custom_skill(name: &str, instructions: &str) -> Result<PathBuf, Stri
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     if clean_name.is_empty() {
-        return Err("Geçersiz yetenek (skill) adı.".to_string());
+        return Err("Invalid skill name.".to_string());
     }
     let path = spavn_skills_dir().join(format!("{}.md", clean_name));
     let body = format!("# Skill: {}\n{}\n", clean_name, instructions.trim());
@@ -110,7 +110,7 @@ pub fn remove_custom_skill(name: &str) -> Result<(), String> {
     let clean_name = name.trim().trim_start_matches('@');
     let path = spavn_skills_dir().join(format!("{}.md", clean_name));
     if !path.exists() {
-        return Err(format!("~/.spavn/skills/{}.md bulunamadı.", clean_name));
+        return Err(format!("~/.spavn/skills/{}.md not found.", clean_name));
     }
     fs::remove_file(&path).map_err(|e| e.to_string())
 }
@@ -191,7 +191,7 @@ pub fn expand_inline_skills(user_input: &str) -> (String, Vec<String>) {
 pub fn render_skills_panel() {
     let skills = discover_skills();
     println!(
-        "\n{}╭─ 🧩 SPAVN YETENEK (SKILLS) MERKEZİ (Mesajda @yetenek yazarak tetikleyin) ────{}",
+        "\n{}╭─ 🧩 SPAVN SKILLS CENTER (mention @skill in a message to activate) ────{}",
         CYAN, RESET
     );
     for s in &skills {
@@ -222,11 +222,11 @@ pub fn render_skills_panel() {
         CYAN, RESET, YELLOW, RESET
     );
     println!(
-        "{}│{}  {}/skill show <ad>{}         Yetenek içeriğini gör · {}/skill rm <ad>{} Sil",
+        "{}│{}  {}/skill show <name>{}         View skill content · {}/skill rm <name>{} Delete",
         CYAN, RESET, YELLOW, RESET, YELLOW, RESET
     );
     println!(
-        "{}│{}  {}@<ad> <mesajınız>{}        Sadece o mesajda yeteneği bağlama enjekte et",
+        "{}│{}  {}@<name> <your message>{}        Inject only that skill into this message",
         CYAN, RESET, GREEN, RESET
     );
     println!(

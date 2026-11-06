@@ -63,7 +63,7 @@ where
                         .max(parse_retry_after_secs(&err).unwrap_or(0).min(30) * 1000);
                     attempt += 1;
                     crate::hud::set_spinner_label(&format!(
-                        "⏳ Rate-limit/Yoğunluk — yeniden deneniyor ({}/{})",
+                        "⏳ Rate-limit/Throttling — retrying ({}/{})",
                         attempt,
                         delays_ms.len()
                     ));
@@ -214,7 +214,7 @@ where
     ];
     loop {
         if crate::is_interrupted() {
-            return Err("İşlem kullanıcı tarafından (Esc / Ctrl+C) iptal edildi.".to_string());
+            return Err("Operation cancelled by the user (Esc / Ctrl+C).".to_string());
         }
         let line = match rx.recv_timeout(std::time::Duration::from_millis(150)) {
             Ok(StreamEvent::Line(line)) => line,

@@ -497,7 +497,7 @@ pub(crate) fn rebuild_spinner_dock_lines(
             if is_en() {
                 format!("Selected: {} chars (Backspace: Delete)", len)
             } else {
-                format!("Seçili: {} krk (Backspace: Sil)", len)
+                format!("Selected: {} chars (Backspace: Delete)", len)
             }
         } else {
             tr_en(
@@ -921,7 +921,7 @@ pub fn get_sticky_dock_status() -> String {
         .lock()
         .ok()
         .and_then(|g| g.clone())
-        .unwrap_or_else(|| format!("{}╭─ ⚡ SPAVN CANLI GİRİŞ{}", CYAN, RESET))
+        .unwrap_or_else(|| format!("{}╭─ ⚡ SPAVN LIVE INPUT{}", CYAN, RESET))
 }
 
 pub use crate::ansi::{

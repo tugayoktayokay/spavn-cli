@@ -197,7 +197,7 @@ impl ToolContext {
                     Ok(())
                 } else {
                     Err(format!(
-                        "BLOCKED by SPAVN Path Sandbox: kullanıcı izin vermedi ({} — {})",
+                        "BLOCKED by SPAVN Path Sandbox: user did not approve ({} — {})",
                         verb, raw_path
                     ))
                 }
@@ -246,7 +246,7 @@ impl ToolContext {
     pub fn check_external_mtime_shift(&self, raw_path: &str) -> String {
         if self.is_external_stale_version(raw_path) {
             println!(
-                "{}⚠️  [Code-Shifting Guard]: {} dosyası son okumadan (read) sonra dışarıdan değiştirildi!{}",
+                "{}⚠️  [Code-Shifting Guard]: {} was modified externally since last read!{}",
                 YELLOW, raw_path, RESET
             );
             return " [CODE-SHIFTING GUARD WARNING: File was modified externally since last read — verify surrounding lines]".to_string();
@@ -259,16 +259,16 @@ impl ToolContext {
         match snap.previous_content {
             Some(prev) => {
                 if let Err(e) = write_target_file(&snap.target, &prev) {
-                    return Some(format!("Undo hatası ({}): {}", snap.target, e));
+                    return Some(format!("Undo error ({}): {}", snap.target, e));
                 }
                 Some(format!(
-                    "↺ Geri alındı: {} ({})",
+                    "↺ Reverted: {} ({})",
                     snap.target, snap.description
                 ))
             }
             None => {
                 remove_target_file(&snap.target);
-                Some(format!("↺ Oluşturulan dosya silindi: {}", snap.target))
+                Some(format!("↺ Generated file deleted: {}", snap.target))
             }
         }
     }

@@ -139,9 +139,9 @@ impl AgentRoleKey {
             AgentRoleKey::Auto => "🎯 AUTO (Otomatik Rol)",
             AgentRoleKey::Coder => "💻 CODER (Uygulama)",
             AgentRoleKey::Reviewer => "🔍 REVIEWER (Denetim)",
-            AgentRoleKey::Security => "🛡️  SECURITY (Güvenlik)",
-            AgentRoleKey::Test => "🧪 TEST (Doğrulama)",
-            AgentRoleKey::Docs => "📖 DOCS (Dokümantasyon)",
+            AgentRoleKey::Security => "🛡️  SECURITY",
+            AgentRoleKey::Test => "🧪 TEST",
+            AgentRoleKey::Docs => "📖 DOCS",
             AgentRoleKey::Refactor => "🧹 REFACTOR (Mimari Temizlik)",
         }
     }
@@ -199,7 +199,7 @@ impl AgentPhase {
 
     pub fn badge(&self) -> &'static str {
         match self {
-            AgentPhase::Plan => "📐 PLAN (Salt-Okunur Tasarım)",
+            AgentPhase::Plan => "📐 PLAN",
             AgentPhase::Code => "💻 CODE (Uygulama)",
         }
     }
@@ -556,12 +556,12 @@ pub fn load_audit_records(
 pub fn render_audit_panel(file_filter: Option<&str>) {
     let (records, valid) = load_audit_records(15, file_filter);
     let chain_badge = if valid {
-        format!("{}🟢 ZİNCİR DOĞRULANDI (HMAC-FNV128){}", GREEN, RESET)
+        format!("{}🟢 CHAIN VERIFIED (HMAC-FNV128){}", GREEN, RESET)
     } else {
-        format!("{}🔴 ZİNCİR KIRILMIŞ{}", RED, RESET)
+        format!("{}🔴 CHAIN BROKEN{}", RED, RESET)
     };
     let title = match file_filter {
-        Some(f) => format!("🔍 SPAVN BLAME / DOSYA İZİ ({})", f),
+        Some(f) => format!("🔍 SPAVN BLAME / FILE TRACE ({})", f),
         None => "⛓️  SPAVN AI ACTION AUDIT TRAIL".to_string(),
     };
 
@@ -571,7 +571,7 @@ pub fn render_audit_panel(file_filter: Option<&str>) {
     );
     if records.is_empty() {
         println!(
-            "{}│{} {}Henüz kayıtlı aksiyon izi bulunamadı.{}",
+            "{}│{} {}No tracked action trace found yet.{}",
             CYAN, RESET, DIM, RESET
         );
     } else {
@@ -665,14 +665,14 @@ pub fn remove_pin(cwd: &str, id: usize) -> bool {
 pub fn render_pins_panel(cwd: &str) {
     let pins = load_pins(cwd);
     println!(
-        "\n{}╭─ 📌 SPAVN SABİTLENMİŞ PROJE BAĞLAMI (PINS — {}) ─────────────────────{}",
+        "\n{}╭─ 📌 SPAVN PINNED PROJECT CONTEXT (PINS — {}) ─────────────────────{}",
         CYAN,
         project_slug(cwd),
         RESET
     );
     if pins.is_empty() {
         println!(
-            "{}│{} {}Sabitlenmiş kural/not yok. Eklemek için: /pin <kural veya mimari karar>{}",
+            "{}│{} {}No pinned rule/note. To add: /pin <rule or architecture decision>{}",
             CYAN, RESET, DIM, RESET
         );
     } else {
@@ -683,7 +683,7 @@ pub fn render_pins_panel(cwd: &str) {
             );
         }
         println!(
-            "{}│{} {}Silmek için: /unpin <id>{}",
+            "{}│{} {}To delete: /unpin <id>{}",
             CYAN, RESET, DIM, RESET
         );
     }
@@ -851,14 +851,14 @@ pub fn run_janitor_gates(cwd: &str) -> Vec<GateOutcome> {
 pub fn render_janitor_panel(cwd: &str) {
     let outcomes = run_janitor_gates(cwd);
     println!(
-        "\n{}╭─ 🧹 SPAVN JANITOR KALİTE KAPILARI ({}) ──────────────────────────────{}",
+        "\n{}╭─ 🧹 SPAVN JANITOR QUALITY GATES ({}) ──────────────────────────────{}",
         CYAN,
         project_slug(cwd),
         RESET
     );
     if outcomes.is_empty() {
         println!(
-            "{}│{} {}Bu dizinde otomatik tespit edilen kalite kapısı (Cargo.toml / tsconfig / package.json) yok.{}",
+            "{}│{} {}No auto-detected quality gate in this directory (Cargo.toml / tsconfig / package.json).{}",
             CYAN, RESET, DIM, RESET
         );
     } else {
@@ -992,7 +992,7 @@ pub fn render_repo_wiki(cwd: &str) {
         RESET
     );
     println!(
-        "{}│{} {}Dil / Dosya Dağılımı:{} {}",
+        "{}│{} {}Language / File Distribution:{} {}",
         CYAN, RESET, BOLD, RESET, langs
     );
     let mut mod_keys: Vec<_> = modules.keys().cloned().collect();
@@ -1083,14 +1083,14 @@ pub fn complete_goal(id: usize) -> bool {
 pub fn render_goals_panel(cwd: &str) {
     let goals = load_goals(cwd);
     println!(
-        "\n{}╭─ 🎯 SPAVN PROJE HEDEFLERİ (GOALS — {}) ─────────────────────────────{}",
+        "\n{}╭─ 🎯 SPAVN PROJECT GOALS (GOALS — {}) ─────────────────────────────{}",
         CYAN,
         project_slug(cwd),
         RESET
     );
     if goals.is_empty() {
         println!(
-            "{}│{} {}Aktif hedef yok. Eklemek için: /goal <hedef açıklaması> · Tamamlamak için: /goal done <id>{}",
+            "{}│{} {}No active goals. To add: /goal <goal description> · To complete: /goal done <id>{}",
             CYAN, RESET, DIM, RESET
         );
     } else {

@@ -790,9 +790,15 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
     match run_command_with_timeout(cmd, 8) {
         Ok((_, stdout, _, timed_out)) => {
             let raw = String::from_utf8_lossy(&stdout);
-            let mut lines: Vec<&str> = raw.lines().take(80).collect();
+            let mut lines: Vec<String> = raw.lines().take(80).map(|s| s.to_owned()).collect();
             if timed_out {
-                lines.push("[SPAVN Search: 8s zaman sınırı doldu, ilk eşleşmeler gösteriliyor]");
+                lines.push(
+                    crate::config::tr_en(
+                        "[SPAVN Search: 8s zaman sınırı doldu, ilk eşleşmeler gösteriliyor]",
+                        "[SPAVN Search: 8s time limit reached, showing initial matches]"
+                    )
+                    .to_owned(),
+                );
             }
             if lines.is_empty() {
                 bm25_ast_block_search(&path, pattern, file_glob)
@@ -948,7 +954,7 @@ pub(crate) fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
 
     if op == "remember" {
         if ctx.access == AccessMode::Safe
-            && !prompt_user_approval(ctx, "Hafızaya Kayıt (remember)", query)
+            && !prompt_user_approval(ctx, "Remember", query)
         {
             return "User rejected memory write in SAFE mode.".to_string();
         }
@@ -967,7 +973,7 @@ pub(crate) fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
                     if out.status.success() {
                         let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
                         return format!(
-                            "{}🧠 Hafızaya kaydedildi ({}): {}{}",
+                            "{}🧠 Saved to memory ({}): {}{}",
                             CYAN, kind, msg, RESET
                         );
                     }
@@ -977,7 +983,7 @@ pub(crate) fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
         let pin =
             crate::spavn_engine::add_pin(&cwd, &format!("[{}] {}", kind.to_uppercase(), query));
         return format!(
-            "{}📌 Spavn Proje Hafızasına kaydedildi (Pin #{}): {}{}",
+            "{}📌 Saved to Spavn Project Memory (Pin #{}): {}{}",
             CYAN, pin.id, pin.content, RESET
         );
     }
@@ -999,7 +1005,7 @@ pub(crate) fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
 
     let arts = crate::spavn_engine::retrieve_relevant_artifacts(&cwd, query, 5);
     if arts.is_empty() {
-        "(Eşleşen hafıza kaydı bulunamadı)".to_string()
+        "(No matching memory record found)".to_string()
     } else {
         arts.into_iter()
             .map(|a| format!("- [{}] ({}): {}", a.ts, a.files.join(", "), a.summary))

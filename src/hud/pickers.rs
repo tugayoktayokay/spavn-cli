@@ -266,7 +266,7 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
         if let Some((auto_tok, source_label)) = detect_cli_token_for_provider(&group.id) {
             let _ = upsert_spavn_secret(&group.api_key_env, &auto_tok);
             println!(
-                "\n{}╭─ 🔐 {} ───────────────────────────────────────────{}\n{}│{} {}⚡ {} üzerinden oturum otomatik algılandı ve bağlandı!{}\n{}╰────────────────────────────────────────────────────────────────────────────{}",
+                "\n{}╭─ 🔐 {} ───────────────────────────────────────────{}\n{}│{} {}⚡ {} automatic session auto-detected and connected!{}\n{}╰────────────────────────────────────────────────────────────────────────────{}",
                 CYAN,
                 group.title,
                 RESET,
@@ -685,8 +685,8 @@ pub fn interactive_select_language() -> Option<String> {
     let items = vec![
         MenuItem {
             key: "tr".to_string(),
-            badge: format!("{}🇹🇷 Türkçe (TR){}", CYAN, RESET),
-            desc: "CLI arayüzünü, menüleri ve durum çubuklarını Türkçe kullan".to_string(),
+            badge: format!("{}🇹🇷 Turkish (TR){}", CYAN, RESET),
+            desc: "Use Turkish for the CLI interface, menus and status bars.".to_string(),
         },
         MenuItem {
             key: "en".to_string(),
@@ -698,7 +698,7 @@ pub fn interactive_select_language() -> Option<String> {
     if let Some(chosen) = select_interactive_menu(
         tr_en(
             "🌐 DİL SEÇİMİ / LANGUAGE SELECTION (/lang)",
-            "🌐 LANGUAGE SELECTION / DİL SEÇİMİ (/lang)",
+            "🌐 LANGUAGE SELECTION (/lang)",
         ),
         &items,
         initial_idx,
@@ -837,7 +837,7 @@ pub fn interactive_select_session(current_path: &Path) -> Option<PathBuf> {
                 .trim_start_matches("session-")
                 .trim_end_matches(".jsonl");
             let active_tag = if s.path == current_path {
-                format!(" {}[AKTİF]{}", GREEN, RESET)
+                format!(" {}[ACTIVE]{}", GREEN, RESET)
             } else {
                 String::new()
             };
@@ -853,7 +853,7 @@ pub fn interactive_select_session(current_path: &Path) -> Option<PathBuf> {
         .collect();
 
     let chosen_key =
-        select_interactive_menu("🗂️  GEÇMİŞ OTURUMLAR (/resume)", &items, initial_idx)?;
+        select_interactive_menu("🗂️  PAST SESSIONS (/resume)", &items, initial_idx)?;
     let chosen_idx = items.iter().position(|it| it.key == chosen_key)?;
     sessions.get(chosen_idx).map(|s| s.path.clone())
 }
@@ -941,7 +941,7 @@ mod menu_tests {
         let providers = vec![
             (
                 "Anthropic".to_string(),
-                vec![menu_item("claude-sonnet", "Sonnet", "hızlı")],
+                vec![menu_item("claude-sonnet", "Sonnet", "fast")],
             ),
             (
                 "Ollama (Yerel)".to_string(),

@@ -38,10 +38,10 @@ pub fn handle_bg_job_slash(arg: &str) -> String {
 
 fn read_log_tail_lines(path: &Path, max_lines: usize) -> String {
     let Ok(raw) = fs::read_to_string(path) else {
-        return String::from("(henüz çıktı yok)");
+        return crate::config::tr_en("(henüz çıktı yok)", "(No output yet)").to_owned();
     };
     if raw.trim().is_empty() {
-        return String::from("(henüz çıktı yok)");
+        return crate::config::tr_en("(henüz çıktı yok)", "(No output yet)").to_owned();
     }
     let lines: Vec<&str> = raw.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
@@ -180,7 +180,7 @@ pub(crate) fn check_bash_gate(
         matches!(risk, ShellRisk::Destructive(_)) || crate::config::host_is_sensitive(host);
     match ctx.access {
         AccessMode::Safe => {
-            if !prompt_user_approval(ctx, &format!("Komut Çalıştırma [{}]", host), cmd) {
+            if !prompt_user_approval(ctx, &format!("{} [{}]", crate::config::tr_en("Komut Çalıştırma", "Command Execution"), host), cmd) {
                 return Err("User rejected command in SAFE mode.".to_string());
             }
         }
@@ -188,11 +188,26 @@ pub(crate) fn check_bash_gate(
             if auto_sensitive {
                 let reason = match &risk {
                     ShellRisk::Destructive(reason) => reason.clone(),
-                    _ => format!("hassas host üzerinde çalıştırma: {}", host),
+                    _ => format!(
+                        "{}: {}",
+                        crate::config::tr_en(
+                            "hassas host üzerinde çalıştırma",
+                            "running on sensitive host"
+                        ),
+                        host
+                    ),
                 };
                 if !prompt_user_approval(
                     ctx,
-                    &format!("Kritik Komut Onayı [{}] — {}", host, reason),
+                    &format!(
+                        "{} [{}] — {}",
+                        crate::config::tr_en(
+                            "Kritik Komut Onayı",
+                            "Critical Command Approval"
+                        ),
+                        host,
+                        reason
+                    ),
                     cmd,
                 ) {
                     return Err("User declined sensitive command in AUTO mode.".to_string());
@@ -219,16 +234,32 @@ pub(crate) fn check_egress_gate(
     use crate::guard::{classify_egress, EgressTarget};
     match classify_egress(url)? {
         EgressTarget::Private => Some(format!(
-            "BLOCKED by SPAVN Egress Policy: {} özel/link-local bir adres hedefliyor.",
-            url
+            "{}: {}",
+            crate::config::tr_en(
+                "BLOCKED by SPAVN Egress Policy",
+                "BLOCKED by SPAVN Egress Policy"
+            ),
+            crate::config::tr_en(
+                "{} özel/link-local bir adres hedefliyor.",
+                "{} targets a private/link-local address."
+            )
+            .replace("{0}", url)
         )),
         EgressTarget::Loopback => {
             if allow_local {
                 return None;
             }
             Some(format!(
-                "BLOCKED by SPAVN Egress Policy: {} loopback adresi; `allow_local: true` olmadan açılmaz.",
-                url
+                "{}: {}",
+                crate::config::tr_en(
+                    "BLOCKED by SPAVN Egress Policy",
+                    "BLOCKED by SPAVN Egress Policy"
+                ),
+                crate::config::tr_en(
+                    "{} loopback adresi; `allow_local: true` olmadan açılmaz.",
+                    "{} is a loopback address; not opened without `allow_local: true`."
+                )
+                .replace("{0}", url)
             ))
         }
         EgressTarget::Public => {
@@ -237,8 +268,14 @@ pub(crate) fn check_egress_gate(
             let needs_prompt = ctx.can_prompt
                 && (ctx.access == AccessMode::Safe
                     || ctx.phase == crate::spavn_engine::AgentPhase::Plan);
-            if needs_prompt && !prompt_user_approval(ctx, "Web erişimi (fetch)", url) {
-                return Some("Web fetch reddedildi (onay yok).".to_string());
+            if needs_prompt && !prompt_user_approval(ctx, crate::config::tr_en("Web erişimi (fetch)", "Web access (fetch)"), url) {
+                return Some(
+                    crate::config::tr_en(
+                        "Web fetch reddedildi (onay yok).",
+                        "Web fetch rejected (no approval)."
+                    )
+                    .to_owned(),
+                );
             }
             None
         }
@@ -649,7 +686,7 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
                     combined.push('\n');
                 }
                 combined.push_str(&format!(
-                    "[SPAVN Timeout: Komut {}s sınırını aştığı için otomatik sonlandırıldı]",
+                    "[SPAVN Timeout: Command exceeded {}s limit, terminated automatically]",
                     timeout_sec
                 ));
             }

@@ -409,7 +409,7 @@ pub fn upsert_spavn_secret(env_name: &str, value: &str) -> Result<(), String> {
         .trim_matches('\'')
         .trim();
     if clean_key.is_empty() || clean_val.is_empty() {
-        return Err("API anahtarı boş olamaz.".to_string());
+        return Err(tr_en("API anahtarı boş olamaz.", "API key cannot be empty.").to_string());
     }
     let path = secrets_env_path();
     let existing = fs::read_to_string(&path).unwrap_or_else(|_| {
@@ -552,7 +552,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
                 ModelConfigEntry {
                     key: "sonnet".to_string(),
                     model_id: "claude-sonnet-5-5".to_string(),
-                    label: "Sonnet (kısa ad)".to_string(),
+                    label: "Sonnet (short name)".to_string(),
                     badge: "⚡ Balanced".to_string(),
                     desc: "Alias → claude-sonnet-5-5 (1M context)".to_string(),
                     context_window: Some(1_000_000),
@@ -560,7 +560,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
                 ModelConfigEntry {
                     key: "opus".to_string(),
                     model_id: "claude-opus-5-5".to_string(),
-                    label: "Opus (kısa ad)".to_string(),
+                    label: "Opus (short name)".to_string(),
                     badge: "🧠 Deep".to_string(),
                     desc: "Alias → claude-opus-5-5 (1M context)".to_string(),
                     context_window: Some(1_000_000),

@@ -536,7 +536,7 @@ pub(crate) fn run_agent_turn(
     loop {
         if is_interrupted() {
             if !quiet {
-                println!("\n{}⚡ [İşlem Esc/Ctrl+C ile durduruldu]{}", YELLOW, RESET);
+                println!("\n{}⚡ [Interrupted via Esc/Ctrl+C]{}", YELLOW, RESET);
             }
             return Ok(());
         }
@@ -546,7 +546,7 @@ pub(crate) fn run_agent_turn(
         if !steered.is_empty() {
             for sm in steered {
                 println!(
-                    "\n{}⚡ [Canlı Müdahale (Steer) Aktif Tura Enjekte Edildi]: {}{}{}",
+                    "\n{}⚡ [Live Steer Injected Into Active Turn]: {}{}{}",
                     YELLOW, BOLD, sm, RESET
                 );
                 let steer_msg = ChatMessage::user(format!(
@@ -562,7 +562,7 @@ pub(crate) fn run_agent_turn(
         let step_endpoint = if escalated_cloud {
             if !quiet {
                 println!(
-                    "\n{}⚡ [SPAVN Hibrit Escalation: Yerel model döngüye girdi -> Bu adım {} ile çözülüyor...]{}",
+                    "\n{}⚡ [SPAVN Hybrid Escalation: Local model looped in → resolving this step with {}...]{}",
                     MAGENTA, cfg.fallback_cloud_model, RESET
                 );
             }
@@ -1089,7 +1089,7 @@ pub(crate) fn run_agent_turn(
                         execute_tool(ctx, &tool_name, &tc.function.arguments)
                     } else {
                         let mut tool_spinner =
-                            LiveSpinner::start(&format!("⚡ {} çalıştırılıyor", tool_name));
+                            LiveSpinner::start(&format!("⚡ {} running", tool_name));
                         let res = execute_tool(ctx, &tool_name, &tc.function.arguments);
                         tool_spinner.stop();
                         res
@@ -1182,7 +1182,7 @@ pub(crate) fn run_agent_turn(
                     let preview_line = tool_output
                         .lines()
                         .next()
-                        .unwrap_or("(tamamlandı)")
+                        .unwrap_or("(completed)")
                         .chars()
                         .take(80)
                         .collect::<String>();
@@ -1275,7 +1275,7 @@ pub(crate) fn run_agent_turn(
         if !post_steered.is_empty() {
             for sm in post_steered {
                 println!(
-                    "\n{}⚡ [Canlı Müdahale (Steer) Aktif Tura Enjekte Edildi]: {}{}{}",
+                    "\n{}⚡ [Live Steer Injected Into Active Turn]: {}{}{}",
                     YELLOW, BOLD, sm, RESET
                 );
                 let steer_msg = ChatMessage::user(format!(
@@ -1292,7 +1292,7 @@ pub(crate) fn run_agent_turn(
             length_stop_retries += 1;
             if !quiet {
                 println!(
-                    "\n{}⚡ [SPAVN Turn Recovery: Çıktı token sınırına ulaştı ({}/3) -> Kaldığı yerden devam ediliyor...]{}",
+                    "\n{}⚡ [SPAVN Turn Recovery: Output token limit reached ({}/3) → continuing from where it left off...]{}",
                     YELLOW, length_stop_retries, RESET
                 );
             }
@@ -1341,7 +1341,7 @@ pub(crate) fn run_agent_turn(
             empty_stop_retries += 1;
             if !quiet {
                 println!(
-                    "\n{}⚡ [SPAVN Turn Recovery: Boş yanıt tespit edildi ({}/2) -> İşlem otomatik devam ediyor...]{}",
+                    "\n{}⚡ [SPAVN Turn Recovery: Empty response detected ({}/2) → process continuing automatically...]{}",
                     YELLOW, empty_stop_retries, RESET
                 );
             }
@@ -1365,7 +1365,7 @@ pub(crate) fn run_agent_turn(
             premature_stop_retries += 1;
             if !quiet {
                 println!(
-                    "\n{}⚡ [SPAVN Turn Recovery: Yarım kalan aksiyon tespit edildi ({}/2) -> Araç çağrısı tetikleniyor...]{}",
+                    "\n{}⚡ [SPAVN Turn Recovery: Incomplete action detected ({}/2) → invoking tool call...]{}",
                     YELLOW, premature_stop_retries, RESET
                 );
             }
@@ -1411,7 +1411,7 @@ pub(crate) fn run_agent_turn(
                     last_gate_err = Some(gate_err.clone());
                     if !quiet {
                         println!(
-                            "\n{}⚡ [SPAVN Zero-Stop Doğrulama Kapısı ({}/4): Derleme/eksik kod tespit edildi -> Otomatik düzeltme tetikleniyor...]{}",
+                            "\n{}⚡ [SPAVN Zero-Stop Verification Gate ({}/4): Compile/incomplete code detected → auto-fix triggered...]{}",
                             YELLOW, auto_verify_rounds, RESET
                         );
                     }
@@ -1430,11 +1430,12 @@ pub(crate) fn run_agent_turn(
         if unverified_edits && !verification_nudged {
             verification_nudged = true;
             unverified_edits = false;
+            let gate_msg = tr_en(
+                "⚡ [SPAVN Otonom Doğrulama Kapısı: Dosya değişikliği sonrası derleme/test kontrolü tetikleniyor...]",
+                "⚡ [SPAVN VERIFICATION GATE: compiler/test check triggered after file edit]"
+            );
             if !quiet {
-                println!(
-                    "{}⚡ [SPAVN Otonom Doğrulama Kapısı: Dosya değişikliği sonrası derleme/test kontrolü tetikleniyor...]{}",
-                    YELLOW, RESET
-                );
+                println!("{}{}{}", YELLOW, gate_msg, RESET);
             }
             let nudge = ChatMessage::user(
                 "[SPAVN VERIFICATION GATE]: You modified file(s) via edit/write without running a verification check (`bash` build/test). Run a verification command now, then report the final result.",

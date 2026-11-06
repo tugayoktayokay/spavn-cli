@@ -307,7 +307,7 @@ fn build_prompt(cwd: &str, compact: bool, en: bool) -> String {
     let lang_rule = if en {
         "- Language: Respond in concise, evidence-first English."
     } else {
-        "- Dil: Türkçe, doğrudan, kanıt odaklı ve net yanıt ver; gereksiz giriş/özet cümleleri kurma."
+        "- Language: Turkish, direct, evidence-focused and clear answers; avoid unnecessary preamble/summary sentences."
     };
 
     let constitution = if compact {

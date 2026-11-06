@@ -47,7 +47,7 @@ pub(crate) fn run_single_subagent_worker(
         if crate::is_interrupted() {
             return "[Subagent cancelled via Esc/Ctrl+C]".to_string();
         }
-        crate::hud::set_spinner_label(&format!("🐝 Alt-ajan araştırıyor (adım {}/6)", step + 1));
+        crate::hud::set_spinner_label(&format!("🐝 Subagent searching (step {}/6)", step + 1));
         let Ok(res) = crate::router::stream_chat_completion(&ep, &msgs, &sub_tools, |_| {}, |_| {})
         else {
             break;
@@ -410,7 +410,7 @@ pub(crate) fn cap_mcp_text(text: &str, max_chars: usize) -> String {
     }
     let kept: String = text.chars().take(max_chars).collect();
     format!(
-        "{}\n… (MCP yanıtı kırpıldı: {} karakterden ilk {})",
+        "{}\n… (MCP response truncated: first {} of {} chars)",
         kept,
         text.chars().count(),
         max_chars
@@ -491,7 +491,7 @@ pub(crate) fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                 let preview = format!("{} {}", tool_name, mcp_args);
                 if !prompt_user_approval(ctx, &format!("mcp:{}", server_name), &preview) {
                     return format!(
-                        "Kullanıcı MCP çağrısını reddetti: {}:{}",
+                        "User rejected MCP call: {}:{}",
                         server_name, tool_name
                     );
                 }

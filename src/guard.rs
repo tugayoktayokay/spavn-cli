@@ -1,4 +1,4 @@
-use crate::config::{home_dir, load_user_config};
+use crate::config::{home_dir, load_user_config, tr_en};
 use std::path::{Component, Path, PathBuf};
 
 const SYSTEM_WRITE_DENY: &[&str] = &[
@@ -145,7 +145,7 @@ impl PathPolicy {
         if looks_remote(raw) {
             return if write {
                 PathRisk::Ask {
-                    reason: "uzak host üzerinde yazma".to_string(),
+                    reason: "writing on remote host".to_string(),
                     even_sovereign: false,
                 }
             } else {
@@ -173,7 +173,7 @@ impl PathPolicy {
             let sensitive = self.home.join(rel);
             if path == sensitive || path.starts_with(&sensitive) {
                 return PathRisk::Ask {
-                    reason: format!("hassas kullanıcı dosyası ({}), onay gerekli", rel),
+                    reason: format!("sensitive user file ({}), approval required", rel),
                     even_sovereign: false,
                 };
             }
@@ -188,19 +188,19 @@ impl PathPolicy {
                 let root = PathBuf::from(sys);
                 if path == root || path.starts_with(&root) {
                     return PathRisk::Deny {
-                        reason: format!("sistem dizini ({}) yazma korumalı", sys),
+                        reason: format!("system directory ({}) write is protected", sys),
                     };
                 }
             }
             if path.parent().is_none() {
                 return PathRisk::Deny {
-                    reason: "kök dizin yazma korumalı".to_string(),
+                    reason: "root directory write is protected".to_string(),
                 };
             }
         }
 
         PathRisk::Ask {
-            reason: "çalışma alanı dışında".to_string(),
+            reason: "outside the working area".to_string(),
             even_sovereign: false,
         }
     }
@@ -259,15 +259,13 @@ pub fn assess_shell_command(cmd: &str, policy: &PathPolicy) -> ShellRisk {
                         TargetKind::Critical => push(
                             &mut out,
                             ShellRisk::Catastrophic(format!(
-                                "kritik dosyaya yönlendirme: {}",
-                                target.text
+                                "{}", tr_en("kritik dosyaya yönlendirme: {}", "critical file redirection: {}")
                             )),
                         ),
                         TargetKind::Protected => push(
                             &mut out,
                             ShellRisk::Destructive(format!(
-                                "korunan dosyaya yönlendirme: {}",
-                                target.text
+                                "{}", tr_en("korunan dosyaya yönlendirme: {}", "protected file redirection: {}")
                             )),
                         ),
                         _ => {}
@@ -330,14 +328,14 @@ fn analyze_segment(tokens: &[Tok], policy: &PathPolicy) -> Option<ShellRisk> {
         }) {
             push(
                 &mut out,
-                ShellRisk::Destructive(format!("gizli dosya erişimi: {}", arg.text)),
+                ShellRisk::Destructive(format!("hidden file access: {}", arg.text)),
             );
         }
     }
     if saw_sudo {
         push(
             &mut out,
-            ShellRisk::Destructive("sudo ile yetki yükseltme".to_string()),
+            ShellRisk::Destructive("privilege escalation via sudo".to_string()),
         );
     }
     out
@@ -387,20 +385,21 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                     TargetKind::Critical if recursive => push(
                         out,
                         ShellRisk::Catastrophic(format!(
-                            "kök/çalışma alanı özyinelemeli silme: {}",
+                            "root/working-area recursive deletion: {}",
                             target.text
                         )),
                     ),
                     TargetKind::Protected if recursive => push(
                         out,
                         ShellRisk::Catastrophic(format!(
-                            "korunan dizin özyinelemeli silme: {}",
-                            target.text
+                            "{}", tr_en("korunan dizin özyinelemeli silme: {}", "protected directory recursive deletion: {}")
                         )),
                     ),
                     TargetKind::Critical => push(
                         out,
-                        ShellRisk::Destructive(format!("kritik yol silme: {}", target.text)),
+                        ShellRisk::Destructive(format!(
+                            "{}", tr_en("kritik yol silme: {}", "critical path deletion: {}")
+                        )),
                     ),
                     TargetKind::Protected => push(
                         out,
@@ -409,7 +408,7 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                     TargetKind::Dynamic if recursive => push(
                         out,
                         ShellRisk::Destructive(format!(
-                            "değişkenli özyinelemeli silme: {}",
+                            "variable recursive deletion: {}",
                             target.text
                         )),
                     ),
@@ -467,11 +466,11 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                 match classify_target(policy, target) {
                     TargetKind::Critical => push(
                         out,
-                        ShellRisk::Catastrophic(format!("kritik dosya imhası: {}", target.text)),
+                        ShellRisk::Catastrophic(format!("critical file typo: {}", target.text)),
                     ),
                     TargetKind::Protected => push(
                         out,
-                        ShellRisk::Destructive(format!("korunan dosya imhası: {}", target.text)),
+                        ShellRisk::Destructive(format!("protected file typo: {}", target.text)),
                     ),
                     _ => {}
                 }
@@ -504,7 +503,7 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                         TargetKind::Critical | TargetKind::Protected => push(
                             out,
                             ShellRisk::Destructive(format!(
-                                "korunan dosyada yerinde düzenleme: {}",
+                                "in-place edit on protected file: {}",
                                 target.text
                             )),
                         ),
@@ -543,7 +542,7 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                         TargetKind::Critical | TargetKind::Protected => push(
                             out,
                             ShellRisk::Destructive(format!(
-                                "korunan yolda izin değişikliği: {}",
+                                "permission change on protected path: {}",
                                 target.text
                             )),
                         ),
@@ -563,11 +562,11 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                     match classify_target(policy, src) {
                         TargetKind::Critical => push(
                             out,
-                            ShellRisk::Catastrophic(format!("kritik yol taşıma: {}", src.text)),
+                            ShellRisk::Catastrophic(format!("critical path move: {}", src.text)),
                         ),
                         TargetKind::Protected => push(
                             out,
-                            ShellRisk::Destructive(format!("korunan yol taşıma: {}", src.text)),
+                            ShellRisk::Destructive(format!("protected path move: {}", src.text)),
                         ),
                         _ => {}
                     }
@@ -581,7 +580,7 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                     push(
                         out,
                         ShellRisk::Destructive(format!(
-                            "korunan yola taşıma/kopyalama: {}",
+                            "move/copy to protected path: {}",
                             dest.text
                         )),
                     );
@@ -623,7 +622,7 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
             {
                 push(
                     out,
-                    ShellRisk::Destructive("docker compose/servis değişikliği".to_string()),
+                    ShellRisk::Destructive("docker compose/service change".to_string()),
                 );
             }
         }
@@ -634,7 +633,7 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
             {
                 push(
                     out,
-                    ShellRisk::Destructive("systemctl servis değişikliği".to_string()),
+                    ShellRisk::Destructive("systemctl service change".to_string()),
                 );
             }
         }
@@ -647,12 +646,12 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
             }) {
                 push(
                     out,
-                    ShellRisk::Destructive("launchctl servis değişikliği".to_string()),
+                    ShellRisk::Destructive("launchctl service change".to_string()),
                 );
             }
         }
         "kill" | "pkill" | "killall" => {
-            push(out, ShellRisk::Destructive("süreç sonlandırma".to_string()));
+            push(out, ShellRisk::Destructive("process termination".to_string()));
         }
         "shutdown" | "reboot" | "halt" | "mkfs" | "fdisk" | "gpt" => {
             push(
@@ -676,7 +675,7 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
         "defaults" if args.iter().any(|a| a.text == "write" || a.text == "delete") => {
             push(
                 out,
-                ShellRisk::Destructive("macOS ayar değişikliği".to_string()),
+                ShellRisk::Destructive("macOS setting change".to_string()),
             );
         }
         _ => {}
@@ -728,7 +727,7 @@ fn indirect_exec_risk(segment: &[Tok], seg_idx: usize) -> Option<ShellRisk> {
     }
     if first.dynamic || first.text.contains('$') {
         return Some(ShellRisk::Destructive(format!(
-            "dinamik komut adı: {}",
+            "dynamic command name: {}",
             first.text
         )));
     }
@@ -741,7 +740,7 @@ fn indirect_exec_risk(segment: &[Tok], seg_idx: usize) -> Option<ShellRisk> {
         )
     {
         return Some(ShellRisk::Destructive(
-            "pipe ile kabuğa betik aktarma (curl | sh)".to_string(),
+            "pipe script injection into shell (curl | sh)".to_string(),
         ));
     }
     None

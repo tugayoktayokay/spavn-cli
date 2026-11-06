@@ -220,7 +220,7 @@ pub fn render_full_quota_card() {
     let cfg = load_user_config();
     let Some(ref script_raw) = cfg.quota_full_script else {
         println!(
-            "\n{}ℹ️  Harici kota betiği tanımlı değil (~/.spavn/config.json -> quota_full_script). BYOK sağlayıcı durumu için `/byok` komutunu kullanın.{}",
+            "\n{}ℹ️  External quota script is not defined (~/.spavn/config.json -> quota_full_script). For BYOK provider status, use the `/byok` command.{}",
             YELLOW, RESET
         );
         return;
@@ -228,7 +228,7 @@ pub fn render_full_quota_card() {
     let script_path = expand_user_path(script_raw);
     if !script_path.exists() {
         println!(
-            "\n{}Kota betiği bulunamadı: {}{}",
+            "\n{}Quota script not found: {}{}",
             YELLOW,
             script_path.display(),
             RESET
@@ -236,7 +236,7 @@ pub fn render_full_quota_card() {
         return;
     }
 
-    let mut spin = LiveSpinner::start("Çoklu hesap kotaları sorgulanıyor");
+    let mut spin = LiveSpinner::start("Querying multi-account rate limits");
     let node_bin = if Path::new("/opt/homebrew/bin/node").exists() {
         "/opt/homebrew/bin/node"
     } else {
@@ -248,23 +248,23 @@ pub fn render_full_quota_card() {
     spin.stop();
 
     let Ok(o) = out else {
-        println!("{}Kota bilgisi alınamadı.{}", RED, RESET);
+        println!("{}Could not fetch quota info.{}", RED, RESET);
         return;
     };
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&o.stdout) else {
-        println!("{}Kota yanıtı ayrıştırılamadı.{}", RED, RESET);
+        println!("{}Rate limit response could not be parsed.{}", RED, RESET);
         return;
     };
 
     println!(
-        "\n{}╭─ 🔋 SPAVN KOTA PANELİ ─────────────────────────────────────────────────────{}",
+        "\n{}╭─ 🔋 SPAVN RATE LIMIT PANEL ─────────────────────────────────────────────────────{}",
         CYAN, RESET
     );
     if let Some(arr) = parsed.as_array() {
         for acc in arr {
             let email = acc.get("email").and_then(|v| v.as_str()).unwrap_or("?");
             let active = acc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-            let badge = if active { "🟢 [AKTİF]" } else { "⚪" };
+            let badge = if active { "🟢 [ACTIVE]" } else { "⚪" };
             println!("{}│{} {} {}{}{}", CYAN, RESET, badge, BOLD, email, RESET);
             if let Some(groups) = acc.get("groups").and_then(|v| v.as_array()) {
                 for g in groups {
@@ -299,7 +299,7 @@ pub fn render_full_quota_card() {
 
 pub fn render_fleet_radar() {
     let cfg = load_user_config();
-    let mut spin = LiveSpinner::start("Tanımlı çalışma hedefleri (hosts) taranıyor");
+    let mut spin = LiveSpinner::start("Scanning defined work targets (hosts)");
 
     let handles: Vec<_> = cfg
         .hosts
@@ -320,7 +320,7 @@ pub fn render_fleet_radar() {
                         let up = String::from_utf8_lossy(&o.stdout).trim().to_string();
                         (h.key, true, ms, up)
                     }
-                    _ => (h.key, false, ms, "Ulaşılamadı".to_string()),
+                    _ => (h.key, false, ms, "Unreachable".to_string()),
                 }
             })
         })
@@ -362,9 +362,10 @@ pub fn render_assistant_header(model_key: &str) {
 pub fn render_inline_image_preview(img: &crate::router::DraggedImage) {
     pause_active_spinner();
     let kb = (img.size_bytes as f64 / 1024.0).max(0.1);
+    let label = tr_en("Görsel Eklendi: ", "Image added: ");
     println!(
-        "{}│{} {}🖼️  [Görsel Eklendi: {}{}{} ({:.1} KB)]{}",
-        CYAN, RESET, GREEN, BOLD, img.filename, RESET, kb, RESET
+        "{}│{} {}🖼️  [{}{}{} {}({:.1} KB)]{}",
+        CYAN, RESET, GREEN, BOLD, label, img.filename, RESET, kb, RESET
     );
     let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
     let lc_term = std::env::var("LC_TERMINAL").unwrap_or_default();
