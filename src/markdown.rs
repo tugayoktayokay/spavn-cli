@@ -358,9 +358,7 @@ pub fn render_markdown_table(raw_rows: &[String], term_cols: usize) -> String {
     let overhead = 3 * num_cols + 5;
     // Responsive stacked card layout when a multi-column table on a narrow terminal
     // would squeeze columns below 8 characters on average.
-    if num_cols >= 3
-        && !styled_body.is_empty()
-        && term_cols.saturating_sub(overhead) / num_cols < 8
+    if num_cols >= 3 && !styled_body.is_empty() && term_cols.saturating_sub(overhead) / num_cols < 8
     {
         let card_inner_w = term_cols.saturating_sub(6).max(4);
         let draw_card_rule = |left: &str, right: &str| -> String {

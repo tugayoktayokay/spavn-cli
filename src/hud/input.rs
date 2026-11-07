@@ -135,14 +135,7 @@ pub fn read_bottom_dock_input(
 
         if needs_redraw {
             if full_resize_pending {
-                redraw_full_viewport(
-                    endpoint,
-                    *access,
-                    default_host,
-                    cwd,
-                    session_name,
-                    messages,
-                );
+                redraw_full_viewport(endpoint, *access, default_host, cwd, session_name, messages);
                 print!("\n\n\n\x1b[999B\x1b[?2026l");
                 let _ = io::stdout().flush();
                 prev_top_w = None;

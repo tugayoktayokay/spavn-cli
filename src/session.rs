@@ -979,11 +979,20 @@ mod tests {
     fn compact_done_banner_substitutes_all_placeholders() {
         let banner = format_compact_done_banner(42200, 5900, 86);
         assert!(
-            !banner.contains("{}") && !banner.contains("{0}") && !banner.contains("{1}") && !banner.contains("{2}"),
+            !banner.contains("{}")
+                && !banner.contains("{0}")
+                && !banner.contains("{1}")
+                && !banner.contains("{2}"),
             "banner must not contain raw placeholders: {banner}"
         );
-        assert!(banner.contains("42200"), "banner missing before_tok: {banner}");
-        assert!(banner.contains("5900"), "banner missing after_tok: {banner}");
+        assert!(
+            banner.contains("42200"),
+            "banner missing before_tok: {banner}"
+        );
+        assert!(
+            banner.contains("5900"),
+            "banner missing after_tok: {banner}"
+        );
         assert!(banner.contains("86"), "banner missing saved_pct: {banner}");
     }
 }

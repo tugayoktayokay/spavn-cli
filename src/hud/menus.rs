@@ -1141,9 +1141,12 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                         cur_models.get(vis[pos])
                     };
                     if let Some(m) = chosen {
-                        let collides_in_earlier_group = providers[..prov_idx]
-                            .iter()
-                            .any(|(_, items)| items.iter().any(|other| other.key.eq_ignore_ascii_case(&m.key)));
+                        let collides_in_earlier_group =
+                            providers[..prov_idx].iter().any(|(_, items)| {
+                                items
+                                    .iter()
+                                    .any(|other| other.key.eq_ignore_ascii_case(&m.key))
+                            });
                         if collides_in_earlier_group {
                             if let Some(Some(pid)) = prov_ids.get(prov_idx) {
                                 result = Some(format!("{}:{}", pid, m.key));

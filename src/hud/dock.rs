@@ -934,7 +934,11 @@ pub(crate) fn render_inline_dock(
         bottom_count,
         visible_cursor_row,
     );
-    let pin_bottom = if prev_top_w.is_none() { "\x1b[999B" } else { "" };
+    let pin_bottom = if prev_top_w.is_none() {
+        "\x1b[999B"
+    } else {
+        ""
+    };
     let cursor_col = (5 + cursor_col_offset).min(full_w);
     print!(
         "\x1b[?2026h\x1b[?25l\x1b[?7l{}\x1b[{}A\r\x1b[J{}\n{}\n{}\x1b[?7h\x1b[{}A\r\x1b[{}G\x1b[?2026l",

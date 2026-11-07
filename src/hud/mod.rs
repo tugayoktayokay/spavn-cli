@@ -583,7 +583,11 @@ fn partial_screen_push(state: &mut SpinnerScreenState, ch: char) -> (usize, bool
         if matches!(ch, '@'..='~') {
             state.partial_esc = 0;
         }
-        return (state.partial_vw, state.partial_has_box, state.partial_esc != 0);
+        return (
+            state.partial_vw,
+            state.partial_has_box,
+            state.partial_esc != 0,
+        );
     }
     if state.partial_esc == 3 {
         // Inside an OSC body: consume until BEL or ST (\x1b\\), mirroring
@@ -594,12 +598,20 @@ fn partial_screen_push(state: &mut SpinnerScreenState, ch: char) -> (usize, bool
         } else if ch == '\x1b' {
             state.partial_esc = 4;
         }
-        return (state.partial_vw, state.partial_has_box, state.partial_esc != 0);
+        return (
+            state.partial_vw,
+            state.partial_has_box,
+            state.partial_esc != 0,
+        );
     }
     if state.partial_esc == 4 {
         state.partial_line.push(ch);
         state.partial_esc = if ch == '\\' { 0 } else { 3 };
-        return (state.partial_vw, state.partial_has_box, state.partial_esc != 0);
+        return (
+            state.partial_vw,
+            state.partial_has_box,
+            state.partial_esc != 0,
+        );
     }
     if state.partial_esc == 1 {
         state.partial_line.push(ch);
@@ -610,7 +622,11 @@ fn partial_screen_push(state: &mut SpinnerScreenState, ch: char) -> (usize, bool
         } else {
             state.partial_esc = 0;
         }
-        return (state.partial_vw, state.partial_has_box, state.partial_esc != 0);
+        return (
+            state.partial_vw,
+            state.partial_has_box,
+            state.partial_esc != 0,
+        );
     }
     if ch == '\u{1b}' {
         state.partial_line.push(ch);
@@ -1471,9 +1487,7 @@ mod copy_raw_tests {
             "### Şiir\ndize bir\ndize iki\n***\nBuradayım Efendim. Ne yapalım?\n",
         );
         let regions = copy_regions();
-        let section = regions
-            .first()
-            .expect("section must exist");
+        let section = regions.first().expect("section must exist");
         assert_eq!(section.body, "dize bir\ndize iki");
         assert!(section.body.contains("dize iki"));
         assert!(!section.body.contains("Buradayım"));

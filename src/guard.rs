@@ -417,11 +417,8 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                     TargetKind::Protected => push(
                         out,
                         ShellRisk::Catastrophic(
-                            tr_en(
-                                "korunan yol silme: {0}",
-                                "protected path deletion: {0}"
-                            )
-                            .replace("{0}", &target.text),
+                            tr_en("korunan yol silme: {0}", "protected path deletion: {0}")
+                                .replace("{0}", &target.text),
                         ),
                     ),
                     TargetKind::Dynamic if recursive => push(
@@ -554,11 +551,8 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                         TargetKind::Critical | TargetKind::Protected => push(
                             out,
                             ShellRisk::Catastrophic(
-                                tr_en(
-                                    "dd ile disk/dosya yazma: {0}",
-                                    "dd disk/file write: {0}"
-                                )
-                                .replace("{0}", target),
+                                tr_en("dd ile disk/dosya yazma: {0}", "dd disk/file write: {0}")
+                                    .replace("{0}", target),
                             ),
                         ),
                         _ => {}

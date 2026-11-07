@@ -538,13 +538,7 @@ mod tests {
         for (top, input, bottom, row) in cases {
             assert!(top + row >= 1, "case must stay production-reachable");
             let first = compute_dock_geometry(None, top, input, bottom, row);
-            let steady = compute_dock_geometry(
-                Some(first.next_top_w),
-                top,
-                input,
-                bottom,
-                row,
-            );
+            let steady = compute_dock_geometry(Some(first.next_top_w), top, input, bottom, row);
             let total = top + input + bottom;
             assert_eq!(
                 steady.up_to_start + steady.lines_below_cursor,
