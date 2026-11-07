@@ -1065,8 +1065,8 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 let leaked_secrets = crate::spavn_engine::detect_secrets_in_text(sub_new);
                 if !leaked_secrets.is_empty() && ctx.access != AccessMode::Sovereign {
                     let secret_msg = crate::config::tr_en(
-                        "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
-                        "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
+                        "🛡️  [SPAVN Secret Guard]: {0} içinde hassas anahtar ({1}) tespit edildi — onaylıyor musunuz?",
+                        "🛡️  [SPAVN Secret Guard]: Sensitive key ({1}) detected in {0} — approve?"
                     )
                     .replace("{0}", raw_path)
                     .replace("{1}", &leaked_secrets.join(", "));
@@ -1083,8 +1083,8 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 && !prompt_user_approval(
                     ctx,
                     &crate::config::tr_en(
-                        "Çoklu Dosya Düzenleme ({} hunk): {}",
-                        "Multi-File Edit ({} hunk): {}",
+                        "Çoklu Dosya Düzenleme ({0} hunk): {1}",
+                        "Multi-File Edit ({0} hunk): {1}",
                     )
                     .replace("{0}", &edits_arr.len().to_string())
                     .replace("{1}", raw_path),
@@ -1270,8 +1270,8 @@ fn exec_edit_single_with_range(
     let leaked_secrets = crate::spavn_engine::detect_secrets_in_text(new_text);
     if !leaked_secrets.is_empty() && ctx.access != AccessMode::Sovereign {
         let secret_msg = crate::config::tr_en(
-            "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
-            "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
+            "🛡️  [SPAVN Secret Guard]: {0} içinde hassas anahtar ({1}) tespit edildi — onaylıyor musunuz?",
+            "🛡️  [SPAVN Secret Guard]: Sensitive key ({1}) detected in {0} — approve?"
         )
         .replace("{0}", raw_path)
         .replace("{1}", &leaked_secrets.join(", "));
@@ -1946,8 +1946,8 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
     let leaked_secrets = crate::spavn_engine::detect_secrets_in_text(content);
     if !leaked_secrets.is_empty() && ctx.access != AccessMode::Sovereign {
         let secret_msg = crate::config::tr_en(
-            "🛡️  [SPAVN Secret Guard]: {} içinde hassas anahtar ({}) tespit edildi — onaylıyor musunuz?",
-            "🛡️  [SPAVN Secret Guard]: Sensitive key ({}) detected in {} — approve?"
+            "🛡️  [SPAVN Secret Guard]: {0} içinde hassas anahtar ({1}) tespit edildi — onaylıyor musunuz?",
+            "🛡️  [SPAVN Secret Guard]: Sensitive key ({1}) detected in {0} — approve?"
         )
         .replace("{0}", raw_path)
         .replace("{1}", &leaked_secrets.join(", "));

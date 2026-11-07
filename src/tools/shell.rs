@@ -245,8 +245,8 @@ pub(crate) fn check_egress_gate(
                 "BLOCKED by SPAVN Egress Policy"
             ),
             crate::config::tr_en(
-                "{} özel/link-local bir adres hedefliyor.",
-                "{} targets a private/link-local address."
+                "{0} özel/link-local bir adres hedefliyor.",
+                "{0} targets a private/link-local address."
             )
             .replace("{0}", url)
         )),
@@ -261,8 +261,8 @@ pub(crate) fn check_egress_gate(
                     "BLOCKED by SPAVN Egress Policy"
                 ),
                 crate::config::tr_en(
-                    "{} loopback adresi; `allow_local: true` olmadan açılmaz.",
-                    "{} is a loopback address; not opened without `allow_local: true`."
+                    "{0} loopback adresi; `allow_local: true` olmadan açılmaz.",
+                    "{0} is a loopback address; not opened without `allow_local: true`."
                 )
                 .replace("{0}", url)
             ))

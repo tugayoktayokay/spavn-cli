@@ -176,9 +176,82 @@ pub fn render_welcome_header(
             row3_info
         );
     } else {
-        println!("  {}   {}", logo_r1, row1_info);
-        println!("  {}   {}", logo_r2, row2_info);
-        println!("  {}   {}", logo_r3, row3_info);
+        let (_, cols) = term_size();
+        let max_w = cols.saturating_sub(1).max(20);
+        for raw_line in [
+            format!("  {}   {}", logo_r1, row1_info),
+            format!("  {}   {}", logo_r2, row2_info),
+            format!("  {}   {}", logo_r3, row3_info),
+        ] {
+            let (trunc, _) = truncate_ansi_to_width(&raw_line, max_w);
+            println!("{}", trunc);
+        }
+    }
+    let _ = io::stdout().flush();
+}
+
+pub fn redraw_full_viewport(
+    endpoint: &ModelEndpoint,
+    access: AccessMode,
+    default_host: &str,
+    cwd: &str,
+    session_name: &str,
+    messages: &[crate::router::ChatMessage],
+) {
+    print!("\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[2J\x1b[3J\x1b[H\x1b[?7h");
+    render_welcome_header(endpoint, access, default_host, cwd, session_name);
+    let visible_msgs: Vec<&crate::router::ChatMessage> = messages
+        .iter()
+        .skip(1)
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    for m in visible_msgs {
+        let Some(ref raw_content) = m.content else {
+            continue;
+        };
+        if m.role == "user" {
+            if raw_content.starts_with("[SPAVN VERIFICATION GATE]")
+                || raw_content.starts_with("[SPAVN Auto-Compact")
+                || raw_content.starts_with("[SPAVN Semantic Context Handoff")
+                || raw_content.starts_with("[LIVE USER STEERING")
+                || raw_content.starts_with("[SPAVN FOCUS GATE")
+                || raw_content.starts_with("[Self-Correction")
+            {
+                continue;
+            }
+            let clean = strip_internal_tags_for_display(raw_content);
+            if clean.is_empty() {
+                continue;
+            }
+            println!(
+                "\n{}╭─{} {}👤 {}{}",
+                CYAN,
+                RESET,
+                BOLD,
+                tr_en("Siz", "You"),
+                RESET
+            );
+            for line in clean.lines() {
+                println!("{}│{} {}{}{}", CYAN, RESET, BOLD, line, RESET);
+            }
+            println!("{}╰─{}", CYAN, RESET);
+        } else if m.role == "assistant" {
+            let clean = raw_content.trim();
+            if clean.is_empty() {
+                continue;
+            }
+            render_assistant_header(&endpoint.key);
+            let mut md = MarkdownStreamRenderer::new();
+            md.push_replay(clean);
+            md.finish();
+            println!("{}╰─{}", CYAN, RESET);
+        }
     }
     let _ = io::stdout().flush();
 }

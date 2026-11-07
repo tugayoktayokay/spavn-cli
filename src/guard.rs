@@ -260,20 +260,20 @@ pub fn assess_shell_command(cmd: &str, policy: &PathPolicy) -> ShellRisk {
                             &mut out,
                             ShellRisk::Catastrophic(
                                 tr_en(
-                                    "kritik dosyaya yönlendirme: {}",
-                                    "critical file redirection: {}",
+                                    "kritik dosyaya yönlendirme: {0}",
+                                    "critical file redirection: {0}",
                                 )
-                                .to_string(),
+                                .replace("{0}", &target.text),
                             ),
                         ),
                         TargetKind::Protected => push(
                             &mut out,
                             ShellRisk::Destructive(
                                 tr_en(
-                                    "korunan dosyaya yönlendirme: {}",
-                                    "protected file redirection: {}",
+                                    "korunan dosyaya yönlendirme: {0}",
+                                    "protected file redirection: {0}",
                                 )
-                                .to_string(),
+                                .replace("{0}", &target.text),
                             ),
                         ),
                         _ => {}
@@ -401,16 +401,17 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                         out,
                         ShellRisk::Catastrophic(
                             tr_en(
-                                "korunan dizin özyinelemeli silme: {}",
-                                "protected directory recursive deletion: {}",
+                                "korunan dizin özyinelemeli silme: {0}",
+                                "protected directory recursive deletion: {0}",
                             )
-                            .to_string(),
+                            .replace("{0}", &target.text),
                         ),
                     ),
                     TargetKind::Critical => push(
                         out,
                         ShellRisk::Destructive(
-                            tr_en("kritik yol silme: {}", "critical path deletion: {}").to_string(),
+                            tr_en("kritik yol silme: {0}", "critical path deletion: {0}")
+                                .replace("{0}", &target.text),
                         ),
                     ),
                     TargetKind::Protected => push(
@@ -433,7 +434,8 @@ fn analyze_command(cmd: &str, args: &[Tok], policy: &PathPolicy, out: &mut Optio
                     _ if recursive => push(
                         out,
                         ShellRisk::Destructive(
-                            tr_en("özyinelemeli silme: {}", "recursive deletion: {}").to_string(),
+                            tr_en("özyinelemeli silme: {0}", "recursive deletion: {0}")
+                                .replace("{0}", &target.text),
                         ),
                     ),
                     _ if force => push(

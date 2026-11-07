@@ -18,8 +18,8 @@ pub fn read_bottom_dock_input(
     quota_badge: &str,
     history: &[String],
     initial_prefill: Option<&str>,
-    _cwd: &str,
-    _session_name: &str,
+    cwd: &str,
+    session_name: &str,
     messages: &[crate::router::ChatMessage],
 ) -> PromptEvent {
     let mut orig_termios = empty_termios();
@@ -64,21 +64,30 @@ pub fn read_bottom_dock_input(
     loop {
         let (rows, cols) = term_size();
         if (rows, cols) != (last_rows, last_cols) || crate::take_resized() {
-            // Wait until active mouse-drag resize pauses for 25ms before redrawing
+            // Wait until active mouse-drag resize pauses for 50ms before redrawing,
+            // and ignore SIGWINCH events from window moves where (rows, cols) did not change.
             let mut stable = (rows, cols);
-            for _ in 0..20 {
+            let mut quiet_ticks = 0u8;
+            for _ in 0..24 {
                 thread::sleep(Duration::from_millis(25));
                 let _ = crate::take_resized();
                 let next = term_size();
                 if next == stable {
-                    break;
+                    quiet_ticks += 1;
+                    if quiet_ticks >= 2 {
+                        break;
+                    }
+                } else {
+                    stable = next;
+                    quiet_ticks = 0;
                 }
-                stable = next;
             }
-            last_rows = stable.0;
-            last_cols = stable.1;
-            full_resize_pending = true;
-            needs_redraw = true;
+            if stable != (last_rows, last_cols) {
+                last_rows = stable.0;
+                last_cols = stable.1;
+                full_resize_pending = true;
+                needs_redraw = true;
+            }
         }
 
         // A finished update check parks its notice here; the dock is erased first so the advice
@@ -89,6 +98,8 @@ pub fn read_bottom_dock_input(
             prev_top_w = None;
             prev_cursor_col = 1;
             render_update_notice(&info);
+            print!("\n\n\n\x1b[999B");
+            let _ = io::stdout().flush();
             needs_redraw = true;
         }
 
@@ -124,8 +135,16 @@ pub fn read_bottom_dock_input(
 
         if needs_redraw {
             if full_resize_pending {
-                erase_inline_dock(prev_top_w, prev_cursor_col);
-                print!("\n\r");
+                redraw_full_viewport(
+                    endpoint,
+                    *access,
+                    default_host,
+                    cwd,
+                    session_name,
+                    messages,
+                );
+                print!("\n\n\n\x1b[999B\x1b[?2026l");
+                let _ = io::stdout().flush();
                 prev_top_w = None;
                 prev_cursor_col = 1;
                 full_resize_pending = false;

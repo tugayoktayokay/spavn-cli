@@ -356,6 +356,58 @@ pub fn render_markdown_table(raw_rows: &[String], term_cols: usize) -> String {
     }
 
     let overhead = 3 * num_cols + 5;
+    // Responsive stacked card layout when a multi-column table on a narrow terminal
+    // would squeeze columns below 8 characters on average.
+    if num_cols >= 3
+        && !styled_body.is_empty()
+        && term_cols.saturating_sub(overhead) / num_cols < 8
+    {
+        let card_inner_w = term_cols.saturating_sub(6).max(4);
+        let draw_card_rule = |left: &str, right: &str| -> String {
+            format!(
+                "  {}{}{}{}{}\n",
+                DIM,
+                CYAN,
+                left,
+                "─".repeat(card_inner_w + 2),
+                format!("{}{}", right, RESET)
+            )
+        };
+        let bdr = format!("{}{}│{}", DIM, CYAN, RESET);
+        let mut out = String::new();
+        out.push_str(&draw_card_rule("╭", "╮"));
+        for (r_idx, row) in styled_body.iter().enumerate() {
+            for c in 0..num_cols {
+                if row[c].is_empty() {
+                    continue;
+                }
+                let mut combined: Vec<(char, &'static str)> = Vec::new();
+                if let Some(ref hdr) = styled_header {
+                    if !hdr[c].is_empty() {
+                        combined.extend_from_slice(&hdr[c]);
+                        combined.push((':', "\x1b[2;36m"));
+                        combined.push((' ', ""));
+                    }
+                }
+                combined.extend_from_slice(&row[c]);
+                for line in wrap_styled_cell(&combined, card_inner_w) {
+                    out.push_str("  ");
+                    out.push_str(&bdr);
+                    out.push(' ');
+                    out.push_str(&line);
+                    out.push(' ');
+                    out.push_str(&bdr);
+                    out.push('\n');
+                }
+            }
+            if r_idx + 1 < styled_body.len() {
+                out.push_str(&draw_card_rule("├", "┤"));
+            }
+        }
+        out.push_str(&draw_card_rule("╰", "╯"));
+        return out;
+    }
+
     let avail_w = term_cols.saturating_sub(overhead).max(num_cols * 4);
     let total_nat: usize = nat_w.iter().sum();
 
@@ -843,6 +895,10 @@ impl MarkdownStreamRenderer {
 
     pub fn push(&mut self, chunk: &str) {
         crate::hud::record_raw_output_fragment(chunk);
+        self.push_replay(chunk);
+    }
+
+    pub fn push_replay(&mut self, chunk: &str) {
         for ch in chunk.chars() {
             self.push_char(ch);
         }

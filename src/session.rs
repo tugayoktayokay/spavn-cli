@@ -192,7 +192,7 @@ fn format_relative_age(now_secs: u64, mtime_secs: u64) -> String {
     } else if diff < 86400 {
         let hrs = (diff / 3600).to_string();
         let mins = ((diff % 3600) / 60).to_string();
-        tr_en("{}sa {}dk önce", "{}h {}m ago")
+        tr_en("{0}sa {1}dk önce", "{0}h {1}m ago")
             .replace("{0}", &hrs)
             .replace("{1}", &mins)
             .to_string()
@@ -481,8 +481,8 @@ pub fn perform_manual_compact(
             "\n{}🗜️  {}{}",
             DIM,
             tr_en(
-                "Bağlam zaten çok kısa ({} mesaj, ~{} token).",
-                "Context is already very short ({} messages, ~{} tokens)."
+                "Bağlam zaten çok kısa ({0} mesaj, ~{1} token).",
+                "Context is already very short ({0} messages, ~{1} tokens)."
             )
             .replace("{0}", &messages.len().to_string())
             .replace("{1}", &estimate_tokens(messages).to_string()),
@@ -743,15 +743,19 @@ pub fn perform_manual_compact(
     println!(
         "\n{}{}{}",
         GREEN,
-        tr_en(
-            "[Compact Tamamlandı]: ~{} tok -> ~{} tok (%{} bağlam tasarrufu)",
-            "[Compact Done]: ~{} tok -> ~{} tok ({}% context saved)"
-        )
-        .replace("{0}", &before_tok.to_string())
-        .replace("{1}", &after_tok.to_string())
-        .replace("{2}", &saved_pct.to_string()),
+        format_compact_done_banner(before_tok, after_tok, saved_pct),
         RESET
     );
+}
+
+pub fn format_compact_done_banner(before_tok: usize, after_tok: usize, saved_pct: usize) -> String {
+    tr_en(
+        "[Compact Tamamlandı]: ~{0} tok -> ~{1} tok (%{2} bağlam tasarrufu)",
+        "[Compact Done]: ~{0} tok -> ~{1} tok ({2}% context saved)",
+    )
+    .replace("{0}", &before_tok.to_string())
+    .replace("{1}", &after_tok.to_string())
+    .replace("{2}", &saved_pct.to_string())
 }
 
 #[cfg(test)]
@@ -969,5 +973,17 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("...[Compacted"));
+    }
+
+    #[test]
+    fn compact_done_banner_substitutes_all_placeholders() {
+        let banner = format_compact_done_banner(42200, 5900, 86);
+        assert!(
+            !banner.contains("{}") && !banner.contains("{0}") && !banner.contains("{1}") && !banner.contains("{2}"),
+            "banner must not contain raw placeholders: {banner}"
+        );
+        assert!(banner.contains("42200"), "banner missing before_tok: {banner}");
+        assert!(banner.contains("5900"), "banner missing after_tok: {banner}");
+        assert!(banner.contains("86"), "banner missing saved_pct: {banner}");
     }
 }

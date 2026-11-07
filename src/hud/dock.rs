@@ -260,13 +260,8 @@ pub fn term_size() -> (usize, usize) {
         };
         if ioctl(1, TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
             let rows = (ws.ws_row as usize).max(12);
-            let raw_cols = ws.ws_col as usize;
-            let cols = if raw_cols < 48 {
-                LAST_TERM_COLS.load(Ordering::Relaxed).max(60)
-            } else {
-                LAST_TERM_COLS.store(raw_cols, Ordering::Relaxed);
-                raw_cols
-            };
+            let cols = (ws.ws_col as usize).max(20);
+            LAST_TERM_COLS.store(cols, Ordering::Relaxed);
             return (rows, cols);
         }
     }
@@ -939,9 +934,11 @@ pub(crate) fn render_inline_dock(
         bottom_count,
         visible_cursor_row,
     );
+    let pin_bottom = if prev_top_w.is_none() { "\x1b[999B" } else { "" };
     let cursor_col = (5 + cursor_col_offset).min(full_w);
     print!(
-        "\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[{}A\r\x1b[J{}\n{}\n{}\x1b[?7h\x1b[{}A\r\x1b[{}G\x1b[?2026l",
+        "\x1b[?2026h\x1b[?25l\x1b[?7l{}\x1b[{}A\r\x1b[J{}\n{}\n{}\x1b[?7h\x1b[{}A\r\x1b[{}G\x1b[?2026l",
+        pin_bottom,
         geometry.up_to_start,
         top_joined,
         input_joined,
