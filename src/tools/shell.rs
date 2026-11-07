@@ -180,7 +180,15 @@ pub(crate) fn check_bash_gate(
         matches!(risk, ShellRisk::Destructive(_)) || crate::config::host_is_sensitive(host);
     match ctx.access {
         AccessMode::Safe => {
-            if !prompt_user_approval(ctx, &format!("{} [{}]", crate::config::tr_en("Komut Çalıştırma", "Command Execution"), host), cmd) {
+            if !prompt_user_approval(
+                ctx,
+                &format!(
+                    "{} [{}]",
+                    crate::config::tr_en("Komut Çalıştırma", "Command Execution"),
+                    host
+                ),
+                cmd,
+            ) {
                 return Err("User rejected command in SAFE mode.".to_string());
             }
         }
@@ -201,10 +209,7 @@ pub(crate) fn check_bash_gate(
                     ctx,
                     &format!(
                         "{} [{}] — {}",
-                        crate::config::tr_en(
-                            "Kritik Komut Onayı",
-                            "Critical Command Approval"
-                        ),
+                        crate::config::tr_en("Kritik Komut Onayı", "Critical Command Approval"),
                         host,
                         reason
                     ),
@@ -268,11 +273,17 @@ pub(crate) fn check_egress_gate(
             let needs_prompt = ctx.can_prompt
                 && (ctx.access == AccessMode::Safe
                     || ctx.phase == crate::spavn_engine::AgentPhase::Plan);
-            if needs_prompt && !prompt_user_approval(ctx, crate::config::tr_en("Web erişimi (fetch)", "Web access (fetch)"), url) {
+            if needs_prompt
+                && !prompt_user_approval(
+                    ctx,
+                    crate::config::tr_en("Web erişimi (fetch)", "Web access (fetch)"),
+                    url,
+                )
+            {
                 return Some(
                     crate::config::tr_en(
                         "Web fetch reddedildi (onay yok).",
-                        "Web fetch rejected (no approval)."
+                        "Web fetch rejected (no approval).",
                     )
                     .to_owned(),
                 );

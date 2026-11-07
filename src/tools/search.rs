@@ -795,7 +795,7 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
                 lines.push(
                     crate::config::tr_en(
                         "[SPAVN Search: 8s zaman sınırı doldu, ilk eşleşmeler gösteriliyor]",
-                        "[SPAVN Search: 8s time limit reached, showing initial matches]"
+                        "[SPAVN Search: 8s time limit reached, showing initial matches]",
                     )
                     .to_owned(),
                 );
@@ -953,9 +953,7 @@ pub(crate) fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
     let cwd = crate::memory::current_workdir();
 
     if op == "remember" {
-        if ctx.access == AccessMode::Safe
-            && !prompt_user_approval(ctx, "Remember", query)
-        {
+        if ctx.access == AccessMode::Safe && !prompt_user_approval(ctx, "Remember", query) {
             return "User rejected memory write in SAFE mode.".to_string();
         }
         let raw_kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("not");
@@ -972,10 +970,7 @@ pub(crate) fn exec_memory(ctx: &mut ToolContext, args: &Value) -> String {
                 {
                     if out.status.success() {
                         let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        return format!(
-                            "{}🧠 Saved to memory ({}): {}{}",
-                            CYAN, kind, msg, RESET
-                        );
+                        return format!("{}🧠 Saved to memory ({}): {}{}", CYAN, kind, msg, RESET);
                     }
                 }
             }

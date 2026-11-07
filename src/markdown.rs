@@ -402,6 +402,29 @@ pub fn render_markdown_table(raw_rows: &[String], term_cols: usize) -> String {
         }
     }
 
+    // Hard responsive budget: narrow terminals must never see a torn table.
+    // `avail_w` and the per-column floors above can still overflow the real
+    // width when the column count runs high, so squeeze proportionally here.
+    let budget = term_cols.saturating_sub(overhead).max(2);
+    let mut excess = col_w.iter().sum::<usize>().saturating_sub(budget);
+    while excess > 0 {
+        let max_w = *col_w.iter().max().unwrap_or(&2);
+        let mut touched = false;
+        for w in col_w.iter_mut() {
+            if excess == 0 {
+                break;
+            }
+            if *w == max_w && *w > 2 {
+                *w -= 1;
+                excess -= 1;
+                touched = true;
+            }
+        }
+        if !touched {
+            break;
+        }
+    }
+
     let draw_rule = |left: &str, mid: &str, right: &str| -> String {
         let segs: Vec<String> = col_w.iter().map(|&w| "─".repeat(w + 2)).collect();
         format!(
@@ -775,6 +798,8 @@ pub struct MarkdownStreamRenderer {
     in_bold: bool,
     in_italic: bool,
     in_inline_code: bool,
+    pending_underscore: bool,
+    last_word: bool,
     star_count: usize,
     table_rows: Vec<String>,
     out_buf: String,
@@ -798,6 +823,8 @@ impl MarkdownStreamRenderer {
             in_bold: false,
             in_italic: false,
             in_inline_code: false,
+            pending_underscore: false,
+            last_word: false,
             star_count: 0,
             table_rows: Vec::new(),
             out_buf: String::new(),
@@ -815,6 +842,7 @@ impl MarkdownStreamRenderer {
     }
 
     pub fn push(&mut self, chunk: &str) {
+        crate::hud::record_raw_output_fragment(chunk);
         for ch in chunk.chars() {
             self.push_char(ch);
         }
@@ -862,6 +890,10 @@ impl MarkdownStreamRenderer {
                 .push_str(&format!("\r  {}╰{}{}\n", DIM, "─".repeat(rule_w), RESET));
         }
         self.flush_table();
+        if self.pending_underscore {
+            self.pending_underscore = false;
+            self.out_buf.push('_');
+        }
         self.flush_stars(true);
         if !self.at_line_start {
             self.out_buf.push_str(RESET);
@@ -883,6 +915,11 @@ impl MarkdownStreamRenderer {
         self.in_bold = false;
         self.in_italic = false;
         self.in_inline_code = false;
+        self.last_word = false;
+        if self.pending_underscore {
+            self.pending_underscore = false;
+            self.out_buf.push('_');
+        }
         self.out_buf.push_str(RESET);
         self.out_buf.push('\n');
         self.at_line_start = true;
@@ -935,18 +972,55 @@ impl MarkdownStreamRenderer {
             if self.star_count == 2 {
                 self.flush_stars(false);
             }
+            self.last_word = false;
             return;
         }
 
         if self.star_count == 1 && ch == ' ' {
             self.star_count = 0;
             self.out_buf.push_str("* ");
+            self.last_word = false;
             return;
         }
         self.flush_stars(false);
 
+        if ch == '_' && !self.in_inline_code {
+            if self.pending_underscore {
+                // "__" in a row: literal underscores, intraword per CommonMark
+                self.pending_underscore = false;
+                self.out_buf.push_str("__");
+                self.last_word = true;
+            } else {
+                // hold: resolve on next char (prev/next word boundary decides)
+                self.pending_underscore = true;
+            }
+            return;
+        }
+        if self.pending_underscore {
+            self.pending_underscore = false;
+            let prev_word = self.last_word;
+            let next_word = ch.is_alphanumeric() || ch == '_';
+            if self.in_italic {
+                if prev_word && !next_word {
+                    // closing `_` (word char before, boundary after)
+                    self.in_italic = false;
+                    self.out_buf.push_str("\x1b[23m");
+                } else {
+                    self.out_buf.push('_');
+                }
+            } else if !prev_word && next_word {
+                // opening `_` (boundary before, word char after)
+                self.in_italic = true;
+                self.out_buf.push_str("\x1b[3m");
+            } else {
+                // intraword or isolated `_`: literal
+                self.out_buf.push('_');
+            }
+        }
+
         if ch == '`' {
             self.in_inline_code = !self.in_inline_code;
+            self.last_word = false;
             if self.in_inline_code {
                 self.out_buf.push_str("\x1b[36m");
             } else if self.in_heading {
@@ -960,6 +1034,7 @@ impl MarkdownStreamRenderer {
         }
 
         if ch == '|' && !self.in_inline_code {
+            self.last_word = false;
             self.out_buf.push_str(&format!(
                 "{}│{}",
                 DIM,
@@ -975,6 +1050,7 @@ impl MarkdownStreamRenderer {
         }
 
         self.out_buf.push(ch);
+        self.last_word = ch.is_alphanumeric();
     }
 
     fn push_char(&mut self, ch: char) {
@@ -1192,8 +1268,8 @@ impl MarkdownStreamRenderer {
 
 #[cfg(test)]
 mod markdown_tests {
-    use super::{parse_table_row_cells, strip_md_links};
     use super::*;
+    use super::{parse_table_row_cells, strip_md_links};
 
     #[test]
     fn table_cells_collapse_links_and_images_to_labels() {
@@ -1201,10 +1277,7 @@ mod markdown_tests {
         // must measure the visible labels, not the raw markdown URLs.
         let row = "| ![av](https://x/y.png) | [tugayokayokay](https://github.com/tugayokayokay) | Tugay Oktay Okay |";
         let cells = parse_table_row_cells(row);
-        assert_eq!(
-            cells,
-            vec!["av", "tugayokayokay", "Tugay Oktay Okay"]
-        );
+        assert_eq!(cells, vec!["av", "tugayokayokay", "Tugay Oktay Okay"]);
 
         // Code spans keep their raw markdown by design.
         assert_eq!(
@@ -1314,6 +1387,27 @@ mod markdown_tests {
 #[cfg(test)]
 mod robustness_tests {
     use super::*;
+
+    #[test]
+    fn probe_narrow_terminal_width_overflow() {
+        let rows = vec![
+            "| # | Sorun | Etki | Kanıt | Durum | Not |".to_string(),
+            "|---|---|---|---|---|---|".to_string(),
+            "| 1 | format_string_trap | derleme kırılması | session.rs:727 | fixlendi | tr_en çifti |".to_string(),
+            "| 2 | envoy_long_cell_content_that_never_stops | görsel taşma | turn.rs:564 | fixlendi | wrap |".to_string(),
+            "| 3 | compact_marker_chain | dedup kırılması | turn.rs:523 | korundu | tasarım |".to_string(),
+        ];
+        for cols in [40usize, 50, 70, 120] {
+            let out = render_markdown_table(&rows, cols);
+            for line in out.lines() {
+                let w = crate::ansi::visible_width(line);
+                assert!(
+                    w <= cols,
+                    "cols={cols}: line width {w} > terminal {cols}: {line:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn table_and_stream_never_panic_on_odd_input() {

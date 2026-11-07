@@ -193,8 +193,9 @@ fn format_relative_age(now_secs: u64, mtime_secs: u64) -> String {
         let hrs = (diff / 3600).to_string();
         let mins = ((diff % 3600) / 60).to_string();
         tr_en("{}sa {}dk önce", "{}h {}m ago")
-                .replace("{0}", &hrs)
-                .replace("{1}", &mins).to_string()
+            .replace("{0}", &hrs)
+            .replace("{1}", &mins)
+            .to_string()
     } else {
         format!("{}{}", diff / 86400, tr_en("gün önce", "d ago").to_owned())
     }
@@ -722,13 +723,16 @@ pub fn perform_manual_compact(
             } else {
                 format!("\n- [tools/files]: {}", touched_tools.join(", "))
             };
-            new_msgs.push(ChatMessage::user(format!(
-                "[SPAVN Auto-Compact Özet{}]:\n{}{}{}",
-                focus_note,
-                transcript_lines.join("\n"),
-                tools_note,
-                preserved_user_suffix
-            )));
+            new_msgs.push(ChatMessage::user(
+                tr_en(
+                    "[SPAVN Auto-Compact Özet{0}]:\n{1}{2}{3}",
+                    "[SPAVN Auto-Compact Summary{0}]:\n{1}{2}{3}",
+                )
+                .replace("{0}", &focus_note)
+                .replace("{1}", &transcript_lines.join("\n"))
+                .replace("{2}", &tools_note)
+                .replace("{3}", &preserved_user_suffix),
+            ));
         }
         new_msgs.extend_from_slice(&messages[tail_start..]);
         *messages = new_msgs;

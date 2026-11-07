@@ -508,6 +508,13 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                 tr_en("/commit (Değişiklikleri İşle)", "/commit (Commit Changes)"),
             ),
             (
+                "/copy",
+                tr_en(
+                    "/copy (Son Çıktıdan Kopyalanabilir Alan Seç)",
+                    "/copy (Pick Copyable Region From Last Output)",
+                ),
+            ),
+            (
                 "/update",
                 tr_en("/update (Sürüm Denetimi)", "/update (Check for Updates)"),
             ),
@@ -647,7 +654,7 @@ pub(crate) fn render_inline_dock(
     queued_count: usize,
     busy_mode: &str,
     recap_line: Option<&str>,
-    prev_top_w: &mut usize,
+    prev_top_w: &mut Option<usize>,
     prev_cursor_col: &mut usize,
     cols: usize,
 ) {
@@ -820,6 +827,7 @@ pub(crate) fn render_inline_dock(
     let mut h_items = vec![
         format_context_usage_badge(),
         format!("{}{}{}", DIM, tr_en("/: Menü", "/: Menu"), RESET),
+        format!("{}{}{}", DIM, tr_en("/copy: Kopyala", "/copy: Copy"), RESET),
         format!("{}@: {}{}", DIM, tr_en("Dosya/Skill", "File/Skill"), RESET),
         format!("{}/model{}", DIM, RESET),
         format!("{}/diff{}", DIM, RESET),
@@ -910,12 +918,19 @@ pub(crate) fn render_inline_dock(
             bottom_lines.push(format!("{}│{}  {}", CYAN, RESET, trunc));
         }
     }
-    while bottom_lines.len() < SUGGESTION_ROWS + 1 {
-        bottom_lines.push(String::new());
-    }
 
     let bottom_count = bottom_lines.len().max(1);
     let bottom_joined = bottom_lines.join("\n");
+
+    // If the suggestion popup just closed (shrinking rows below the cursor), clear from the
+    // old top anchor and re-pin the dock flush to the bottom terminal row (`\x1b[999B`).
+    let prev_bottom_count = PREV_DOCK_BOTTOM_COUNT.swap(bottom_count, Ordering::SeqCst);
+    if prev_top_w.is_some() && bottom_count < prev_bottom_count {
+        if let Some(prev) = *prev_top_w {
+            print!("\x1b[{}A\r\x1b[J\x1b[999B", prev.max(1));
+        }
+        *prev_top_w = None;
+    }
 
     let geometry = compute_dock_geometry(
         *prev_top_w,
@@ -935,6 +950,6 @@ pub(crate) fn render_inline_dock(
         cursor_col
     );
     let _ = io::stdout().flush();
-    *prev_top_w = geometry.next_top_w;
+    *prev_top_w = Some(geometry.next_top_w);
     *prev_cursor_col = cursor_col;
 }

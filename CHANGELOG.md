@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-11-07 — `v0.2.7`: Bottom-Pinned Input Dock, Mid-Turn Typing Persistence, Clean `/copy` Regions & Self-Update Fixes
+
+### Bottom-Pinned Input Dock (`src/ansi.rs`, `src/hud/dock.rs`, `src/hud/input.rs`, `src/hud/mod.rs`)
+- **Fix**: Eliminated the 3-row blank padding under `╰─` when no `/` or `@` completion popup is active so the idle input dock sits flush on the bottom terminal row just like the busy spinner dock.
+- **Unanchored First-Frame Geometry**: `compute_dock_geometry(None, ...)` now moves up by `total - 1` rows from the bottom terminal row (`\x1b[999B` after reserving rows with `\n\n\n`) so the dock's bottom border lands exactly on the last row without scrolling or overwriting the final lines of assistant output. When a suggestion popup closes, the dock automatically re-anchors to the bottom row.
+
+### Mid-Turn Typing Persistence (`src/hud/input.rs`, `src/hud/mod.rs`)
+- **Fix**: `LiveSpinner` restarts across tool calls and multi-step LLM turns no longer clear `state.typing_buf` on intermediate `stop()` calls. Text typed while the agent is working remains visible in the input box across every tool transition and preserves trailing spaces until `take_spinner_draft()` hands it to `read_bottom_dock_input` at turn end.
+- **Fix**: Removed an `else` branch in the multi-byte escape sequence loop that cleared `typing_buf` on unrecognized `ESC` sequences.
+
+### Clean `/copy` Regions & Copy-Ready Prompt Discipline (`src/hud/mod.rs`, `src/slash_commands.rs`, `src/clipboard.rs`, `src/memory.rs`)
+- **Interactive `/copy` Picker**: Section copies strip the `### Heading` line (used only as the menu label), unwrap single fenced code blocks without ```` ``` ```` markers, and strip `> ` blockquote prefixes and outer wrapping quotes (`"..."` / `“...”`) so copied options are immediately paste-ready.
+- **System Constitution**: Added Rule #8 instructing models to place copy-ready replies, message drafts, prompts, and snippets inside fenced code blocks (` ```text `).
+
+### Self-Update & Provider Routing Fixes (`src/update.rs`, `src/slash_commands.rs`, `src/hud/menus.rs`, `src/router/mod.rs`)
+- **`src/update.rs`**: Stage the extracted binary before cleaning up the temporary archive directory (`base`) and match `"spavn"` first in `find_binary`.
+- **`src/slash_commands.rs`**: Reset scroll region before `exec()` on `/update` and return `SlashOutcome::Handled` instead of exiting the TUI loop if `exec()` fails.
+- **`src/hud/menus.rs` & `src/router/mod.rs`**: Disambiguate duplicate model keys across providers using `provider_id:key` so selecting a model from a secondary provider routes to the selected provider's `base_url`.
+
 ## 2026-11-07 — `v0.2.4`: Busy-Draft Preservation, HUD Polish & Markdown Expansion Fixes
 
 ### Busy-Draft Preservation (`src/hud/mod.rs`, `src/hud/input.rs`, `src/main.rs`)

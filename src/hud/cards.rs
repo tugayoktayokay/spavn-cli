@@ -2,8 +2,7 @@ use super::*;
 
 /// Caches the git branch per working directory so state-change renders
 /// (/model, /clear, /reload) don't re-spawn `git rev-parse` when cwd is unchanged.
-static GIT_BRANCH_CACHE: std::sync::Mutex<Option<(String, String)>> =
-    std::sync::Mutex::new(None);
+static GIT_BRANCH_CACHE: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 
 fn cached_git_branch(cwd: &str) -> Option<String> {
     if let Ok(hit) = GIT_BRANCH_CACHE.lock() {
@@ -159,16 +158,12 @@ pub fn render_welcome_header(
     } else {
         format!("📂 {}{}{}", CYAN, short_cwd, RESET)
     };
-    let row3_info = format!(
-        "💬 {}{}{}",
-        DIM, short_session, RESET
-    );
+    let row3_info = format!("💬 {}{}{}", DIM, short_session, RESET);
 
     let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
     let lc_term = std::env::var("LC_TERMINAL").unwrap_or_default();
-    let supports_osc1337 = term_prog == "iTerm.app"
-        || term_prog == "WezTerm"
-        || lc_term == "iTerm2";
+    let supports_osc1337 =
+        term_prog == "iTerm.app" || term_prog == "WezTerm" || lc_term == "iTerm2";
 
     println!();
     if supports_osc1337 {

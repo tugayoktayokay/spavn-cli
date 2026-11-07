@@ -1,6 +1,6 @@
 use crate::config::{
-    byok_catalog, expand_user_path, load_user_config, resolve_api_key, save_user_config,
-    tr_en, upsert_spavn_secret, ModelConfigEntry, ProviderGroupConfig,
+    byok_catalog, expand_user_path, load_user_config, resolve_api_key, save_user_config, tr_en,
+    upsert_spavn_secret, ModelConfigEntry, ProviderGroupConfig,
 };
 use crate::router::{ChatMessage, ModelEndpoint};
 use crate::tools::AccessMode;
@@ -50,6 +50,7 @@ pub(crate) const AT_FILE_RESULT_LIMIT: usize = 12;
 pub(crate) const AT_SKILL_RESULT_LIMIT: usize = 15;
 /// Fixed row count of the `@`/`/` completion popup, so the dock height never oscillates.
 pub(crate) const SUGGESTION_ROWS: usize = 3;
+pub(crate) static PREV_DOCK_BOTTOM_COUNT: AtomicUsize = AtomicUsize::new(1);
 
 pub fn set_context_window_usage(used_tokens: usize, max_tokens: usize) {
     USED_CONTEXT_TOKENS.store(used_tokens, Ordering::Relaxed);
@@ -291,6 +292,12 @@ pub(crate) struct SpinnerScreenState {
     pub(crate) started_at: Option<Instant>,
     pub(crate) dock_lines: Vec<String>,
     pub(crate) partial_line: String,
+    /// O(1) memoized visible width of `partial_line` (kept in sync at every mutation).
+    pub(crate) partial_vw: usize,
+    /// 0 = none, 1 = bare ESC pending, 2 = inside CSI sequence.
+    pub(crate) partial_esc: u8,
+    /// Memoized "contains │╭├╰" for the table-box-line wrap decision.
+    pub(crate) partial_has_box: bool,
     pub(crate) partial_prefix: String,
     pub(crate) partial_shown: bool,
     pub(crate) thinking_box_open: bool,
@@ -313,6 +320,9 @@ pub(crate) static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
         started_at: None,
         dock_lines: Vec::new(),
         partial_line: String::new(),
+        partial_vw: 0,
+        partial_esc: 0,
+        partial_has_box: false,
         partial_prefix: String::new(),
         partial_shown: false,
         thinking_box_open: false,
@@ -333,7 +343,21 @@ pub(crate) static SPINNER_SCREEN: std::sync::Mutex<SpinnerScreenState> =
 static SPINNER_DRAFT: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn take_spinner_draft() -> Option<String> {
-    SPINNER_DRAFT.lock().ok()?.take()
+    let mut from_state: Option<String> = None;
+    if let Ok(mut state) = SPINNER_SCREEN.lock() {
+        if !state.typing_buf.is_empty() {
+            let live: String = state.typing_buf.iter().collect();
+            if !live.trim().is_empty() {
+                from_state = Some(live);
+            }
+        }
+        state.typing_buf.clear();
+        state.typing_cursor = 0;
+        state.typing_sel_anchor = None;
+        state.is_typing = false;
+    }
+    let from_slot = SPINNER_DRAFT.lock().ok().and_then(|mut s| s.take());
+    from_state.or(from_slot)
 }
 
 pub(crate) fn rebuild_spinner_dock_lines(
@@ -503,9 +527,11 @@ pub(crate) fn rebuild_spinner_dock_lines(
             (s < e).then_some(e - s)
         });
         if let Some(len) = sel_len {
-            let template =
-                tr_en("Seçili: {} karakter (Backspace: Sil)", "Selected: {} chars (Backspace: Delete)")
-                    .replace("{}", &len.to_string());
+            let template = tr_en(
+                "Seçili: {} karakter (Backspace: Sil)",
+                "Selected: {} chars (Backspace: Delete)",
+            )
+            .replace("{}", &len.to_string());
             template
         } else {
             tr_en(
@@ -548,12 +574,109 @@ pub(crate) fn rebuild_spinner_dock_lines(
     state.dock_lines = all_dock;
 }
 
-pub(crate) fn in_incomplete_ansi(s: &str) -> bool {
-    if let Some(pos) = s.rfind('\x1b') {
-        !s[pos + 1..].chars().any(|c| c.is_ascii_alphabetic())
-    } else {
-        false
+/// Pushes one char into the spinner's partial line, keeping the O(1) memoized
+/// visible-width / escape-state / box-char flags in sync. Returns the new memo
+/// values so the wrap decision needs no re-scan of the whole line.
+fn partial_screen_push(state: &mut SpinnerScreenState, ch: char) -> (usize, bool, bool) {
+    if state.partial_esc == 2 {
+        state.partial_line.push(ch);
+        if matches!(ch, '@'..='~') {
+            state.partial_esc = 0;
+        }
+        return (state.partial_vw, state.partial_has_box, state.partial_esc != 0);
     }
+    if state.partial_esc == 3 {
+        // Inside an OSC body: consume until BEL or ST (\x1b\\), mirroring
+        // `skip_escape` so the memo counts zero width for the whole sequence.
+        state.partial_line.push(ch);
+        if ch == '\x07' {
+            state.partial_esc = 0;
+        } else if ch == '\x1b' {
+            state.partial_esc = 4;
+        }
+        return (state.partial_vw, state.partial_has_box, state.partial_esc != 0);
+    }
+    if state.partial_esc == 4 {
+        state.partial_line.push(ch);
+        state.partial_esc = if ch == '\\' { 0 } else { 3 };
+        return (state.partial_vw, state.partial_has_box, state.partial_esc != 0);
+    }
+    if state.partial_esc == 1 {
+        state.partial_line.push(ch);
+        if ch == '[' {
+            state.partial_esc = 2;
+        } else if ch == ']' {
+            state.partial_esc = 3;
+        } else {
+            state.partial_esc = 0;
+        }
+        return (state.partial_vw, state.partial_has_box, state.partial_esc != 0);
+    }
+    if ch == '\u{1b}' {
+        state.partial_line.push(ch);
+        state.partial_esc = 1;
+        return (state.partial_vw, state.partial_has_box, true);
+    }
+    state.partial_line.push(ch);
+    state.partial_vw += char_display_width(ch);
+    if !state.partial_has_box && matches!(ch, '│' | '╭' | '├' | '╰') {
+        state.partial_has_box = true;
+    }
+    (state.partial_vw, state.partial_has_box, false)
+}
+
+/// Full-reset of the partial line; recomputes memos from scratch.
+pub(crate) fn partial_screen_reset(state: &mut SpinnerScreenState) {
+    state.partial_line.clear();
+    state.partial_vw = 0;
+    state.partial_esc = 0;
+    state.partial_has_box = false;
+}
+
+/// Recomputes the memos after an external mutation restores prefix/carry text.
+fn partial_screen_recount(state: &mut SpinnerScreenState) {
+    let mut vw = 0usize;
+    let mut esc = 0u8;
+    let mut has_box = false;
+    for ch in state.partial_line.chars() {
+        if esc == 2 {
+            if matches!(ch, '@'..='~') {
+                esc = 0;
+            }
+            continue;
+        }
+        if esc == 3 {
+            if ch == '\x07' {
+                esc = 0;
+            } else if ch == '\x1b' {
+                esc = 4;
+            }
+            continue;
+        }
+        if esc == 4 {
+            esc = if ch == '\\' { 0 } else { 3 };
+            continue;
+        }
+        if esc == 1 {
+            esc = if ch == '[' {
+                2
+            } else if ch == ']' {
+                3
+            } else {
+                0
+            };
+            continue;
+        }
+        if ch == '\u{1b}' {
+            esc = 1;
+            continue;
+        }
+        vw += char_display_width(ch);
+        has_box = has_box || matches!(ch, '│' | '╭' | '├' | '╰');
+    }
+    state.partial_vw = vw;
+    state.partial_esc = esc;
+    state.partial_has_box = has_box;
 }
 
 pub(crate) fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
@@ -569,7 +692,7 @@ pub(crate) fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
     let max_w = cols.saturating_sub(6).max(20);
     let status_hdr = get_sticky_dock_status();
     rebuild_spinner_dock_lines(state, &status_hdr, cols);
-    let mut out = String::from("\x1b[?2026h\x1b[?25l\x1b[?7l\r\x1b[J");
+    let mut out = String::from("\u{1b}[?2026h\u{1b}[?25l\u{1b}[?7l\r\u{1b}[J");
     for ch in text.chars() {
         if ch == '\r' {
             continue;
@@ -579,22 +702,17 @@ pub(crate) fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
                 && !state.partial_prefix.is_empty()
                 && state.partial_line == state.partial_prefix
             {
-                state.partial_line.clear();
+                partial_screen_reset(state);
                 continue;
             }
-            out.push_str("\x1b[?7h");
+            out.push_str("\u{1b}[?7h");
             out.push_str(&state.partial_line);
-            out.push_str("\x1b[0m\n");
-            state.partial_line.clear();
+            out.push_str("\u{1b}[0m\n");
+            partial_screen_reset(state);
         } else {
-            state.partial_line.push(ch);
-            if !in_incomplete_ansi(&state.partial_line) {
-                let (_, vw) = truncate_ansi_to_width(&state.partial_line, usize::MAX);
-                let is_table_box_line = !state.thinking_box_open
-                    && (state.partial_line.contains('│')
-                        || state.partial_line.contains('╭')
-                        || state.partial_line.contains('├')
-                        || state.partial_line.contains('╰'));
+            let (vw, has_box, esc_open) = partial_screen_push(state, ch);
+            if !esc_open {
+                let is_table_box_line = !state.thinking_box_open && has_box;
                 let should_wrap = if is_table_box_line {
                     vw >= cols.saturating_sub(2).max(20)
                 } else {
@@ -612,9 +730,9 @@ pub(crate) fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
                             if rel_sp > 8 {
                                 let split_at = pfx_len + rel_sp;
                                 let carry = state.partial_line[split_at + 1..].to_string();
-                                out.push_str("\x1b[?7h");
+                                out.push_str("\u{1b}[?7h");
                                 out.push_str(&state.partial_line[..split_at]);
-                                out.push_str("\x1b[0m\n");
+                                out.push_str("\u{1b}[0m\n");
                                 state.partial_line.clear();
                                 if !state.partial_prefix.is_empty() {
                                     state.partial_line.push_str(&state.partial_prefix);
@@ -622,19 +740,21 @@ pub(crate) fn spinner_print_locked(state: &mut SpinnerScreenState, text: &str) {
                                     state.partial_line.push_str("  ");
                                 }
                                 state.partial_line.push_str(&carry);
+                                partial_screen_recount(state);
                                 continue;
                             }
                         }
                     }
-                    out.push_str("\x1b[?7h");
+                    out.push_str("\u{1b}[?7h");
                     out.push_str(state.partial_line.trim_end());
-                    out.push_str("\x1b[0m\n");
+                    out.push_str("\u{1b}[0m\n");
                     state.partial_line.clear();
                     if !state.partial_prefix.is_empty() {
                         state.partial_line.push_str(&state.partial_prefix);
                     } else {
                         state.partial_line.push_str("  ");
                     }
+                    partial_screen_recount(state);
                 }
             }
         }
@@ -681,6 +801,7 @@ pub(crate) fn close_thinking_box_locked(state: &mut SpinnerScreenState) {
         let pfx = std::mem::take(&mut state.partial_prefix);
         if !pfx.is_empty() && state.partial_line.trim_end() == pfx.trim_end() {
             state.partial_line.clear();
+            partial_screen_reset(state);
             spinner_print_locked(state, &format!("{}╰─{}\n", DIM, RESET));
         } else {
             spinner_print_locked(state, &format!("\n{}╰─{}\n", DIM, RESET));
@@ -689,12 +810,371 @@ pub(crate) fn close_thinking_box_locked(state: &mut SpinnerScreenState) {
 }
 
 pub fn spinner_print(text: &str) {
+    record_output_fragment(text);
     if let Ok(mut state) = SPINNER_SCREEN.lock() {
         spinner_print_locked(&mut state, text);
     } else {
         print!("{}", text);
         let _ = io::stdout().flush();
     }
+}
+
+/// Rolling buffer fed by every HUD print; Ctrl+Y copies its ANSI-stripped content.
+pub(crate) static LAST_OUTPUT: Mutex<String> = Mutex::new(String::new());
+
+/// Raw model-text buffer fed by the markdown stream renderer: unrendered markdown
+/// with zero HUD chrome (headers, footers, borders). Copy operations prefer this.
+/// Marker-based capture: cleared at each turn's content start (`begin_turn_capture`),
+/// filled by `MarkdownStreamRenderer::push`, so it holds exactly the last turn.
+pub(crate) static LAST_RAW_OUTPUT: Mutex<String> = Mutex::new(String::new());
+
+/// Opens a fresh raw-capture window at the start of an assistant turn's content.
+/// Everything streamed afterwards is what `/copy` serves; HUD chrome never enters.
+pub fn begin_turn_capture() {
+    if let Ok(mut buf) = LAST_RAW_OUTPUT.lock() {
+        buf.clear();
+    }
+}
+
+/// Keeps `buf` bounded by dropping its head past 120k chars (down to 100k).
+fn cap_rolling_buffer(buf: &mut String) {
+    while buf.len() > 120_000 {
+        let offset = buf.len() - 100_000;
+        match buf.char_indices().find(|(i, _)| *i >= offset) {
+            Some((i, _)) => {
+                buf.drain(..i);
+            }
+            None => {
+                buf.clear();
+            }
+        };
+    }
+}
+
+pub(crate) fn record_output_fragment(fragment: &str) {
+    if fragment.is_empty() {
+        return;
+    }
+    if let Ok(mut buf) = LAST_OUTPUT.lock() {
+        buf.push_str(fragment);
+        cap_rolling_buffer(&mut buf);
+    }
+}
+
+pub(crate) fn record_raw_output_fragment(fragment: &str) {
+    if fragment.is_empty() {
+        return;
+    }
+    if let Ok(mut buf) = LAST_RAW_OUTPUT.lock() {
+        buf.push_str(fragment);
+        cap_rolling_buffer(&mut buf);
+    }
+}
+
+pub fn last_output_snapshot() -> String {
+    // Prefer the raw model text: it carries no UI chrome (header/footer/borders),
+    // so copies land as clean plain markdown.
+    if let Ok(raw) = LAST_RAW_OUTPUT.lock() {
+        if !raw.is_empty() {
+            return raw.clone();
+        }
+    }
+    let raw = LAST_OUTPUT.lock().map(|b| b.clone()).unwrap_or_default();
+    crate::hud::menus::strip_ansi(&raw)
+}
+
+/// Prints the one-line copy footer shown right after a finished turn, so the
+/// copy affordance is visible where the output just landed (not only in the dock).
+pub fn print_copy_hint() {
+    let regions = copy_regions();
+    let Some(first) = regions.first() else {
+        return;
+    };
+    if regions.len() == 1 && first.body.lines().count() <= 2 {
+        return;
+    }
+    println!(
+        "{}📋 {}: {} ({} {}){}",
+        DIM,
+        tr_en("Kopyala", "Copy"),
+        tr_en("/copy", "/copy"),
+        regions.len(),
+        tr_en("alan", "regions"),
+        RESET
+    );
+}
+
+/// A copyable chunk of the last assistant output, listed by `/copy`.
+pub struct CopyRegion {
+    pub label: String,
+    pub body: String,
+}
+
+/// Strips blockquote (`> `) markers and optional wrapping outer quotes (`"..."` / `“...”`)
+/// from a block of lines, returning clean copy-ready text.
+fn clean_blockquote_lines(lines: &[&str]) -> String {
+    let mut cleaned: Vec<&str> = lines
+        .iter()
+        .map(|l| {
+            let t = l.trim_start();
+            if let Some(rest) = t.strip_prefix('>') {
+                rest.strip_prefix(' ').unwrap_or(rest)
+            } else {
+                *l
+            }
+        })
+        .collect();
+    while cleaned
+        .first()
+        .map(|l| l.trim().is_empty())
+        .unwrap_or(false)
+    {
+        cleaned.remove(0);
+    }
+    while cleaned.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        cleaned.pop();
+    }
+    let joined = cleaned.join("\n");
+    let trimmed = joined.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('“') && trimmed.ends_with('”')))
+    {
+        let first_len = trimmed.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        let last_len = trimmed.chars().last().map(|c| c.len_utf8()).unwrap_or(1);
+        trimmed[first_len..trimmed.len() - last_len]
+            .trim()
+            .to_string()
+    } else {
+        joined
+    }
+}
+
+/// Cleans the lines captured under a markdown heading so copying a section yields
+/// paste-ready content without the `### Heading` prefix, ```` ``` ```` fences, or `> ` quote markers.
+fn clean_section_body(lines: &[&str]) -> String {
+    let mut slice = lines;
+    while slice.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        slice = &slice[1..];
+    }
+    while slice.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        slice = &slice[..slice.len() - 1];
+    }
+    if slice.is_empty() {
+        return String::new();
+    }
+
+    // 1. If the section wraps a single fenced code block (optionally after a 1-line intro),
+    // return the inner code block content directly without fences.
+    let mut fence_blocks: Vec<Vec<&str>> = Vec::new();
+    let mut in_fence = false;
+    let mut cur_fence: Vec<&str> = Vec::new();
+    let mut outside_non_empty = 0usize;
+    for &line in slice {
+        let t = line.trim_start();
+        if t.starts_with("```") {
+            if in_fence {
+                fence_blocks.push(std::mem::take(&mut cur_fence));
+                in_fence = false;
+            } else {
+                in_fence = true;
+            }
+        } else if in_fence {
+            cur_fence.push(line);
+        } else if !t.is_empty() {
+            outside_non_empty += 1;
+        }
+    }
+    if fence_blocks.len() == 1 && outside_non_empty <= 1 && !fence_blocks[0].is_empty() {
+        return fence_blocks[0].join("\n");
+    }
+
+    // 2. If the section holds a blockquote draft/option (`> "..."`), extract and clean it.
+    let quote_lines: Vec<&str> = slice
+        .iter()
+        .copied()
+        .filter(|l| l.trim_start().starts_with('>'))
+        .collect();
+    let non_quote_non_empty = slice
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('>')
+        })
+        .count();
+    if !quote_lines.is_empty() && non_quote_non_empty <= 1 {
+        return clean_blockquote_lines(&quote_lines);
+    }
+
+    // 3. General section: return trimmed body lines without the heading line.
+    slice.join("\n")
+}
+
+/// Splits the rolling output buffer into copyable regions: every markdown
+/// heading section, fenced code blocks, and standalone blockquotes. When the
+/// output has no structured regions at all (plain chat), the whole output is
+/// offered as a single region.
+pub fn copy_regions() -> Vec<CopyRegion> {
+    let text = last_output_snapshot();
+    let mut regions: Vec<CopyRegion> = Vec::new();
+    if text.trim().is_empty() {
+        return regions;
+    }
+    let mut open: Option<(String, Vec<&str>)> = None;
+    let flush = |region: &mut Vec<CopyRegion>, done: (String, Vec<&str>)| {
+        if done.1.is_empty() {
+            return;
+        }
+        let body = done.1.join("\n");
+        if region.iter().any(|r| r.body == body) {
+            return;
+        }
+        region.push(CopyRegion {
+            label: format!(
+                "{}{}{}: {} ({} {})",
+                BOLD,
+                tr_en("Kod bloğu", "Code block"),
+                RESET,
+                if done.0.is_empty() {
+                    tr_en("kod", "code")
+                } else {
+                    done.0.as_str()
+                },
+                done.1.len(),
+                tr_en("satır", "lines")
+            ),
+            body,
+        });
+    };
+    let mut section: Option<(String, Vec<&str>)> = None;
+    let flush_section = |region: &mut Vec<CopyRegion>, done: (String, Vec<&str>)| {
+        let cleaned = clean_section_body(&done.1);
+        if cleaned.is_empty() {
+            return;
+        }
+        let line_count = cleaned.lines().count();
+        // If a child code block inside this section was already pushed with the exact same
+        // body, replace its generic "Code block" entry with this titled section.
+        region.retain(|r| r.body != cleaned);
+        region.push(CopyRegion {
+            label: format!(
+                "{}{}{}: {} ({} {})",
+                BOLD,
+                tr_en("Bölüm", "Section"),
+                RESET,
+                done.0.trim_start_matches('#').trim(),
+                line_count,
+                tr_en("satır", "lines")
+            ),
+            body: cleaned,
+        });
+    };
+    let mut quote_open: Vec<&str> = Vec::new();
+    let flush_quote = |region: &mut Vec<CopyRegion>, lines: &mut Vec<&str>| {
+        if lines.is_empty() {
+            return;
+        }
+        let raw = std::mem::take(lines);
+        let cleaned = clean_blockquote_lines(&raw);
+        if cleaned.is_empty() || region.iter().any(|r| r.body == cleaned) {
+            return;
+        }
+        let line_count = cleaned.lines().count();
+        region.push(CopyRegion {
+            label: format!(
+                "{}{}{} ({} {})",
+                BOLD,
+                tr_en("Alıntı", "Quote"),
+                RESET,
+                line_count,
+                tr_en("satır", "lines")
+            ),
+            body: cleaned,
+        });
+    };
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        // Inside an open fenced code block, only a closing fence ends it; headings or `>`
+        // inside code must never split the section or trigger quote capture.
+        if let Some(done) = open.take() {
+            if let Some(sec) = section.as_mut() {
+                sec.1.push(line);
+            }
+            if trimmed.starts_with("```") {
+                flush(&mut regions, done);
+            } else {
+                let mut done = done;
+                done.1.push(line);
+                open = Some(done);
+            }
+            continue;
+        }
+        // Thematic break (`***` / `---` / `___`): models use it to close the body
+        // before postamble chatter ("Buradayım Efendim..."); end the section there.
+        let is_thematic = !trimmed.is_empty()
+            && trimmed
+                .chars()
+                .all(|c| c == '*' || c == '-' || c == '_' || c == ' ')
+            && trimmed.chars().filter(|c| !c.is_whitespace()).count() >= 3;
+        if is_thematic {
+            if let Some(done) = section.take() {
+                flush_section(&mut regions, done);
+            }
+            flush_quote(&mut regions, &mut quote_open);
+            continue;
+        }
+        // Heading opens a new copyable section (heading title becomes label, body is clean content).
+        if trimmed.starts_with('#') && !trimmed.starts_with("#!/") {
+            if let Some(done) = section.take() {
+                flush_section(&mut regions, done);
+            }
+            flush_quote(&mut regions, &mut quote_open);
+            section = Some((trimmed.to_string(), Vec::new()));
+            continue;
+        }
+        if let Some(done) = section.as_mut() {
+            done.1.push(line);
+        }
+        if trimmed.starts_with("```") {
+            flush_quote(&mut regions, &mut quote_open);
+            open = Some((
+                trimmed.trim_start_matches('`').trim().to_string(),
+                Vec::new(),
+            ));
+            continue;
+        }
+        if section.is_none() {
+            if trimmed.starts_with('>') {
+                quote_open.push(line);
+            } else if !trimmed.is_empty() {
+                flush_quote(&mut regions, &mut quote_open);
+            }
+        }
+    }
+    if let Some(done) = section.take() {
+        flush_section(&mut regions, done);
+    }
+    if let Some(done) = open.take() {
+        flush(&mut regions, done);
+    }
+    flush_quote(&mut regions, &mut quote_open);
+    // Headings/sections are what the menu is for; only when none exist at all
+    // (plain chat output) fall back to the whole output as one region.
+    if regions.is_empty() {
+        regions.push(CopyRegion {
+            label: format!(
+                "{}{} ({} {}, {} {})",
+                BOLD,
+                tr_en("Son çıktı — tamamı", "Last output — whole"),
+                text.chars().count(),
+                tr_en("krk", "ch"),
+                text.lines().count(),
+                tr_en("satır", "lines")
+            ),
+            body: text,
+        });
+    }
+    regions
 }
 
 pub fn set_spinner_label(label: &str) {
@@ -939,6 +1419,113 @@ pub use crate::ansi::{
 };
 
 #[cfg(test)]
+mod copy_raw_tests {
+    use super::*;
+
+    /// Global copy buffers; serialize copy-snapshot tests.
+    static COPY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_copy_buffers() {
+        begin_turn_capture();
+        if let Ok(mut buf) = LAST_OUTPUT.lock() {
+            buf.clear();
+        }
+    }
+
+    #[test]
+    fn begin_turn_capture_discards_stale_turn_text() {
+        let _g = COPY_TEST_LOCK.lock().unwrap();
+        reset_copy_buffers();
+        record_raw_output_fragment("# Old turn poem\n");
+        begin_turn_capture();
+        record_raw_output_fragment("# New turn text\n");
+        let snap = last_output_snapshot();
+        assert_eq!(snap, "# New turn text\n");
+        assert!(!snap.contains("Old turn"));
+        reset_copy_buffers();
+    }
+
+    #[test]
+    fn copy_region_per_heading_keeps_title_with_body() {
+        let _g = COPY_TEST_LOCK.lock().unwrap();
+        reset_copy_buffers();
+        record_raw_output_fragment(
+            "Efendim, buyrun:\n### Şiir\nbir dize\niki dize\n***\n### Kapanış\nsöz\n",
+        );
+        let regions = copy_regions();
+        let section = regions
+            .iter()
+            .find(|r| r.label.contains("Şiir"))
+            .expect("heading section must exist");
+        assert_eq!(section.body, "bir dize\niki dize");
+        assert_eq!(section.body.lines().count(), 2);
+        assert!(!regions.is_empty());
+        reset_copy_buffers();
+    }
+
+    #[test]
+    fn thematic_break_ends_section_before_postamble_chatter() {
+        let _g = COPY_TEST_LOCK.lock().unwrap();
+        reset_copy_buffers();
+        record_raw_output_fragment(
+            "### Şiir\ndize bir\ndize iki\n***\nBuradayım Efendim. Ne yapalım?\n",
+        );
+        let regions = copy_regions();
+        let section = regions
+            .first()
+            .expect("section must exist");
+        assert_eq!(section.body, "dize bir\ndize iki");
+        assert!(section.body.contains("dize iki"));
+        assert!(!section.body.contains("Buradayım"));
+        // Postamble chatter belongs to no section and there are sections available,
+        // so no whole-output fallback region must be listed.
+    }
+
+    #[test]
+    fn blockquote_and_fenced_options_under_headings_yield_pure_copy_text() {
+        let _g = COPY_TEST_LOCK.lock().unwrap();
+        reset_copy_buffers();
+        record_raw_output_fragment(
+            "### Seçenek 1: En Doğal ve Güçlü Yanıt (Tavsiyem budur)\n> \"Spot on. That was the exact pain point.\n>\n> The human developer shouldn't have to act as the agent's compiler.\"\n\n---\n\n### Seçenek 2: Kısa\n```text\n100%. Deterministic gates win.\n```\n",
+        );
+        let regions = copy_regions();
+        assert_eq!(regions.len(), 2);
+        assert!(regions[0].label.contains("Seçenek 1"));
+        assert_eq!(
+            regions[0].body,
+            "Spot on. That was the exact pain point.\n\nThe human developer shouldn't have to act as the agent's compiler."
+        );
+        assert!(regions[1].label.contains("Seçenek 2"));
+        assert_eq!(regions[1].body, "100%. Deterministic gates win.");
+        reset_copy_buffers();
+    }
+
+    #[test]
+    fn snapshot_prefers_raw_model_text_over_rendered_chrome() {
+        let _g = COPY_TEST_LOCK.lock().unwrap();
+        reset_copy_buffers();
+        record_output_fragment("\x1b[1m╭─ ⚡ SPAVN · gpt-x\x1b[0m\n");
+        record_output_fragment("  \x1b[2;36m▍\x1b[0m Rendered heading\n");
+        record_raw_output_fragment("# Raw heading\n");
+        record_raw_output_fragment("\nPlain prose with `code`.\n");
+        let snap = last_output_snapshot();
+        assert_eq!(snap, "# Raw heading\n\nPlain prose with `code`.\n");
+        assert!(!snap.contains('╭'));
+        reset_copy_buffers();
+    }
+
+    #[test]
+    fn empty_raw_buffer_falls_back_to_rendered_snapshot() {
+        let _g = COPY_TEST_LOCK.lock().unwrap();
+        reset_copy_buffers();
+        record_output_fragment("\x1b[1m╭─ frame\x1b[0m\nproto-only line\n");
+        let snap = last_output_snapshot();
+        assert_eq!(snap, "╭─ frame\nproto-only line\n");
+        reset_copy_buffers();
+    }
+}
+
+#[cfg(test)]
 mod draft_tests {
     use super::*;
 
@@ -946,8 +1533,31 @@ mod draft_tests {
     static DRAFT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_draft() {
+        if let Ok(mut state) = SPINNER_SCREEN.lock() {
+            state.typing_buf.clear();
+            state.typing_cursor = 0;
+            state.typing_sel_anchor = None;
+            state.is_typing = false;
+        }
         if let Ok(mut slot) = SPINNER_DRAFT.lock() {
             *slot = None;
+        }
+    }
+
+    #[test]
+    fn take_drains_live_spinner_typing_buf_and_preserves_trailing_space() {
+        let _g = DRAFT_TEST_LOCK.lock().unwrap();
+        reset_draft();
+        if let Ok(mut state) = SPINNER_SCREEN.lock() {
+            state.typing_buf = "merhaba ".chars().collect();
+            state.typing_cursor = state.typing_buf.len();
+            state.is_typing = true;
+        }
+        assert_eq!(take_spinner_draft(), Some("merhaba ".to_string()));
+        assert_eq!(take_spinner_draft(), None);
+        if let Ok(state) = SPINNER_SCREEN.lock() {
+            assert!(state.typing_buf.is_empty());
+            assert!(!state.is_typing);
         }
     }
 
@@ -981,5 +1591,115 @@ mod draft_tests {
             *slot = Some("yeni taslak".to_string());
         }
         assert_eq!(take_spinner_draft(), Some("yeni taslak".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod partial_memo_tests {
+    use super::*;
+
+    fn fresh_state() -> SpinnerScreenState {
+        SpinnerScreenState {
+            active: false,
+            paused: false,
+            label: String::new(),
+            started_at: None,
+            dock_lines: Vec::new(),
+            partial_line: String::new(),
+            partial_vw: 0,
+            partial_esc: 0,
+            partial_has_box: false,
+            partial_prefix: String::new(),
+            partial_shown: false,
+            thinking_box_open: false,
+            thinking_chars: 0,
+            thinking_pending: String::new(),
+            last_think_flush: None,
+            last_render_at: None,
+            typing_buf: Vec::new(),
+            typing_cursor: 0,
+            typing_sel_anchor: None,
+            is_typing: false,
+            steer_mode: None,
+        }
+    }
+
+    /// The memoized visible width must equal `visible_width` at every step.
+    #[test]
+    fn partial_push_memo_matches_visible_width() {
+        let mut s = fresh_state();
+        let cases: &[&str] = &[
+            "merhaba dünya",
+            "Şiir çıktası: ççğğ_",
+            "\u{1b}[31mkırmızı\u{1b}[0m normal",
+            "\u{1b}]8;;https://o.sc\u{1b}\\link\u{1b}\\ OSC8",
+            "CJK 以字段 한국어 width=2",
+            "│╭├╰ box chars",
+            "emoji 📋✓ ok",
+        ];
+        for case in cases {
+            partial_screen_reset(&mut s);
+            for ch in case.chars() {
+                partial_screen_push(&mut s, ch);
+                assert_eq!(
+                    s.partial_vw,
+                    visible_width(&s.partial_line),
+                    "memo drift after char {:?} in {:?}",
+                    ch,
+                    case
+                );
+            }
+        }
+    }
+
+    /// Escape state: while inside a CSI run no char must count width, and the
+    /// memo must reopen normal counting once the sequence terminates.
+    #[test]
+    fn partial_push_ansi_sequences_are_invisible_to_wrap() {
+        let mut s = fresh_state();
+        for ch in "\u{1b}[31mA".chars() {
+            partial_screen_push(&mut s, ch);
+        }
+        assert_eq!(s.partial_vw, 1);
+        assert!(!s.partial_has_box);
+        for ch in "\u{1b}[0msütun │".chars() {
+            partial_screen_push(&mut s, ch);
+        }
+        assert!(s.partial_has_box);
+        assert_eq!(s.partial_vw, visible_width(&s.partial_line));
+    }
+
+    /// Reset clears both the line and every memo; recount restores them from
+    /// a restored prefix+carry combo (the wrap-continuation state).
+    #[test]
+    fn partial_reset_and_recount_restore_memos() {
+        let mut s = fresh_state();
+        for ch in "önceki satır metni │".chars() {
+            partial_screen_push(&mut s, ch);
+        }
+        partial_screen_reset(&mut s);
+        assert!(s.partial_line.is_empty());
+        assert_eq!(s.partial_vw, 0);
+        assert!(!s.partial_has_box);
+        s.partial_prefix = "\u{1b}[34m❯\u{1b}[0m".to_string();
+        for ch in "  devam metni │".chars() {
+            partial_screen_push(&mut s, ch);
+        }
+        partial_screen_recount(&mut s);
+        assert_eq!(s.partial_vw, visible_width(&s.partial_line));
+        assert!(s.partial_has_box);
+    }
+
+    /// OSC sequences (\x1b]…BEL or \x1b]…\x1b\\) must count zero width, exactly
+    /// like `skip_escape` does, otherwise the memo drifts from visible_width.
+    #[test]
+    fn partial_push_osc_sequences_count_zero_width() {
+        let mut s = fresh_state();
+        for ch in "\u{1b}]8;;https://o.sc\u{1b}\\link\u{1b}\\".chars() {
+            partial_screen_push(&mut s, ch);
+        }
+        assert_eq!(s.partial_vw, visible_width(&s.partial_line));
+        assert_eq!(s.partial_vw, 4);
+        assert_eq!(s.partial_esc, 0);
     }
 }

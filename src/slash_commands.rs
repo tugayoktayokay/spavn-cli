@@ -5,8 +5,8 @@ use crate::hud::{
     interactive_select_language, interactive_select_model, interactive_select_role,
     interactive_select_session, interactive_select_skill, render_fleet_radar,
     render_full_quota_card, render_session_resume_preview, render_update_notice,
-    render_welcome_header, reset_scroll_region, set_idle_recap, setup_scroll_region, term_size,
-    toggle_idle_recap, QueueAction,
+    render_welcome_header, reset_scroll_region, select_interactive_menu, set_idle_recap,
+    setup_scroll_region, term_size, toggle_idle_recap, MenuItem, QueueAction,
 };
 use crate::memory::cached_system_prompt;
 use crate::router::{resolve_endpoint, ChatMessage, ModelEndpoint};
@@ -432,7 +432,7 @@ pub fn dispatch_slash_command(
             println!(
                 "{}{}{}",
                 YELLOW,
-        tr_en(
+                tr_en(
                     "Kullanım: /skill add <ad> <talimat/kural metni>",
                     "Usage: /skill add <name> <instruction/rule text>"
                 ),
@@ -508,7 +508,7 @@ pub fn dispatch_slash_command(
             println!(
                 "{}{}{}",
                 YELLOW,
-        tr_en(
+                tr_en(
                     "Kullanım: /access <safe | auto | sovereign>",
                     "Usage: /access <safe | auto | sovereign>"
                 ),
@@ -688,7 +688,11 @@ pub fn dispatch_slash_command(
                 );
                 println!(
                     "{}│{}  • TTFT        : {}{} ms{} {}",
-                    CYAN, RESET, CYAN, cr.ttft_ms, RESET,
+                    CYAN,
+                    RESET,
+                    CYAN,
+                    cr.ttft_ms,
+                    RESET,
                     tr_en("(VRAM yükleme + prefill)", "(VRAM load + prefill)")
                 );
                 println!(
@@ -706,6 +710,164 @@ pub fn dispatch_slash_command(
                     "\n{}✗ Benchmark error ({}): {}{}",
                     RED, bench_ep.key, e, RESET
                 );
+            }
+        }
+        return SlashOutcome::Handled;
+    }
+
+    if input == "/copy" || input.starts_with("/copy ") {
+        let arg = input.strip_prefix("/copy").unwrap_or("").trim();
+        let regions = crate::hud::copy_regions();
+        if regions.is_empty() {
+            println!(
+                "\n{}📋{}{}",
+                DIM,
+                tr_en(
+                    " Bu oturumda henüz kopyalanacak çıktı yok — önce bir görev çalıştırın, ardından /copy ile alanları listeleyin",
+                    " No output to copy in this session yet — run a task first, then use /copy to list regions",
+                ),
+                RESET
+            );
+            return SlashOutcome::Handled;
+        }
+        let print_menu = |regions: &[crate::hud::CopyRegion]| {
+            println!(
+                "\n{}╭─ 📋 {} ────────────────────────────────{}",
+                CYAN,
+                tr_en("KOPYALANABİLİR ALANLAR", "COPYABLE REGIONS"),
+                RESET
+            );
+            for (idx, r) in regions.iter().enumerate() {
+                let flat: String = r
+                    .body
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ⏎ ");
+                let chars: Vec<char> = flat.chars().collect();
+                let preview: String = if chars.len() > 52 {
+                    chars[..52].iter().collect::<String>() + "…"
+                } else {
+                    flat
+                };
+                println!(
+                    "{}│{}  {} → {}{}",
+                    CYAN,
+                    RESET,
+                    idx + 1,
+                    r.label,
+                    if preview.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}· \"{}\"{}", DIM, preview.replace('"', "'"), RESET)
+                    },
+                );
+            }
+            println!(
+                "{}╰─ {}{}",
+                CYAN,
+                tr_en("Kullanım: /copy <numara>", "Usage: /copy <number>"),
+                RESET
+            );
+        };
+        if arg.is_empty() {
+            // Interactive pick: arrow keys + free-text filter, mirroring /role and @skills
+            // menus. Non-TTY callers fall back to the printed numbered list.
+            let items: Vec<MenuItem> = regions
+                .iter()
+                .enumerate()
+                .map(|(idx, r)| {
+                    let flat: String = r
+                        .body
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ⏎ ");
+                    let chars: Vec<char> = flat.chars().collect();
+                    let preview: String = if chars.len() > 52 {
+                        chars[..52].iter().collect::<String>() + "…"
+                    } else {
+                        flat
+                    };
+                    MenuItem {
+                        key: (idx + 1).to_string(),
+                        badge: format!("{}{}{}", CYAN, r.label, RESET),
+                        desc: preview.replace('"', "'"),
+                    }
+                })
+                .collect();
+            if let Some(chosen) = select_interactive_menu(
+                tr_en(
+                    "📋 KOPYALANABİLİR ALAN | yaz: arama · ↑↓: seç · ↵: kopyala · Esc: iptal",
+                    "📋 COPYABLE REGION | type: search · ↑↓: pick · ↵: copy · Esc: cancel",
+                ),
+                &items,
+                0,
+            ) {
+                if let Ok(n) = chosen.parse::<usize>() {
+                    if n >= 1 && n <= regions.len() {
+                        match crate::clipboard::copy_to_clipboard(&regions[n - 1].body) {
+                            Ok(()) => println!(
+                                "\n{}📋 {}{}{}",
+                                GREEN,
+                                regions[n - 1].label,
+                                tr_en(" → panoya kopyalandı", " → copied to clipboard"),
+                                RESET
+                            ),
+                            Err(e) => println!(
+                                "\n{}📋 {}: {}{}",
+                                RED,
+                                tr_en("kopyalama başarısız", "copy failed"),
+                                e,
+                                RESET
+                            ),
+                        }
+                    }
+                }
+            }
+            return SlashOutcome::Handled;
+        }
+        match arg.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= regions.len() => {
+                match crate::clipboard::copy_to_clipboard(&regions[n - 1].body) {
+                    Ok(()) => println!(
+                        "\n{}📋 {}{}{}",
+                        GREEN,
+                        regions[n - 1].label,
+                        tr_en(" → panoya kopyalandı", " → copied to clipboard"),
+                        RESET
+                    ),
+                    Err(e) => println!(
+                        "\n{}📋 {}: {}{}",
+                        RED,
+                        tr_en("kopyalama başarısız", "copy failed"),
+                        e,
+                        RESET
+                    ),
+                }
+            }
+            Ok(n) => {
+                println!(
+                    "\n{}✗ {} {}{}",
+                    RED,
+                    tr_en("numara aralık dışı:", "number out of range:"),
+                    n,
+                    RESET
+                );
+                print_menu(&regions);
+            }
+            Err(_) if arg.is_empty() => print_menu(&regions),
+            Err(_) => {
+                println!(
+                    "\n{}✗ {}: /copy 1..{}{}",
+                    RED,
+                    tr_en("geçersiz numara", "invalid number"),
+                    regions.len(),
+                    RESET
+                );
+                print_menu(&regions);
             }
         }
         return SlashOutcome::Handled;
@@ -1028,7 +1190,11 @@ pub fn dispatch_slash_command(
         println!(
             "\n{}💭 Thinking Flow: {}{}",
             DIM,
-            if *show_thinking { "AÇIK" } else { "KAPALI" },
+            if *show_thinking {
+                tr_en("AÇIK", "ENABLED")
+            } else {
+                tr_en("KAPALI", "DISABLED")
+            },
             RESET
         );
         return SlashOutcome::Handled;
@@ -1296,10 +1462,7 @@ pub fn dispatch_slash_command(
                         endpoint.wants_compact_prompt(),
                     ));
                 }
-                println!(
-                    "\n{}✅ Target marked as completed: #{}{}",
-                    GREEN, id, RESET
-                );
+                println!("\n{}✅ Target marked as completed: #{}{}", GREEN, id, RESET);
             } else {
                 println!("\n{}Target not found: #{}{}", YELLOW, id, RESET);
             }
@@ -1374,10 +1537,11 @@ pub fn dispatch_slash_command(
                     "\n{}⬇️  v{} → v{} ...{}",
                     GREEN, info.current, info.latest, RESET
                 );
-                if home_bin.parent().map(|p| p.exists()).unwrap_or(false)
+                let staged_ok = home_bin.parent().map(|p| p.exists()).unwrap_or(false)
                     && stage_binary(&bin_src, &home_bin)
-                    && probe_binary(&home_bin)
-                {
+                    && probe_binary(&home_bin);
+                let _ = std::fs::remove_file(&bin_src);
+                if staged_ok {
                     link_alias(&home_bin);
                     let access_str = match ctx.access {
                         AccessMode::Safe => "safe",
@@ -1401,6 +1565,7 @@ pub fn dispatch_slash_command(
                         "\n{}🔄 [SPAVN Update]: v{} installed, restarting...{}",
                         GREEN, info.latest, RESET
                     );
+                    reset_scroll_region();
                     #[cfg(unix)]
                     {
                         let _ = std::process::Command::new(&home_bin)
@@ -1429,7 +1594,7 @@ pub fn dispatch_slash_command(
                         RESET
                     );
                 }
-                return SlashOutcome::ExitLoop;
+                return SlashOutcome::Handled;
             }
             Ok(None) => println!(
                 "\n{}✅ SPAVN v{} is up to date.{} ({}/{})",
@@ -1477,7 +1642,10 @@ pub fn dispatch_slash_command(
             "{}│{}  {}/goal <hedef> · /goal done N{}  Save and track project goals",
             CYAN, RESET, BOLD, RESET
         );
-        println!("{}│{}  {}/update (/upgrade){}           New version check; print the update command", CYAN, RESET, BOLD, RESET);
+        println!(
+            "{}│{}  {}/update (/upgrade){}           New version check; print the update command",
+            CYAN, RESET, BOLD, RESET
+        );
         println!("{}│{}  {}Shift+Tab · Esc · Ctrl+R{}      Change permission · Cancel action/menu · Live reload", CYAN, RESET, BOLD, RESET);
         println!(
             "{}╰────────────────────────────────────────────────────────────────────────────{}",

@@ -16,7 +16,7 @@ pub fn set_owner_only_mode(path: &Path, mode: u32) {
     }
 }
 
-static LANG_EN: AtomicBool = AtomicBool::new(false);
+static LANG_EN: AtomicBool = AtomicBool::new(true);
 
 pub fn is_en() -> bool {
     LANG_EN.load(Ordering::Relaxed)
@@ -32,6 +32,50 @@ pub fn tr_en<'a>(tr: &'a str, en: &'a str) -> &'a str {
         en
     } else {
         tr
+    }
+}
+
+/// Headless CLI (`spavn update`) yanıtlarının dili: doğrudan OS dilini yansıtır.
+/// macOS'ta arayüz dili `AppleLanguages`'ta tutulur (`LANG` yalnızca bölgeyi taşır,
+/// ör. İngilizce arayüz + `tr_TR.UTF-8`), Linux/terminalde LC_ALL/LANG yeterlidir.
+/// `SPAVN_LANG` her ikisini ezer; config.json dili yalnızca etkileşimli oturumda geçerlidir.
+pub fn detect_os_lang_en() -> bool {
+    if let Ok(s) = std::env::var("SPAVN_LANG") {
+        return s.to_lowercase().starts_with("en");
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(out) = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleLanguages"])
+        .output()
+    {
+        if let Ok(text) = String::from_utf8(out.stdout) {
+            for line in text.lines() {
+                let entry = line.trim().trim_matches(|c| c == '"' || c == ',');
+                if entry.is_empty() || entry.starts_with('(') || entry.starts_with(')') {
+                    continue;
+                }
+                if let Some(code) = entry.split('-').next() {
+                    return code.eq_ignore_ascii_case("en");
+                }
+            }
+        }
+    }
+    std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LANG"))
+        .map(|l| l.to_lowercase().starts_with("en"))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod lang_detect_tests {
+    use super::*;
+    #[test]
+    fn detect_honours_spavn_lang() {
+        std::env::set_var("SPAVN_LANG", "en");
+        assert!(detect_os_lang_en(), "SPAVN_LANG=en must yield EN");
+        std::env::set_var("SPAVN_LANG", "tr");
+        assert!(!detect_os_lang_en());
+        std::env::remove_var("SPAVN_LANG");
     }
 }
 
@@ -295,11 +339,15 @@ fn default_language() -> String {
     }
     if let Ok(locale) = std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")) {
         let low = locale.to_lowercase();
+        if low.starts_with("tr") {
+            return "tr".to_string();
+        }
         if low.starts_with("en") && !spavn_dir().join("PROFILE.md").exists() {
             return "en".to_string();
         }
     }
-    "tr".to_string()
+    // Küresel hedef kitle ön tanımı: bilinmeyen yerel → İngilizce.
+    "en".to_string()
 }
 
 pub fn home_dir() -> PathBuf {

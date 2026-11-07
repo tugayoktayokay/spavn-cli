@@ -1,4 +1,5 @@
 use spavn::config::{load_user_config, tr_en};
+use spavn::harness::*;
 use spavn::hud::{
     render_assistant_footer, render_assistant_header, term_size, truncate_ansi_to_width,
     truncate_ansi_to_width_middle, visible_width, LiveSpinner, MarkdownStreamRenderer,
@@ -8,7 +9,6 @@ use spavn::session::{
     append_message, evict_old_skill_blocks, perform_manual_compact, rewrite_session,
     safe_utf8_prefix, safe_utf8_suffix, summarize_tool_args, tool_progress_target,
 };
-use spavn::harness::*;
 use spavn::spavn_engine::AgentPhase;
 use spavn::state::{
     advance_live_tasks_on_tool, clear_finished_live_tasks, clear_interrupted, is_interrupted,
@@ -605,6 +605,7 @@ pub(crate) fn run_agent_turn(
                 ));
                 if !content_started.get() {
                     content_started.set(true);
+                    hud::begin_turn_capture();
                     render_assistant_header(&step_endpoint.key);
                 }
                 md_renderer.borrow_mut().push(content_delta);
@@ -694,6 +695,7 @@ pub(crate) fn run_agent_turn(
                             ));
                             if !content_started.get() {
                                 content_started.set(true);
+                                hud::begin_turn_capture();
                                 render_assistant_header(&step_endpoint.key);
                             }
                             md_renderer.borrow_mut().push(c);
@@ -760,6 +762,7 @@ pub(crate) fn run_agent_turn(
                                     ));
                                     if !content_started.get() {
                                         content_started.set(true);
+                                        hud::begin_turn_capture();
                                         render_assistant_header(&fallback_ep.key);
                                     }
                                     md_renderer.borrow_mut().push(c);
@@ -1232,6 +1235,7 @@ pub(crate) fn run_agent_turn(
             if !recovered_from_reasoning.is_empty() {
                 if !quiet && !content_started.get() {
                     content_started.set(true);
+                    hud::begin_turn_capture();
                     render_assistant_header(&step_endpoint.key);
                     let mut r = MarkdownStreamRenderer::new();
                     r.push(&recovered_from_reasoning);
@@ -1289,8 +1293,8 @@ pub(crate) fn run_agent_turn(
                 let c = c.trim();
                 c.strip_prefix("[LIVE USER STEERING INSTRUCTION — Prioritize this immediately]: ")
                     .or_else(|| {
-                    c.strip_prefix("[Active User Request — MUST complete all items]:\n")
-                    .map(str::trim)
+                        c.strip_prefix("[Active User Request — MUST complete all items]:\n")
+                            .map(str::trim)
                     })
                     .unwrap_or(c)
             })
@@ -1367,9 +1371,12 @@ pub(crate) fn run_agent_turn(
         if unverified_edits && !verification_nudged {
             verification_nudged = true;
             unverified_edits = false;
-            let gate_msg = tr_en(
-                "⚡ [SPAVN Otonom Doğrulama Kapısı: Dosya değişikliği sonrası derleme/test kontrolü tetikleniyor...]",
-                "⚡ [SPAVN VERIFICATION GATE: compiler/test check triggered after file edit]"
+            let gate_msg = format!(
+                "⚡ [SPAVN {}]",
+                tr_en(
+                    "Otonom Doğrulama Kapısı: Dosya değişikliği sonrası derleme/test kontrolü tetikleniyor...",
+                    "VERIFICATION GATE: build/test check triggered after file edit"
+                )
             );
             if !quiet {
                 println!("{}{}{}", YELLOW, gate_msg, RESET);
@@ -1513,7 +1520,6 @@ mod premature_stop_tests {
         }
     }
 
-
     #[test]
     fn local_prune_budget_keeps_full_tool_output_until_50pct_window() {
         // Regression: local models used to skeletonize prior tool output at ~25% of the window,
@@ -1593,7 +1599,10 @@ mod premature_stop_tests {
                     .unwrap_or(false)
             })
             .count();
-        assert!(skeleton_count > 10, "cloud model should skeletonize past 64k budget",)
+        assert!(
+            skeleton_count > 10,
+            "cloud model should skeletonize past 64k budget",
+        )
     }
     #[test]
     fn supersede_prune_replaces_stale_reads_before_turn_anchor() {

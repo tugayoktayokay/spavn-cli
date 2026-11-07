@@ -853,8 +853,7 @@ pub fn interactive_select_session(current_path: &Path) -> Option<PathBuf> {
         })
         .collect();
 
-    let chosen_key =
-        select_interactive_menu("🗂️  PAST SESSIONS (/resume)", &items, initial_idx)?;
+    let chosen_key = select_interactive_menu("🗂️  PAST SESSIONS (/resume)", &items, initial_idx)?;
     let chosen_idx = items.iter().position(|it| it.key == chosen_key)?;
     sessions.get(chosen_idx).map(|s| s.path.clone())
 }

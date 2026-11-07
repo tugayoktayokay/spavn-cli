@@ -1,10 +1,12 @@
 use super::edit::{delete_word_backward, jump_left, jump_right, selection_range};
 use super::*;
 
-fn erase_inline_dock(prev_top_w: usize, _prev_cursor_col: usize) {
-    let up_to_start = prev_top_w.max(1);
-    print!("\x1b[{}A\r\x1b[J\x1b[?7h\x1b[?25h", up_to_start);
-    let _ = io::stdout().flush();
+fn erase_inline_dock(prev_top_w: Option<usize>, _prev_cursor_col: usize) {
+    if let Some(prev_top_w) = prev_top_w {
+        let up_to_start = prev_top_w.max(1);
+        print!("\x1b[{}A\r\x1b[J\x1b[?7h\x1b[?25h", up_to_start);
+        let _ = io::stdout().flush();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -36,7 +38,10 @@ pub fn read_bottom_dock_input(
     let _term_guard = TermiosGuard(orig_termios);
     // 100ms non-blocking timeout so resize events are picked up between keystrokes.
     enter_raw_mode(&orig_termios, 1);
-    print!("\x1b[?2004h\n\n\n\n\x1b[2A\r");
+    // Reserve 3 rows at the bottom (scrolling existing output up if already on the last row)
+    // and then jump to the bottom-most row (`\x1b[999B`) so the 4-line dock always sits flush
+    // at the bottom of the terminal without overwriting the last lines of assistant output.
+    print!("\x1b[?2004h\n\n\n\x1b[999B");
     let _ = io::stdout().flush();
 
     let mut chars: Vec<char> = initial_prefill.unwrap_or("").chars().collect();
@@ -51,7 +56,8 @@ pub fn read_bottom_dock_input(
     let mut needs_redraw = true;
     let mut full_resize_pending = false;
     let busy_mode = load_user_config().busy_input_mode;
-    let mut prev_top_w: usize = 0;
+    let mut prev_top_w: Option<usize> = None;
+    PREV_DOCK_BOTTOM_COUNT.store(1, Ordering::SeqCst);
     let mut prev_cursor_col: usize = 1;
     let mut last_input_at = Instant::now();
     let mut idle_recap_shown = false;
@@ -80,7 +86,7 @@ pub fn read_bottom_dock_input(
         if let Some(info) = crate::update::take_pending_notice() {
             erase_inline_dock(prev_top_w, prev_cursor_col);
             print!("\n\r");
-            prev_top_w = 0;
+            prev_top_w = None;
             prev_cursor_col = 1;
             render_update_notice(&info);
             needs_redraw = true;
@@ -120,7 +126,7 @@ pub fn read_bottom_dock_input(
             if full_resize_pending {
                 erase_inline_dock(prev_top_w, prev_cursor_col);
                 print!("\n\r");
-                prev_top_w = 0;
+                prev_top_w = None;
                 prev_cursor_col = 1;
                 full_resize_pending = false;
             }
@@ -719,6 +725,7 @@ impl LiveSpinner {
             state.label = initial_label;
             state.started_at = Some(Instant::now());
             state.partial_line.clear();
+            partial_screen_reset(&mut state);
             state.partial_prefix.clear();
             state.partial_shown = false;
             state.thinking_box_open = false;
@@ -1096,13 +1103,6 @@ impl LiveSpinner {
                                             if bi < n {
                                                 bi += 1;
                                             }
-                                        } else if state.typing_sel_anchor.is_some() {
-                                            state.typing_sel_anchor = None;
-                                        } else if state.is_typing || !state.typing_buf.is_empty() {
-                                            state.typing_buf.clear();
-                                            state.typing_cursor = 0;
-                                            state.typing_sel_anchor = None;
-                                            state.is_typing = false;
                                         }
                                         continue;
                                     }
@@ -1329,6 +1329,14 @@ impl LiveSpinner {
                                     }
                                 }
                             }
+                            let draft_now: String = state.typing_buf.iter().collect();
+                            if let Ok(mut slot) = super::SPINNER_DRAFT.lock() {
+                                *slot = if draft_now.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(draft_now)
+                                };
+                            }
                         }
                     }
                 }
@@ -1398,16 +1406,17 @@ impl LiveSpinner {
             }
             SPINNER_PAUSED.store(false, Ordering::SeqCst);
             if let Ok(mut state) = SPINNER_SCREEN.lock() {
-                // Preserve unsent busy-mode input for the next prompt cycle.
-                if !state.typing_buf.is_empty() {
-                    let draft: String = state.typing_buf.iter().collect();
-                    if let Ok(mut slot) = super::SPINNER_DRAFT.lock() {
-                        *slot = Some(draft.trim().to_string());
-                    }
-                    state.typing_buf.clear();
-                    state.typing_cursor = 0;
-                    state.typing_sel_anchor = None;
-                    state.is_typing = false;
+                // Keep `state.typing_buf` intact across mid-turn spinner restarts (tool calls,
+                // multi-step LLM turns) so the user's in-progress typing never disappears while
+                // the agent is still working. `take_spinner_draft()` drains `typing_buf` once
+                // the turn finishes and hands it to `read_bottom_dock_input`.
+                let draft: String = state.typing_buf.iter().collect();
+                if let Ok(mut slot) = super::SPINNER_DRAFT.lock() {
+                    *slot = if draft.trim().is_empty() {
+                        None
+                    } else {
+                        Some(draft)
+                    };
                 }
                 close_thinking_box_locked(&mut state);
                 if state.active && !state.paused {
@@ -1417,6 +1426,7 @@ impl LiveSpinner {
                         out.push_str(&state.partial_line);
                         out.push_str("\x1b[0m\n");
                         state.partial_line.clear();
+                        partial_screen_reset(&mut state);
                     }
                     state.partial_shown = false;
                     out.push_str("\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?2026l");

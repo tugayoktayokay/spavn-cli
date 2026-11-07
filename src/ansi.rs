@@ -389,17 +389,27 @@ pub struct DockGeometry {
 /// cursor row is always exactly between the rows above and below it. Breaking this invariant
 /// is what used to push the prompt up into the scrollback.
 pub fn compute_dock_geometry(
-    prev_top_w: usize,
+    prev_top_w: Option<usize>,
     top_count: usize,
     input_line_count: usize,
     bottom_count: usize,
     cursor_row: usize,
 ) -> DockGeometry {
+    let lines_below_cursor = bottom_count + input_line_count.saturating_sub(1 + cursor_row);
     let next_top_w = top_count + cursor_row;
+    // Steady state (Some): the previous frame's layout is known, so redraw relative to it.
+    // Unanchored (None): layout is unknown (first frame, after a notice/resize, after model
+    // output left the cursor mid-screen). Anchor to the bottom row instead: the dock's last
+    // row lands exactly on the row the cursor already sits on, so the box never floats
+    // mid-screen and never scrolls the terminal to reach its position.
+    let total = top_count + input_line_count + bottom_count;
+    let up_to_start = match prev_top_w {
+        Some(prev) => prev.max(1),
+        None => total.saturating_sub(1).max(1),
+    };
     DockGeometry {
-        // The very first frame has no previous anchor; land on the last dock row instead.
-        up_to_start: prev_top_w.max(1),
-        lines_below_cursor: bottom_count + input_line_count.saturating_sub(1 + cursor_row),
+        up_to_start,
+        lines_below_cursor,
         next_top_w,
     }
 }
@@ -527,8 +537,14 @@ mod tests {
         ];
         for (top, input, bottom, row) in cases {
             assert!(top + row >= 1, "case must stay production-reachable");
-            let first = compute_dock_geometry(0, top, input, bottom, row);
-            let steady = compute_dock_geometry(first.next_top_w, top, input, bottom, row);
+            let first = compute_dock_geometry(None, top, input, bottom, row);
+            let steady = compute_dock_geometry(
+                Some(first.next_top_w),
+                top,
+                input,
+                bottom,
+                row,
+            );
             let total = top + input + bottom;
             assert_eq!(
                 steady.up_to_start + steady.lines_below_cursor,
@@ -542,15 +558,26 @@ mod tests {
     #[test]
     fn dock_geometry_first_frame_never_emits_zero_row_move() {
         // With no previous anchor the escape sequence must at least move one row (\x1b[1A).
-        let first = compute_dock_geometry(0, 2, 1, 4, 0);
-        assert_eq!(first.up_to_start, 1);
+        let first = compute_dock_geometry(None, 2, 1, 4, 0);
+        assert!(first.up_to_start >= 1, "anchored up must never be zero");
     }
 
     #[test]
     fn dock_geometry_reserves_rows_below_the_last_input_row() {
-        let g = compute_dock_geometry(5, 2, 2, 3, 1);
+        let g = compute_dock_geometry(Some(5), 2, 2, 3, 1);
         assert_eq!(g.lines_below_cursor, 3);
         assert_eq!(g.up_to_start, 5);
         assert_eq!(g.next_top_w, 3);
+    }
+
+    #[test]
+    fn dock_geometry_unknown_anchor_pins_last_row_to_cursor() {
+        // Unanchored (after `\x1b[999B` puts cursor on the bottom terminal row): moving up by
+        // `total - 1` rows before printing `total` lines lands the dock's last row (`╰─`)
+        // flush on the bottom terminal row without scrolling.
+        let g = compute_dock_geometry(None, 2, 1, 1, 0);
+        let total = 2 + 1 + 1;
+        assert_eq!(g.up_to_start, total - 1);
+        assert_eq!(g.lines_below_cursor, 1);
     }
 }

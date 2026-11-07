@@ -490,10 +490,7 @@ pub(crate) fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
             if ctx.access == AccessMode::Safe {
                 let preview = format!("{} {}", tool_name, mcp_args);
                 if !prompt_user_approval(ctx, &format!("mcp:{}", server_name), &preview) {
-                    return format!(
-                        "User rejected MCP call: {}:{}",
-                        server_name, tool_name
-                    );
+                    return format!("User rejected MCP call: {}:{}", server_name, tool_name);
                 }
             }
         }

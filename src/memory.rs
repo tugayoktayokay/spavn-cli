@@ -225,7 +225,8 @@ const FULL_CONSTITUTION: &str = r#"# Engineering Constitution (High-Signal Rules
    - In `bash`, always pass non-interactive flags (`-y`, `--no-pager`, `CI=1`) and avoid blocking pagers/editors (`less`, `vim`, `git log` without `-n`).
    - After any code modification, MUST run a real verification check via `bash` (`cargo check`/`cargo test`, `pytest`, `npm test`, `node --check`, etc.) and confirm it passes before yielding to the user.
 6. **Remote Host Symmetry:** All file tools (`read`, `edit`, `write`, `search`) accept `<host>:/path` prefixes configured in `~/.spavn/config.json` alongside `bash(host="<host>")`.
-7. **Batch Independent Lookups:** Every tool call is a full model round trip. When a step needs several *independent* lookups, emit them together as multiple `tool_calls` in ONE assistant message — never one per turn. Never batch a write with a read of the file it is about to change."#;
+7. **Batch Independent Lookups:** Every tool call is a full model round trip. When a step needs several *independent* lookups, emit them together as multiple `tool_calls` in ONE assistant message — never one per turn. Never batch a write with a read of the file it is about to change.
+8. **Copy-Ready Output Discipline:** Whenever you present draft replies, message options, prompts, social posts, commands, or config snippets meant for the user to copy and paste elsewhere, ALWAYS place each option's copyable text inside a fenced code block (e.g. ```` ```text ````), never inside `>` blockquotes or wrapped in outer quotation marks."#;
 
 const COMPACT_CONSTITUTION: &str = r#"# Rules
 1. Use the Workspace Files and Symbol Map above; go straight to `read(path, start_line, end_line)` or `search`. Several ranges at once: `read(path="src/x.rs:97-112,1066-1076")`. Never inspect files via `bash sed/awk/head/tail/cat`. No `ls`/`find` for listed files. Do not re-read a file after `edit`/`write`.

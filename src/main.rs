@@ -146,29 +146,47 @@ fn main() {
                 return;
             }
             "update" | "upgrade" if i == 0 => {
-                match spavn::update::upgrade_installed_binary() {
+                // `load_user_config()` upgrade çekirdeğinde tetiklenip dili config.json'dan
+                // ezer; headless dalında dil OS'tan gelir, bu yüzden çıktıdan önce kesiyoruz.
+                let outcome = spavn::update::upgrade_installed_binary();
+                spavn::config::set_lang_en(spavn::config::detect_os_lang_en());
+                match outcome {
                     spavn::update::UpgradeOutcome::UpToDate => println!(
-                        "spavn v{} güncel — daha yeni sürüm yok.",
-                        env!("CARGO_PKG_VERSION")
+                        "spavn v{} {}",
+                        env!("CARGO_PKG_VERSION"),
+                        tr_en(
+                            "güncel — daha yeni sürüm yok.",
+                            "up to date — no newer release."
+                        )
                     ),
                     spavn::update::UpgradeOutcome::NoAsset(latest) => {
                         println!(
-                            "v{latest} yayında ama bu platform ({}/{}) için hazır ikili yok.",
+                            "v{latest} {}. ({}/{})",
+                            tr_en(
+                                "yayında ama bu platform için hazır ikili yok",
+                                "is out, but no prebuilt binary exists for this platform yet"
+                            ),
                             std::env::consts::OS,
-                            std::env::consts::ARCH
+                            std::env::consts::ARCH,
                         );
                         println!(
-                            "Elle güncelle: curl -fsSL https://raw.githubusercontent.com/{}/main/install.sh | sh",
-                            spavn::update::repo_slug().unwrap_or("tugayoktayokay/spavn-cli")
+                            "{}: curl -fsSL https://raw.githubusercontent.com/{}/main/install.sh | sh",
+                            tr_en("Elle güncelle", "Update manually"),
+                            spavn::update::repo_slug().unwrap_or("tugayoktayokay/spavn-cli"),
                         );
                     }
                     spavn::update::UpgradeOutcome::Staged { latest, bin } => println!(
-                        "spavn v{} → v{latest} kuruldu ({}) — yeni sürümü bir sonraki başlatışta kullan.",
+                        "spavn v{} → v{latest} {}. {} — {}.",
                         env!("CARGO_PKG_VERSION"),
-                        bin.display()
+                        tr_en("kuruldu", "installed"),
+                        bin.display(),
+                        tr_en(
+                            "yeni sürümü bir sonraki başlatışta kullan",
+                            "the new version will be used on next start",
+                        ),
                     ),
                     spavn::update::UpgradeOutcome::CheckError(e) => {
-                        eprintln!("Güncelleme başarısız: {e}");
+                        eprintln!("{}: {e}", tr_en("Güncelleme başarısız", "Update failed"));
                         std::process::exit(1);
                     }
                 }
@@ -711,6 +729,7 @@ fn main() {
         ) {
             eprintln!("\n{}✗ Hata: {}{}", RED, err, RESET);
         }
+        hud::print_copy_hint();
 
         if ctx.undo_stack.len() > undo_before {
             let touched: Vec<String> = ctx.undo_stack[undo_before..]

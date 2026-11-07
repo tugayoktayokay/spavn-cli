@@ -417,7 +417,7 @@ flowchart TD
 {
   "default_model": "sonnet",
   "busy_input_mode": "queue",        // "steer" | "queue"
-  "language": "tr",
+  "language": "en",
   "byokCatalog": true,
   "updateCheck": true,              // one background release check per interval
   "updateCheckIntervalHours": 24,
@@ -443,7 +443,7 @@ flowchart TD
 | `default_model` | Model key used at startup. |
 | `fallback_cloud_model` | Used when the primary is unreachable. |
 | `busy_input_mode` | `steer` interrupts mid-turn; `queue` defers to the next turn. |
-| `language` | `tr` \| `en` UI language. |
+| `language` | `tr` \| `en` UI language. Default `en` (falls back to `tr` on `tr_*` locales; `SPAVN_LANG` overrides). |
 | `byokCatalog` | `true` (default) merges the built-in provider catalog alongside `providers`. `false` runs the list entirely from config. |
 | `updateCheck` | `true` (default) runs one background release check per `updateCheckIntervalHours`. |
 | `updateCheckIntervalHours` | Hours between checks, minimum `1`; default `24`. |

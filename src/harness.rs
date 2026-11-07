@@ -249,7 +249,10 @@ mod tests {
     #[test]
     fn escalate_only_when_local_and_repeat_threshold_reached() {
         assert!(should_escalate_to_cloud(true, MAX_REPEATS_BEFORE_ESCALATE));
-        assert!(!should_escalate_to_cloud(true, MAX_REPEATS_BEFORE_ESCALATE - 1));
+        assert!(!should_escalate_to_cloud(
+            true,
+            MAX_REPEATS_BEFORE_ESCALATE - 1
+        ));
         // A single repeat (below threshold) must NOT escalate.
         assert!(!should_escalate_to_cloud(true, 1));
         // Cloud endpoints never re-escalate (already cloud).
@@ -259,8 +262,14 @@ mod tests {
     #[test]
     fn tier_cap_selects_by_cost_tier_and_context() {
         assert_eq!(tier_token_cap(true, 120_000), FREE_FLASH_TOKEN_CAP);
-        assert_eq!(tier_token_cap(false, HIGH_CONTEXT_THRESHOLD), HIGH_CONTEXT_TOKEN_CAP);
-        assert_eq!(tier_token_cap(false, HIGH_CONTEXT_THRESHOLD + 1), HIGH_CONTEXT_TOKEN_CAP);
+        assert_eq!(
+            tier_token_cap(false, HIGH_CONTEXT_THRESHOLD),
+            HIGH_CONTEXT_TOKEN_CAP
+        );
+        assert_eq!(
+            tier_token_cap(false, HIGH_CONTEXT_THRESHOLD + 1),
+            HIGH_CONTEXT_TOKEN_CAP
+        );
         // Standard tier: below the high-context boundary.
         assert_eq!(tier_token_cap(false, 200_000), STANDARD_TOKEN_CAP);
     }
@@ -268,9 +277,15 @@ mod tests {
     #[test]
     fn compact_threshold_is_ratio_capped_by_tier_cap() {
         // 1M context * 80% = 800k, but standard tier caps at 120k.
-        assert_eq!(hard_compact_threshold(1_000_000, STANDARD_TOKEN_CAP), STANDARD_TOKEN_CAP);
+        assert_eq!(
+            hard_compact_threshold(1_000_000, STANDARD_TOKEN_CAP),
+            STANDARD_TOKEN_CAP
+        );
         // 500k context * 80% = 400k, high-context tier caps at 240k.
-        assert_eq!(hard_compact_threshold(500_000, HIGH_CONTEXT_TOKEN_CAP), HIGH_CONTEXT_TOKEN_CAP);
+        assert_eq!(
+            hard_compact_threshold(500_000, HIGH_CONTEXT_TOKEN_CAP),
+            HIGH_CONTEXT_TOKEN_CAP
+        );
         // Small context: ratio dominates (no cap hit).
         assert_eq!(hard_compact_threshold(100_000, STANDARD_TOKEN_CAP), 80_000);
     }
@@ -281,12 +296,27 @@ mod tests {
         // Turn start: token threshold triggers.
         assert!(should_full_compact(0, 90_000, 10, thr));
         // Turn start: soft message-count limit triggers even below the token threshold.
-        assert!(should_full_compact(0, 10_000, MESSAGE_COUNT_SOFT_LIMIT + 1, thr));
+        assert!(should_full_compact(
+            0,
+            10_000,
+            MESSAGE_COUNT_SOFT_LIMIT + 1,
+            thr
+        ));
         // Turn start: both limits low → no compaction.
         assert!(!should_full_compact(0, 10_000, 10, thr));
         // Mid-turn: only the token threshold can trigger (soft count limit ignored).
-        assert!(should_full_compact(5, 90_000, MESSAGE_COUNT_SOFT_LIMIT + 1, thr));
-        assert!(!should_full_compact(5, 10_000, MESSAGE_COUNT_SOFT_LIMIT + 1, thr));
+        assert!(should_full_compact(
+            5,
+            90_000,
+            MESSAGE_COUNT_SOFT_LIMIT + 1,
+            thr
+        ));
+        assert!(!should_full_compact(
+            5,
+            10_000,
+            MESSAGE_COUNT_SOFT_LIMIT + 1,
+            thr
+        ));
     }
 
     #[test]
@@ -341,7 +371,10 @@ mod tests {
             "First, I want to understand the flow",
         ];
         for n in no {
-            assert!(!is_premature_stop(n), "should NOT be premature stop for: {n}");
+            assert!(
+                !is_premature_stop(n),
+                "should NOT be premature stop for: {n}"
+            );
         }
     }
 
@@ -353,7 +386,9 @@ mod tests {
             "Just tell me what's wrong, don't apply anything"
         ));
         assert!(!user_asked_report_only("kardeş kaldır ozaman o modelleri"));
-        assert!(!user_asked_report_only("genel bi ak bakalım sorun olabilecek yerlere"));
+        assert!(!user_asked_report_only(
+            "genel bi ak bakalım sorun olabilecek yerlere"
+        ));
     }
 
     #[test]
@@ -361,7 +396,12 @@ mod tests {
         // No investigation steps → not a dump.
         let short = r#"```rust
 fn main() {}"#;
-        assert!(!is_phantom_code_block_stop(short, AgentPhase::Code, 0, false));
+        assert!(!is_phantom_code_block_stop(
+            short,
+            AgentPhase::Code,
+            0,
+            false
+        ));
 
         // Investigation + mutations → real edit, not a phantom dump.
         let dump = r#"```rust
@@ -389,6 +429,11 @@ fn main() {
         let open = r#"```rust
 let x = 1;
 "#;
-        assert!(!is_phantom_code_block_stop(open, AgentPhase::Code, 2, false));
+        assert!(!is_phantom_code_block_stop(
+            open,
+            AgentPhase::Code,
+            2,
+            false
+        ));
     }
 }

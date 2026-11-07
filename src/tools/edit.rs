@@ -1084,7 +1084,7 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                     ctx,
                     &crate::config::tr_en(
                         "Çoklu Dosya Düzenleme ({} hunk): {}",
-                        "Multi-File Edit ({} hunk): {}"
+                        "Multi-File Edit ({} hunk): {}",
                     )
                     .replace("{0}", &edits_arr.len().to_string())
                     .replace("{1}", raw_path),
@@ -1287,11 +1287,8 @@ fn exec_edit_single_with_range(
     if ctx.access == AccessMode::Safe
         && !prompt_user_approval(
             ctx,
-            &crate::config::tr_en(
-                "Dosya Düzenleme (edit): {}",
-                "File Edit (edit): {}"
-            )
-            .replace("{0}", raw_path),
+            &crate::config::tr_en("Dosya Düzenleme (edit): {}", "File Edit (edit): {}")
+                .replace("{0}", raw_path),
             new_text,
         )
     {

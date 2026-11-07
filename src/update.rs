@@ -198,7 +198,7 @@ pub fn fetch_asset_binary() -> Option<PathBuf> {
             .as_secs()
     ));
     let _ = std::fs::create_dir_all(&base);
-    let tarball = base.join("spawn.tar.gz");
+    let tarball = base.join("spavn.tar.gz");
 
     let downloaded = std::process::Command::new("curl")
         .args(["-fsSL", &url, "-o", tarball.to_string_lossy().as_ref()])
@@ -222,7 +222,23 @@ pub fn fetch_asset_binary() -> Option<PathBuf> {
             .map(|s| s.success())
             .unwrap_or(false);
         if extracted {
-            find_binary(&base)
+            if let Some(found) = find_binary(&base) {
+                let staged_out = std::env::temp_dir().join(format!(
+                    "spavn-update-bin-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                ));
+                if std::fs::copy(&found, &staged_out).is_ok() {
+                    Some(staged_out)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -234,12 +250,14 @@ pub fn fetch_asset_binary() -> Option<PathBuf> {
     bin_src
 }
 
-/// Locates the extracted `spawn` binary: a flat one at the archive root first, then a recursive
+/// Locates the extracted `spavn` binary: a flat one at the archive root first, then a recursive
 /// search under nested folders. Keeps `/update` resilient to how a release tarball is laid out.
 fn find_binary(dir: &std::path::Path) -> Option<PathBuf> {
-    let flat = dir.join("spawn");
-    if flat.exists() {
-        return Some(flat);
+    for name in ["spavn", "spawn"] {
+        let flat = dir.join(name);
+        if flat.exists() && flat.is_file() {
+            return Some(flat);
+        }
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -248,7 +266,7 @@ fn find_binary(dir: &std::path::Path) -> Option<PathBuf> {
                 if let Some(found) = find_binary(&path) {
                     return Some(found);
                 }
-            } else if entry.file_name().to_str() == Some("spawn") {
+            } else if matches!(entry.file_name().to_str(), Some("spavn" | "spawn")) {
                 return Some(path);
             }
         }
@@ -438,10 +456,11 @@ pub fn upgrade_installed_binary() -> UpgradeOutcome {
     let home_bin = std::env::var("HOME")
         .map(|home| std::path::PathBuf::from(home).join(".local/bin/spavn"))
         .unwrap_or_default();
-    if !home_bin.parent().is_some_and(|p| p.exists())
-        || !crate::slash_commands::stage_binary(&bin_src, &home_bin)
-        || !crate::slash_commands::probe_binary(&home_bin)
-    {
+    let staged_ok = home_bin.parent().is_some_and(|p| p.exists())
+        && crate::slash_commands::stage_binary(&bin_src, &home_bin)
+        && crate::slash_commands::probe_binary(&home_bin);
+    let _ = std::fs::remove_file(&bin_src);
+    if !staged_ok {
         return UpgradeOutcome::CheckError(
             tr_en(
                 "ikili dosya yerleştirilemedi; geçerli sürümle devam ediliyor.",
@@ -640,6 +659,19 @@ mod tests {
         let found_path = dir.join("pkg").join("spawn");
         let _ = std::fs::File::create(&found_path);
         assert_eq!(find_binary(&dir), Some(found_path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_binary_locates_spavn_binary_name() {
+        let dir = std::env::temp_dir().join(format!("spavn-find-v-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("sub"));
+        let nested_spavn = dir.join("sub").join("spavn");
+        let _ = std::fs::File::create(&nested_spavn);
+        assert_eq!(find_binary(&dir), Some(nested_spavn));
+        let flat_spavn = dir.join("spavn");
+        let _ = std::fs::File::create(&flat_spavn);
+        assert_eq!(find_binary(&dir), Some(flat_spavn));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

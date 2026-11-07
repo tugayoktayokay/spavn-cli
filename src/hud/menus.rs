@@ -680,6 +680,7 @@ pub fn interactive_select_slash_command() -> Option<String> {
 pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<String> {
     let cfg = load_user_config();
     let mut providers: Vec<(String, Vec<MenuItem>)> = Vec::new();
+    let mut prov_ids: Vec<Option<String>> = Vec::new();
 
     // 1. User-configured provider groups from ~/.spavn/config.json
     for group in &cfg.providers {
@@ -694,6 +695,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
             .collect();
         if !items.is_empty() {
             providers.push((format!("{} ({})", group.title, items.len()), items));
+            prov_ids.push(Some(group.id.clone()));
         }
     }
 
@@ -748,6 +750,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 ),
                 local_models,
             ));
+            prov_ids.push(None);
         }
     }
 
@@ -782,6 +785,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
             })
             .collect();
         providers.push((format!("{} ({})", byok_group.title, items.len()), items));
+        prov_ids.push(Some(byok_group.id.clone()));
     }
 
     if providers.is_empty() {
@@ -804,10 +808,16 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
     };
     let mut model_indices = vec![0usize; providers.len()];
     for (pi, (_, list)) in providers.iter().enumerate() {
-        if let Some(mi) = list
-            .iter()
-            .position(|m| m.key == current_key || m.key.strip_prefix("local:") == Some(current_key))
-        {
+        let pid_opt = prov_ids.get(pi).and_then(|p| p.as_deref());
+        if let Some(mi) = list.iter().position(|m| {
+            m.key == current_key
+                || m.key.strip_prefix("local:") == Some(current_key)
+                || pid_opt.is_some_and(|pid| {
+                    current_key
+                        .strip_prefix(&format!("{}:", pid))
+                        .is_some_and(|rest| rest == m.key)
+                })
+        }) {
             if !local_first {
                 prov_idx = pi;
             }
@@ -1131,7 +1141,18 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                         cur_models.get(vis[pos])
                     };
                     if let Some(m) = chosen {
-                        result = Some(m.key.clone());
+                        let collides_in_earlier_group = providers[..prov_idx]
+                            .iter()
+                            .any(|(_, items)| items.iter().any(|other| other.key.eq_ignore_ascii_case(&m.key)));
+                        if collides_in_earlier_group {
+                            if let Some(Some(pid)) = prov_ids.get(prov_idx) {
+                                result = Some(format!("{}:{}", pid, m.key));
+                            } else {
+                                result = Some(m.key.clone());
+                            }
+                        } else {
+                            result = Some(m.key.clone());
+                        }
                     }
                     break;
                 }

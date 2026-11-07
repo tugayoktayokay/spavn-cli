@@ -420,29 +420,30 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
     }
 
     // 2. Check user-configured providers in ~/.spavn/config.json
-    for group in &cfg.providers {
-        let group_has_pool =
-            !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
-        for m in &group.models {
-            if m.key.eq_ignore_ascii_case(clean) || m.model_id.eq_ignore_ascii_case(clean) {
-                let api_key =
-                    resolve_api_key(&group.api_key_env).unwrap_or_else(|| "local".to_string());
-                return ModelEndpoint {
-                    key: m.key.clone(),
-                    model: m.model_id.clone(),
-                    base_url: group.base_url.clone(),
-                    api_key,
-                    label: m.label.clone(),
-                    is_local_flag: group.is_local,
-                    has_quota_pool: group_has_pool,
-                    configured_context_window: m.context_window.or(group.context_window),
-                };
-            }
-        }
-        if let Some((prov_prefix, custom_model)) = clean.split_once(':') {
+    // If `provider_id:model_key` is explicitly passed, resolve inside that exact provider first.
+    if let Some((prov_prefix, custom_model)) = clean.split_once(':') {
+        for group in &cfg.providers {
             if group.id.eq_ignore_ascii_case(prov_prefix) {
+                let group_has_pool =
+                    !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
                 let api_key =
                     resolve_api_key(&group.api_key_env).unwrap_or_else(|| "local".to_string());
+                for m in &group.models {
+                    if m.key.eq_ignore_ascii_case(custom_model)
+                        || m.model_id.eq_ignore_ascii_case(custom_model)
+                    {
+                        return ModelEndpoint {
+                            key: m.key.clone(),
+                            model: m.model_id.clone(),
+                            base_url: group.base_url.clone(),
+                            api_key,
+                            label: m.label.clone(),
+                            is_local_flag: group.is_local,
+                            has_quota_pool: group_has_pool,
+                            configured_context_window: m.context_window.or(group.context_window),
+                        };
+                    }
+                }
                 return ModelEndpoint {
                     key: clean.to_string(),
                     model: custom_model.to_string(),
@@ -453,6 +454,33 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
                     has_quota_pool: group_has_pool,
                     configured_context_window: group.context_window,
                 };
+            }
+        }
+    }
+    for match_by_key_only in [true, false] {
+        for group in &cfg.providers {
+            let group_has_pool =
+                !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
+            for m in &group.models {
+                let matched = if match_by_key_only {
+                    m.key.eq_ignore_ascii_case(clean)
+                } else {
+                    m.model_id.eq_ignore_ascii_case(clean)
+                };
+                if matched {
+                    let api_key =
+                        resolve_api_key(&group.api_key_env).unwrap_or_else(|| "local".to_string());
+                    return ModelEndpoint {
+                        key: m.key.clone(),
+                        model: m.model_id.clone(),
+                        base_url: group.base_url.clone(),
+                        api_key,
+                        label: m.label.clone(),
+                        is_local_flag: group.is_local,
+                        has_quota_pool: group_has_pool,
+                        configured_context_window: m.context_window.or(group.context_window),
+                    };
+                }
             }
         }
     }

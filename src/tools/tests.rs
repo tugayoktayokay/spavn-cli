@@ -878,7 +878,11 @@ mod security_tests {
         let mut c = ctx_with(AccessMode::Safe, "/tmp");
         let args = serde_json::json!({ "op": "fetch", "url": "https://example.com/" }).to_string();
         let out = execute_tool(&mut c, "web", &args);
-        assert!(out.contains("reddedildi") || out.contains("GLED"), "{out}");
+        // Language follows the user's OS/config (global default is English now), so accept both.
+        assert!(
+            out.contains("reddedildi") || out.contains("rejected") || out.contains("GLED"),
+            "{out}"
+        );
     }
 
     #[test]

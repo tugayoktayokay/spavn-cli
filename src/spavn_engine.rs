@@ -682,10 +682,7 @@ pub fn render_pins_panel(cwd: &str) {
                 CYAN, RESET, YELLOW, p.id, RESET, p.content, DIM, p.created_at, RESET
             );
         }
-        println!(
-            "{}│{} {}To delete: /unpin <id>{}",
-            CYAN, RESET, DIM, RESET
-        );
+        println!("{}│{} {}To delete: /unpin <id>{}", CYAN, RESET, DIM, RESET);
     }
     println!(
         "{}╰────────────────────────────────────────────────────────────────────────────{}",
