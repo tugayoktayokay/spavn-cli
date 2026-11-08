@@ -452,8 +452,9 @@
             <tr><td><strong>Fuzzy Self-Heal <code>edit</code> Engine</strong></td><td><code>src/tools/edit.rs</code></td><td>Recovers from intra-line whitespace/indentation drift (<code>fuzzy_find_unique_line_block</code>), auto-expands off-by-N line ranges (±25 lines), and supports multi-hunk <code>edits[]</code> plus cross-file atomic <code>files[]</code> transactions.</td></tr>
             <tr><td><strong>Stale-File Guard (<code>FS_STALE_VERSION</code>)</strong></td><td><code>src/tools/edit.rs</code></td><td>Tracks per-file <code>SystemTime</code> snapshots on <code>read</code> and refuses <code>edit</code> / <code>write</code> calls when a file was modified externally since it was last read.</td></tr>
             <tr><td><strong>Canonical Repeat-Tool Breaker</strong></td><td><code>src/turn/mod.rs</code></td><td>Recursively canonicalizes JSON tool arguments (sorted object keys) and injects <code>[SPAVN REPEAT-TOOL BREAKER]</code> after 2 identical read-only calls to break infinite loops.</td></tr>
-            <tr><td><strong>Turn-Aware Schema &amp; Budget Compaction</strong></td><td><code>src/tools/schema.rs</code>, <code>src/session/compactor.rs</code></td><td>Trims tool schema verbosity after Turn 0 and scales context pruning to the active model's <code>context_window</code>.</td></tr>
-            <tr><td><strong>Transactional <code>/undo</code> Stack</strong></td><td><code>src/tools/edit.rs</code></td><td>Snapshots files before every <code>write</code> / <code>edit</code> for instant single or multi-step rollback via <code>/undo [N]</code>.</td></tr>
+            <tr><td><strong>Live Verification Loop &amp; Claim Gate</strong></td><td><code>src/harness.rs</code></td><td>Tracks mutated files, normalized test runs (<code>--lib</code>, <code>--nocapture</code>), and enforces verification depth before completion claims.</td></tr>
+            <tr><td><strong>OMP-Grade 30+ Provider &amp; Model Hub</strong></td><td><code>src/config.rs</code>, <code>src/hud/pickers.rs</code></td><td>30+ built-in cloud &amp; local providers, live key validation + <code>/v1/models</code> caching, <code>models.dev</code> registry sync, <code>models.yml</code> support, and custom provider wizard.</td></tr>
+            <tr><td><strong>Knowledge Distillation</strong></td><td><code>src/knowledge.rs</code></td><td>Distills durable user corrections into local Markdown artifacts (<code>~/.spavn/knowledge/</code>) and injects top-2 relevant lessons per prompt.</td></tr>
           </tbody>
         </table>
       </div>
@@ -462,8 +463,7 @@
       <div class="tw">
         <table>
           <tbody>
-            <tr><th>Version</th><td>0.2.0 · MIT</td></tr>
-            <tr><th>Platforms</th><td>macOS (arm64, x86_64) · Linux (x86_64, arm64) · Windows (x86_64)</td></tr>
+            <tr><th>Version</th><td>0.2.10 · MIT</td></tr>
             <tr><th>Rust</th><td>1.80+ (uses <code>LazyLock</code>)</td></tr>
             <tr><th>State</th><td><code>~/.spavn</code> · mode <code>0700</code>, secrets <code>0600</code></td></tr>
             <tr><th>External tools</th><td><code>ripgrep</code> for the <code>search</code> tool · <code>ssh</code> for remote hosts</td></tr>

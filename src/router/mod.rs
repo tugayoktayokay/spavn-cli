@@ -245,6 +245,8 @@ pub fn probe_local_endpoints(
         "http://127.0.0.1:1234/v1/models",
         "http://127.0.0.1:8080/v1/models",
         "http://127.0.0.1:8000/v1/models",
+        "http://127.0.0.1:4000/v1/models",
+        "http://127.0.0.1:9931/v1/models",
     ] {
         if !candidates.iter().any(|c| c.eq_ignore_ascii_case(std_url)) {
             candidates.push(std_url.to_string());
@@ -263,15 +265,45 @@ pub fn probe_local_endpoints(
     None
 }
 
+pub fn is_likely_chat_model_id(id: &str) -> bool {
+    let low = id.trim().to_ascii_lowercase();
+    if low.is_empty() {
+        return false;
+    }
+    let non_chat_markers = [
+        "embedding",
+        "tts-",
+        "-tts",
+        "whisper",
+        "dall-e",
+        "moderation",
+        "babbage-002",
+        "davinci-002",
+        "rerank",
+        "transcribe",
+        "realtime-preview",
+        "audio-preview",
+        "canary-",
+        "prompt-guard",
+        "llama-guard",
+    ];
+    !non_chat_markers.iter().any(|m| low.contains(m))
+}
+
 pub fn fetch_remote_models(
     base_url: &str,
     api_key: Option<&str>,
     timeout_secs: u64,
 ) -> Vec<String> {
-    let trimmed = base_url.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
+    let raw_trimmed = base_url.trim().trim_end_matches('/');
+    if raw_trimmed.is_empty() {
         return Vec::new();
     }
+    let trimmed = raw_trimmed
+        .strip_suffix("/chat/completions")
+        .or_else(|| raw_trimmed.strip_suffix("/messages"))
+        .unwrap_or(raw_trimmed)
+        .trim_end_matches('/');
     if trimmed.starts_with("http://127.0.0.1")
         || trimmed.starts_with("http://localhost")
         || trimmed.starts_with("http://[::1]")
@@ -309,7 +341,7 @@ pub fn fetch_remote_models(
             for item in arr {
                 if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
                     let clean_id = id.trim().strip_prefix("models/").unwrap_or(id.trim());
-                    if !clean_id.is_empty() && !out.iter().any(|x| x == clean_id) {
+                    if is_likely_chat_model_id(clean_id) && !out.iter().any(|x| x == clean_id) {
                         out.push(clean_id.to_string());
                     }
                 }
@@ -319,10 +351,11 @@ pub fn fetch_remote_models(
                 let id_opt = item
                     .get("id")
                     .or_else(|| item.get("name"))
+                    .or_else(|| item.get("model"))
                     .and_then(|v| v.as_str());
                 if let Some(id) = id_opt {
                     let clean_id = id.trim().strip_prefix("models/").unwrap_or(id.trim());
-                    if !clean_id.is_empty() && !out.iter().any(|x| x == clean_id) {
+                    if is_likely_chat_model_id(clean_id) && !out.iter().any(|x| x == clean_id) {
                         out.push(clean_id.to_string());
                     }
                 }
@@ -343,11 +376,131 @@ pub fn fetch_remote_models(
         let fallback_url = format!("{}/v1/models", trimmed);
         if let Ok((status, body)) = crate::http::get_text(&fallback_url, &headers, timeout_secs) {
             if (200..300).contains(&status) {
-                return parse_models_body(&body);
+                let parsed = parse_models_body(&body);
+                if !parsed.is_empty() {
+                    return parsed;
+                }
+            }
+        }
+    }
+    // Ollama native `/api/tags` fallback when `/v1/models` is unavailable
+    if trimmed.contains(":11434") || trimmed.contains("ollama") {
+        let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+        let tags_url = format!("{}/api/tags", root);
+        if let Ok((status, body)) = crate::http::get_text(&tags_url, &headers, timeout_secs) {
+            if (200..300).contains(&status) {
+                let parsed = parse_models_body(&body);
+                if !parsed.is_empty() {
+                    return parsed;
+                }
             }
         }
     }
     Vec::new()
+}
+
+/// Fetches `https://models.dev/api.json` (like OMP's `mapModelsDevToModels`) and caches
+/// tool-capable chat models (`id`, `label`, `context_window`) per provider in `~/.spavn/models_dev_cache.json`.
+pub fn sync_models_dev_catalog() -> usize {
+    let Ok((status, body)) = crate::http::get_text("https://models.dev/api.json", &[], 6) else {
+        return 0;
+    };
+    if !(200..300).contains(&status) {
+        return 0;
+    }
+    let Ok(root) = serde_json::from_str::<Value>(&body) else {
+        return 0;
+    };
+    let Some(obj) = root.as_object() else {
+        return 0;
+    };
+    let provider_map = [
+        ("anthropic", "anthropic"),
+        ("openai", "openai"),
+        ("google", "gemini"),
+        ("openrouter", "openrouter"),
+        ("deepseek", "deepseek"),
+        ("zai", "zai"),
+        ("zhipuai", "glm"),
+        ("xai", "xai"),
+        ("groq", "groq"),
+        ("moonshotai", "moonshot"),
+        ("minimax", "minimax"),
+        ("cerebras", "cerebras"),
+        ("fireworks-ai", "fireworks"),
+        ("togetherai", "together"),
+        ("sambanova", "sambanova"),
+        ("siliconflow", "siliconflow"),
+        ("deepinfra", "deepinfra"),
+        ("mistral", "mistral"),
+        ("nvidia", "nvidia"),
+        ("huggingface", "huggingface"),
+        ("baseten", "baseten"),
+        ("novita-ai", "novita"),
+        ("venice", "venice"),
+        ("github-models", "microsoft-github"),
+        ("opencode", "opencode-zen"),
+    ];
+    let mut cache: std::collections::HashMap<String, Vec<crate::config::ModelConfigEntry>> =
+        std::collections::HashMap::new();
+    let mut total_models = 0usize;
+    for (src_id, dst_id) in provider_map {
+        let Some(models_obj) = obj
+            .get(src_id)
+            .and_then(|p| p.get("models"))
+            .and_then(|m| m.as_object())
+        else {
+            continue;
+        };
+        let mut entries: Vec<crate::config::ModelConfigEntry> = Vec::new();
+        for (model_id, meta) in models_obj {
+            if !is_likely_chat_model_id(model_id) {
+                continue;
+            }
+            if meta.get("tool_call").and_then(|v| v.as_bool()) == Some(false) {
+                continue;
+            }
+            let name = meta
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(model_id);
+            let ctx = meta
+                .get("limit")
+                .and_then(|l| l.get("context"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            let reasoning = meta
+                .get("reasoning")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let badge = if reasoning {
+                "🧠 Reasoning".to_string()
+            } else {
+                "🌐 Catalog".to_string()
+            };
+            entries.push(crate::config::ModelConfigEntry {
+                key: format!("{}:{}", dst_id, model_id),
+                model_id: model_id.clone(),
+                label: name.to_string(),
+                badge,
+                desc: format!(
+                    "{}{}",
+                    name,
+                    ctx.map(|c| format!(" · {}k ctx", c / 1000))
+                        .unwrap_or_default()
+                ),
+                context_window: ctx,
+            });
+            total_models += 1;
+        }
+        if !entries.is_empty() {
+            cache.insert(dst_id.to_string(), entries);
+        }
+    }
+    if total_models > 0 {
+        crate::config::save_models_dev_cache(&cache);
+    }
+    total_models
 }
 
 #[derive(Debug, Clone)]
@@ -667,12 +820,25 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
     // 3. Check built-in BYOK catalog providers (OpenAI, Anthropic, Gemini, DeepSeek, MiniMax, GLM, Groq, xAI, OpenRouter, Ollama)
     let catalog = byok_catalog(&cfg);
     if let Some((prov_prefix, custom_model)) = clean.split_once(':') {
+        let prov_low = prov_prefix.to_ascii_lowercase();
+        let canonical_prov = match prov_low.as_str() {
+            "zen" | "opencode" => "opencode-zen",
+            "github" | "copilot" => "microsoft-github",
+            "google" => "gemini",
+            "zhipu" | "zhipu-coding-plan" => "glm",
+            "lmstudio" => "lm-studio",
+            "llamacpp" => "llama.cpp",
+            other => other,
+        };
         for group in &catalog {
-            if group.id.eq_ignore_ascii_case(prov_prefix) {
+            if group.id.eq_ignore_ascii_case(prov_prefix)
+                || group.id.eq_ignore_ascii_case(canonical_prov)
+            {
                 let api_key =
                     resolve_api_key(&group.api_key_env).unwrap_or_else(|| "local".to_string());
                 for m in &group.models {
                     if m.key.eq_ignore_ascii_case(custom_model)
+                        || m.key.eq_ignore_ascii_case(clean)
                         || m.model_id.eq_ignore_ascii_case(custom_model)
                     {
                         return ModelEndpoint {

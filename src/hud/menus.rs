@@ -1223,12 +1223,24 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
 
     if result.is_some() {
         if let Some(Some(pid)) = prov_ids.get(prov_idx) {
-            if let Some(group) = byok_catalog(&cfg)
-                .into_iter()
+            let group_opt = cfg
+                .providers
+                .iter()
                 .find(|g| g.id.eq_ignore_ascii_case(pid))
-            {
-                if !group.is_local && resolve_api_key(&group.api_key_env).is_none() {
-                    let _ = super::pickers::prompt_and_save_provider_key(&group, false);
+                .cloned()
+                .or_else(|| {
+                    byok_catalog(&cfg)
+                        .into_iter()
+                        .find(|g| g.id.eq_ignore_ascii_case(pid))
+                });
+            if let Some(group) = group_opt {
+                if !group.is_local
+                    && !group.api_key_env.trim().is_empty()
+                    && resolve_api_key(&group.api_key_env).is_none()
+                {
+                    if !super::pickers::prompt_and_save_provider_key(&group, false) {
+                        return None;
+                    }
                 }
             }
         }

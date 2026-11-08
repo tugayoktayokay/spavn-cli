@@ -157,13 +157,28 @@ pub(crate) fn provider_portal_url(provider_id: &str) -> Option<&'static str> {
         "openai" => Some("https://platform.openai.com/api-keys"),
         "anthropic" => Some("https://console.anthropic.com/settings/keys"),
         "gemini" => Some("https://aistudio.google.com/app/apikey"),
-        "openrouter" => Some("https://openrouter.ai/keys"),
+        "openrouter" => Some("https://openrouter.ai/settings/keys"),
         "deepseek" => Some("https://platform.deepseek.com/api_keys"),
-        "minimax" => Some("https://platform.minimax.io"),
+        "zai" => Some("https://z.ai/manage-apikey/apikey-list"),
         "glm" => Some("https://open.bigmodel.cn/usercenter/apikeys"),
+        "xai" => Some("https://console.x.ai/team/default/api-keys"),
         "groq" => Some("https://console.groq.com/keys"),
-        "xai" => Some("https://console.x.ai"),
+        "moonshot" => Some("https://platform.moonshot.ai/console/api-keys"),
+        "minimax" => Some("https://platform.minimax.io"),
+        "cerebras" => Some("https://cloud.cerebras.ai"),
+        "fireworks" => Some("https://api.fireworks.ai/settings/api-keys"),
+        "together" => Some("https://api.together.xyz/settings/api-keys"),
+        "sambanova" => Some("https://cloud.sambanova.ai/apis"),
+        "siliconflow" => Some("https://cloud.siliconflow.com/account/ak"),
+        "deepinfra" => Some("https://deepinfra.com/dash/api_keys"),
+        "mistral" => Some("https://console.mistral.ai/api-keys"),
+        "nvidia" => Some("https://build.nvidia.com"),
+        "huggingface" => Some("https://huggingface.co/settings/tokens"),
+        "baseten" => Some("https://app.baseten.co/settings/api_keys"),
+        "novita" => Some("https://novita.ai/settings/key-management"),
+        "venice" => Some("https://venice.ai/settings/api"),
         "microsoft-github" => Some("https://github.com/settings/tokens"),
+        "opencode-zen" => Some("https://opencode.ai/auth"),
         _ => None,
     }
 }
@@ -199,7 +214,7 @@ pub(crate) fn prompt_and_save_provider_key(
         if let Some((auto_tok, source_label)) = detect_cli_token_for_provider(&group.id) {
             let _ = upsert_spavn_secret(&group.api_key_env, &auto_tok);
             println!(
-                "\n{}╭─ 🔐 {} ───────────────────────────────────────────{}\n{}│{} {}⚡ {} automatic session auto-detected and connected!{}\n{}╰────────────────────────────────────────────────────────────────────────────{}",
+                "\n{}╭─ 🔐 {} ──────────────────────────────────────────────────────────{}\n{}│{} {}✅ {} ({}) {}{}\n{}╰────────────────────────────────────────────────────────────────────────────{}",
                 CYAN,
                 group.title,
                 RESET,
@@ -207,6 +222,11 @@ pub(crate) fn prompt_and_save_provider_key(
                 RESET,
                 GREEN,
                 source_label,
+                mask_secret_preview(&auto_tok),
+                tr_en(
+                    "otomatik algılandı ve bağlandı!",
+                    "auto-detected and connected!"
+                ),
                 RESET,
                 CYAN,
                 RESET
@@ -225,35 +245,39 @@ pub(crate) fn prompt_and_save_provider_key(
     );
     if let Some(ref cur_key) = existing {
         println!(
-            "{}│{} {}🔑 {}: {}{}{} {}{}",
+            "{}│{} {}: {}{}{}{}",
             CYAN,
             RESET,
-            GREEN,
             tr_en("Mevcut Anahtar", "Current Key"),
-            BOLD,
-            mask_secret_preview(cur_key),
+            GREEN,
+            group.api_key_env,
+            format!(" ({})", mask_secret_preview(cur_key)),
+            RESET
+        );
+    } else {
+        println!(
+            "{}│{} {}: {}{} ({}){}",
+            CYAN,
             RESET,
-            DIM,
-            tr_en(
-                "(Korumak için doğrudan Enter'a basın)",
-                "(Press Enter to keep existing)"
-            )
+            tr_en("Durum", "Status"),
+            YELLOW,
+            group.api_key_env,
+            tr_en("henüz tanımlı değil", "not configured yet"),
+            RESET
         );
     }
-    if let Some(u) = portal {
+    if let Some(url) = portal {
         println!(
-            "{}│{} {}🌐 {}: {}{}{} {}",
+            "{}│{} 🌐 {}: {}{}{}  {}('o' + Enter = {}){}",
             CYAN,
+            RESET,
+            tr_en("Anahtar Portalı", "Key Portal"),
+            "\x1b[4m",
+            url,
             RESET,
             DIM,
-            tr_en("Anahtar Sayfası", "Key Portal"),
-            CYAN,
-            u,
-            RESET,
-            tr_en(
-                "(Tarayıcıda açmak için 'o' yazıp Enter'a basın)",
-                "(Type 'o' + Enter to open in browser)"
-            )
+            tr_en("tarayıcıda aç", "open in browser"),
+            RESET
         );
     }
     let prompt_msg = format!(
@@ -270,14 +294,15 @@ pub(crate) fn prompt_and_save_provider_key(
                 if let Some(u) = portal {
                     open_url_in_browser(u);
                     println!(
-                        "{}│{} {}🌐 {}{}",
+                        "{}│{} {}↗ {} ({}){}",
                         CYAN,
                         RESET,
                         GREEN,
                         tr_en(
-                            "Tarayıcı açıldı — anahtarı kopyalayıp aşağıya yapıştırın:",
-                            "Browser opened — copy your key and paste below:"
+                            "Tarayıcıda açıldı — anahtarı kopyalayıp aşağıya yapıştırın",
+                            "Opened in browser — copy your key and paste below"
                         ),
+                        u,
                         RESET
                     );
                 }
@@ -287,19 +312,41 @@ pub(crate) fn prompt_and_save_provider_key(
             };
         if let Some(new_key) = final_key {
             match upsert_spavn_secret(&group.api_key_env, &new_key) {
-                Ok(()) => println!(
-                    "{}│{} {}✅ {} ({}) {}{}",
-                    CYAN,
-                    RESET,
-                    GREEN,
-                    group.api_key_env,
-                    mask_secret_preview(&new_key),
-                    tr_en(
-                        "güvenli olarak ~/.spavn/secrets.env dosyasına kaydedildi ve bağlandı.",
-                        "securely saved to ~/.spavn/secrets.env and connected."
-                    ),
-                    RESET
-                ),
+                Ok(()) => {
+                    println!(
+                        "{}│{} {}✅ {} ({}) {}{}",
+                        CYAN,
+                        RESET,
+                        GREEN,
+                        group.api_key_env,
+                        mask_secret_preview(&new_key),
+                        tr_en(
+                            "güvenli olarak ~/.spavn/secrets.env dosyasına kaydedildi.",
+                            "securely saved to ~/.spavn/secrets.env."
+                        ),
+                        RESET
+                    );
+                    let mut spin = LiveSpinner::start(tr_en(
+                        "Anahtar doğrulanıyor ve canlı modeller (/v1/models) çekiliyor",
+                        "Validating key and fetching live models (/v1/models)",
+                    ));
+                    let discovered =
+                        crate::router::fetch_remote_models(&group.base_url, Some(&new_key), 4);
+                    spin.stop();
+                    if !discovered.is_empty() {
+                        crate::config::save_discovered_provider_models(&group.id, &discovered);
+                        println!(
+                            "{}│{} {}✔ {} ({} {}){}",
+                            CYAN,
+                            RESET,
+                            GREEN,
+                            tr_en("Canlı doğrulama başarılı", "Live validation succeeded"),
+                            discovered.len(),
+                            tr_en("model önbelleğe alındı", "models cached"),
+                            RESET
+                        );
+                    }
+                }
                 Err(e) => println!(
                     "{}│{} {}✗ {}: {}{}",
                     CYAN,
@@ -319,82 +366,149 @@ pub(crate) fn prompt_and_save_provider_key(
     resolve_api_key(&group.api_key_env).is_some()
 }
 
-/// Interactive BYOK / Login / Provider Connection Manager (`/login`, `/provider`, `/connect`, `/byok`):
-/// Allows any user to connect providers via auto-detected CLI auth (`gh`), one-click browser
-/// portal launch, masked API key entry (saved in `~/.spavn/secrets.env` with 0600), local server discovery,
-/// OR custom OpenAI-compatible Base URL + live `/v1/models` discovery + API Key!
+/// Interactive OMP-grade BYOK / Login / Provider Connection Manager (`/login`, `/provider`, `/connect`, `/byok`):
+/// 1-to-1 with OMP's provider system:
+/// - 30+ built-in cloud & local providers (Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, Z.AI, Zhipu GLM,
+///   xAI, Groq, Moonshot Kimi, MiniMax, Cerebras, Fireworks, Together, SambaNova, SiliconFlow, DeepInfra,
+///   Mistral, NVIDIA NIM, Hugging Face, Baseten, Novita, Venice, GitHub Models, OpenCode Zen,
+///   plus first-class local Ollama, LM Studio, llama.cpp, vLLM, LiteLLM).
+/// - Live key validation & persistent model caching (`~/.spavn/models_cache.json` + `models.dev` sync).
+/// - User custom providers (`~/.spavn/config.json`, `~/.spavn/models.yml`, `~/.omp/agent/models.yml`) + interactive
+///   manual custom provider wizard (`➕ Add Custom Provider`).
 pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<String> {
-    let catalog = byok_catalog(&load_user_config());
+    let mut cfg = load_user_config();
+    let catalog = byok_catalog(&cfg);
     let chosen = if let Some(pre) = preselected_provider
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
         let low = pre.to_ascii_lowercase();
-        if matches!(
-            low.as_str(),
-            "local" | "llama" | "vllm" | "lmstudio" | "mlx"
-        ) {
+        if matches!(low.as_str(), "local" | "scan") {
             "local-server".to_string()
-        } else if matches!(low.as_str(), "custom" | "url") {
+        } else if matches!(low.as_str(), "custom" | "url" | "add") {
             "custom-provider".to_string()
+        } else if matches!(low.as_str(), "sync" | "models.dev" | "refresh") {
+            "sync-catalog".to_string()
         } else if matches!(low.as_str(), "github" | "copilot" | "microsoft" | "azure") {
             "microsoft-github".to_string()
         } else if matches!(low.as_str(), "claude" | "anthropic") {
             "anthropic".to_string()
         } else if matches!(low.as_str(), "google" | "gemini") {
             "gemini".to_string()
+        } else if matches!(low.as_str(), "zhipu" | "zhipu-coding-plan") {
+            "glm".to_string()
+        } else if matches!(low.as_str(), "lmstudio") {
+            "lm-studio".to_string()
+        } else if matches!(low.as_str(), "llamacpp" | "llama" | "llama-swap") {
+            "llama.cpp".to_string()
+        } else if let Some(p) = cfg
+            .providers
+            .iter()
+            .find(|p| p.id.eq_ignore_ascii_case(&low))
+        {
+            format!("user-prov:{}", p.id)
         } else if let Some(g) = catalog.iter().find(|g| g.id.eq_ignore_ascii_case(&low)) {
             g.id.clone()
         } else {
             low
         }
     } else {
-        let cfg = load_user_config();
         let mut items: Vec<MenuItem> = vec![MenuItem {
             key: "local-server".to_string(),
             badge: format!(
                 "{}{}{}",
                 GREEN,
-                tr_en("🟢 Yerel Sunucu", "🟢 Local Server"),
+                tr_en("🟢 Yerel Sunucu Tara", "🟢 Scan Local Servers"),
                 RESET
             ),
             desc: tr_en(
-                "llama-swap / Ollama / LM Studio / vLLM adresini tara ve bağlan",
-                "Scan & connect llama-swap / Ollama / LM Studio / vLLM endpoint",
+                "Ollama (11434) · LM Studio (1234) · llama.cpp (8080) · vLLM/MLX (8000) · LiteLLM (4000) otomatik tara",
+                "Auto-scan Ollama (11434) · LM Studio (1234) · llama.cpp (8080) · vLLM/MLX (8000) · LiteLLM (4000)",
             )
             .to_string(),
         }];
-        items.extend(
-            catalog
-                .iter()
-                .filter(|g| g.id != "ollama" || cfg.local_discovery_url.is_none())
-                .map(|g| {
-                    let has_key = g.is_local || resolve_api_key(&g.api_key_env).is_some();
-                    let badge = if g.is_local {
-                        format!(
-                            "{}{}{}",
-                            GREEN,
-                            tr_en("🟢 Yerel (Hazır)", "🟢 Local (Ready)"),
-                            RESET
-                        )
-                    } else if has_key {
-                        format!("{}{}{}", GREEN, tr_en("🟢 Bağlı", "🟢 Connected"), RESET)
-                    } else {
-                        format!(
-                            "{}{}{}",
-                            YELLOW,
-                            tr_en("🔗 Bağlan / Giriş", "🔗 Connect / Login"),
-                            RESET
-                        )
-                    };
-                    let clean_title = g.title.replace(" (BYOK)", "");
-                    MenuItem {
-                        key: g.id.clone(),
-                        badge,
-                        desc: format!("{} · {}", clean_title, g.base_url),
-                    }
-                }),
-        );
+
+        // Show user's custom providers (from ~/.spavn/config.json, ~/.spavn/models.yml, ~/.omp/agent/models.yml)
+        for p in &cfg.providers {
+            let has_key = p.is_local
+                || p.api_key_env.trim().is_empty()
+                || resolve_api_key(&p.api_key_env).is_some();
+            let badge = if has_key {
+                format!(
+                    "{}{}{}",
+                    GREEN,
+                    tr_en("🔌 Özel (Bağlı)", "🔌 Custom (Ready)"),
+                    RESET
+                )
+            } else {
+                format!(
+                    "{}{}{}",
+                    YELLOW,
+                    tr_en("🔌 Özel (Anahtar)", "🔌 Custom (Key)"),
+                    RESET
+                )
+            };
+            items.push(MenuItem {
+                key: format!("user-prov:{}", p.id),
+                badge,
+                desc: format!(
+                    "{} · {} ({} {})",
+                    p.title,
+                    p.base_url,
+                    p.models.len(),
+                    tr_en("model", "models")
+                ),
+            });
+        }
+
+        // Built-in OMP catalog providers
+        items.extend(catalog.iter().map(|g| {
+            let has_key = g.is_local || resolve_api_key(&g.api_key_env).is_some();
+            let badge = if g.is_local {
+                format!(
+                    "{}{}{}",
+                    GREEN,
+                    tr_en("🟢 Yerel (Hazır)", "🟢 Local (Ready)"),
+                    RESET
+                )
+            } else if has_key {
+                format!("{}{}{}", GREEN, tr_en("🟢 Bağlı", "🟢 Connected"), RESET)
+            } else {
+                format!(
+                    "{}{}{}",
+                    YELLOW,
+                    tr_en("🔗 Bağlan / Giriş", "🔗 Connect / Login"),
+                    RESET
+                )
+            };
+            let clean_title = g.title.replace(" (BYOK)", "");
+            MenuItem {
+                key: g.id.clone(),
+                badge,
+                desc: format!(
+                    "{} · {} ({} {})",
+                    clean_title,
+                    g.base_url,
+                    g.models.len(),
+                    tr_en("model", "models")
+                ),
+            }
+        }));
+
+        items.push(MenuItem {
+            key: "sync-catalog".to_string(),
+            badge: format!(
+                "{}{}{}",
+                CYAN,
+                tr_en("🌐 Katalog Güncelle", "🌐 Sync Catalog"),
+                RESET
+            ),
+            desc: tr_en(
+                "models.dev üzerinden tüm sağlayıcıların güncel model ve bağlam listesini senkronize et",
+                "Sync latest frontier models & context windows from models.dev registry",
+            )
+            .to_string(),
+        });
 
         items.push(MenuItem {
             key: "custom-provider".to_string(),
@@ -405,27 +519,58 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 RESET
             ),
             desc: tr_en(
-                "Kendi OpenAI/Azure-uyumlu Base URL, Model ve API Anahtarınızı bağlayın",
-                "Connect your own OpenAI/Azure-compatible Base URL, Model ID, and API Key",
+                "Kendi OpenAI/Anthropic-uyumlu Base URL, Model ve API Anahtarınızı elle ekleyin",
+                "Manually add your own OpenAI/Anthropic-compatible Base URL, Model ID, and API Key",
             )
             .to_string(),
         });
 
         select_interactive_menu(
             tr_en(
-                "🔐 SPAVN HIZLI BAĞLANTI & SAĞLAYICI MERKEZİ (/login · /provider · /byok)",
-                "🔐 SPAVN QUICK CONNECT & PROVIDER HUB (/login · /provider · /byok)",
+                "🔐 SPAVN SAĞLAYICI & GİRİŞ MERKEZİ (/login · /provider · /byok)",
+                "🔐 SPAVN PROVIDER & LOGIN HUB (/login · /provider · /byok)",
             ),
             &items,
             0,
         )?
     };
 
-    if chosen == "local-server" {
-        let mut cfg = load_user_config();
+    if chosen == "sync-catalog" {
         let mut spin = LiveSpinner::start(tr_en(
-            "Yerel portlar taranıyor (11434 · 1234 · 8080 · 8000)",
-            "Scanning local ports (11434 · 1234 · 8080 · 8000)",
+            "models.dev kayıt defterinden güncel modeller senkronize ediliyor",
+            "Syncing latest models from models.dev registry",
+        ));
+        let count = crate::router::sync_models_dev_catalog();
+        spin.stop();
+        if count > 0 {
+            println!(
+                "\n{}✅ {} {} (~/.spavn/models_dev_cache.json){}",
+                GREEN,
+                count,
+                tr_en(
+                    "güncel model models.dev kaynağından senkronize edildi!",
+                    "models synced from models.dev registry!"
+                ),
+                RESET
+            );
+        } else {
+            println!(
+                "\n{}⚠ {}{}",
+                YELLOW,
+                tr_en(
+                    "models.dev kaynağına ulaşılamadı; yerel önbellek kullanılıyor.",
+                    "Could not reach models.dev; using local catalog cache."
+                ),
+                RESET
+            );
+        }
+        return interactive_provider_login(None);
+    }
+
+    if chosen == "local-server" {
+        let mut spin = LiveSpinner::start(tr_en(
+            "Yerel portlar taranıyor (11434 · 1234 · 8080 · 8000 · 4000)",
+            "Scanning local ports (11434 · 1234 · 8080 · 8000 · 4000)",
         ));
         let probed = crate::router::probe_local_endpoints(cfg.local_discovery_url.as_deref());
         spin.stop();
@@ -526,6 +671,84 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
         return interactive_select_model(&cfg.default_model, true);
     }
 
+    if let Some(user_prov_id) = chosen.strip_prefix("user-prov:") {
+        let mut group = cfg
+            .providers
+            .iter()
+            .find(|p| p.id.eq_ignore_ascii_case(user_prov_id))?
+            .clone();
+        if !group.is_local
+            && !group.api_key_env.trim().is_empty()
+            && resolve_api_key(&group.api_key_env).is_none()
+        {
+            let _ = prompt_and_save_provider_key(&group, true);
+        }
+        let active_key = resolve_api_key(&group.api_key_env);
+        let mut spin = LiveSpinner::start(tr_en(
+            "Özel sağlayıcı modelleri sorgulanıyor (/v1/models)",
+            "Querying custom provider models (/v1/models)",
+        ));
+        let remote_ids =
+            crate::router::fetch_remote_models(&group.base_url, active_key.as_deref(), 3);
+        spin.stop();
+        if !remote_ids.is_empty() {
+            crate::config::save_discovered_provider_models(&group.id, &remote_ids);
+            for rid in &remote_ids {
+                if !group.models.iter().any(|m| {
+                    m.model_id.eq_ignore_ascii_case(rid) || m.key.eq_ignore_ascii_case(rid)
+                }) {
+                    group.models.push(ModelConfigEntry {
+                        key: format!("{}:{}", group.id, rid),
+                        model_id: rid.clone(),
+                        label: format!("{} ({})", rid, group.id),
+                        badge: "🌐 Live".to_string(),
+                        desc: format!("{} · {}", rid, group.base_url),
+                        context_window: None,
+                    });
+                }
+            }
+        }
+        let mut model_items: Vec<MenuItem> = group
+            .models
+            .iter()
+            .map(|m| MenuItem {
+                key: if m.key.contains(':') {
+                    m.key.clone()
+                } else {
+                    format!("{}:{}", group.id, m.key)
+                },
+                badge: m.badge.clone(),
+                desc: m.desc.clone(),
+            })
+            .collect();
+        if !group.api_key_env.trim().is_empty() {
+            model_items.push(MenuItem {
+                key: "__update_key__".to_string(),
+                badge: format!(
+                    "{}{}{}",
+                    CYAN,
+                    tr_en("🔑 Anahtar Güncelle", "🔑 Update API Key"),
+                    RESET
+                ),
+                desc: format!("{} ({})", group.api_key_env, group.base_url),
+            });
+        }
+        let pick = select_interactive_menu(
+            &format!(
+                "🔌 {} — {}",
+                group.title,
+                tr_en("MODEL SEÇ", "SELECT MODEL")
+            ),
+            &model_items,
+            0,
+        )?;
+        if pick == "__update_key__" {
+            let _ = prompt_and_save_provider_key(&group, true);
+            return interactive_provider_login(Some(&group.id));
+        }
+        return Some(pick);
+    }
+
     if chosen == "custom-provider" {
         println!(
             "\n{}╭─ {} (~/.spavn/config.json) ───────────────────────────{}",
@@ -534,16 +757,32 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             RESET
         );
         let prov_name = prompt_inline_line(tr_en(
-            "│ Sağlayıcı Kısa Adı (ör. my-vllm, fireworks, together)",
-            "│ Provider Short ID (e.g. my-vllm, fireworks, together)",
+            "│ Sağlayıcı Kısa Adı (ör. my-vllm, apinex, commandcode)",
+            "│ Provider Short ID (e.g. my-vllm, apinex, commandcode)",
         ))?;
-        let base_url = prompt_inline_line(tr_en(
-            "│ Base URL (ör. https://api.together.xyz/v1 veya http://127.0.0.1:8000/v1)",
-            "│ Base URL (e.g. https://api.together.xyz/v1 or http://127.0.0.1:8000/v1)",
+        let raw_base_url = prompt_inline_line(tr_en(
+            "│ Base URL (ör. http://127.0.0.1:8000/v1 veya https://api.example.com/v1)",
+            "│ Base URL (e.g. http://127.0.0.1:8000/v1 or https://api.example.com/v1)",
         ))?;
+        let proto_in = prompt_inline_line(tr_en(
+            "│ Protokol [openai / anthropic] (Varsayılan: openai — Enter ile geçin)",
+            "│ Protocol [openai / anthropic] (Default: openai — press Enter to accept)",
+        ))
+        .unwrap_or_else(|| "openai".to_string());
+        let is_anthropic_proto = proto_in.trim().eq_ignore_ascii_case("anthropic");
+        let base_url = if is_anthropic_proto {
+            let t = raw_base_url.trim().trim_end_matches('/');
+            if t.starts_with("http://") || t.starts_with("https://") {
+                t.to_string()
+            } else {
+                format!("https://{}", t)
+            }
+        } else {
+            crate::router::derive_base_and_discovery_urls(&raw_base_url).0
+        };
         let api_key_opt = prompt_secret_line(tr_en(
-            "│ API Anahtarı (Yerel ise boş bırakıp Enter'a basın)",
-            "│ API Key (Leave empty and press Enter if local)",
+            "│ API Anahtarı (Yerel / şifresiz ise boş bırakıp Enter'a basın)",
+            "│ API Key (Leave empty and press Enter if local / no-auth)",
         ));
 
         let env_var_name = format!(
@@ -569,7 +808,8 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             crate::router::fetch_remote_models(&base_url, api_key_opt.as_deref(), 5);
         spin.stop();
 
-        let model_id = if !discovered_ids.is_empty() {
+        let (primary_model_id, extra_manual_ids) = if !discovered_ids.is_empty() {
+            crate::config::save_discovered_provider_models(&prov_name, &discovered_ids);
             println!(
                 "{}│{} {}✅ {} {}{}",
                 CYAN,
@@ -593,7 +833,11 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             disc_items.push(MenuItem {
                 key: "__manual_model__".to_string(),
                 badge: "✍️  Manual".to_string(),
-                desc: tr_en("Model kimliğini elle yaz", "Type model ID manually").to_string(),
+                desc: tr_en(
+                    "Model kimliğini elle yaz (virgülle birden fazla girebilirsiniz)",
+                    "Type model ID(s) manually (comma-separated supported)",
+                )
+                .to_string(),
             });
             let picked = select_interactive_menu(
                 &format!(
@@ -605,32 +849,63 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 0,
             )?;
             if picked == "__manual_model__" {
-                prompt_inline_line(tr_en(
-                    "│ Model Kimliği (ör. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
-                    "│ Model ID (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
-                ))?
+                let raw_ids = prompt_inline_line(tr_en(
+                    "│ Model Kimliği (birden fazla için virgülle ayırın, ör. model-a, model-b)",
+                    "│ Model ID(s) (comma-separated for multiple, e.g. model-a, model-b)",
+                ))?;
+                let mut parts: Vec<String> = raw_ids
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if parts.is_empty() {
+                    return None;
+                }
+                let first = parts.remove(0);
+                (first, parts)
             } else {
-                picked
+                (picked, Vec::new())
             }
         } else {
-            prompt_inline_line(tr_en(
-                "│ Model Kimliği (ör. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
-                "│ Model ID (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
-            ))?
+            let raw_ids = prompt_inline_line(tr_en(
+                "│ Model Kimliği (birden fazla için virgülle ayırın, ör. claude-sonnet-5-5, gpt-6.1-sol)",
+                "│ Model ID(s) (comma-separated for multiple, e.g. claude-sonnet-5-5, gpt-6.1-sol)",
+            ))?;
+            let mut parts: Vec<String> = raw_ids
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.is_empty() {
+                return None;
+            }
+            let first = parts.remove(0);
+            (first, parts)
         };
 
-        let mut cfg = load_user_config();
-        let entry_key = format!("{}:{}", prov_name, model_id);
+        let entry_key = format!("{}:{}", prov_name, primary_model_id);
         let mut all_models = vec![ModelConfigEntry {
             key: entry_key.clone(),
-            model_id: model_id.clone(),
-            label: format!("{} ({})", model_id, prov_name),
+            model_id: primary_model_id.clone(),
+            label: format!("{} ({})", primary_model_id, prov_name),
             badge: "🔌 Custom".to_string(),
             desc: tr_en("Kullanıcı tanımlı sağlayıcı", "User-defined provider").to_string(),
             context_window: None,
         }];
+        for manual_id in extra_manual_ids {
+            if !all_models.iter().any(|m| m.model_id == manual_id) {
+                all_models.push(ModelConfigEntry {
+                    key: format!("{}:{}", prov_name, manual_id),
+                    model_id: manual_id.clone(),
+                    label: format!("{} ({})", manual_id, prov_name),
+                    badge: "🔌 Custom".to_string(),
+                    desc: format!("{} ({})", manual_id, prov_name),
+                    context_window: None,
+                });
+            }
+        }
         for extra_id in discovered_ids {
-            if extra_id != model_id {
+            if !all_models.iter().any(|m| m.model_id == extra_id) {
                 all_models.push(ModelConfigEntry {
                     key: format!("{}:{}", prov_name, extra_id),
                     model_id: extra_id.clone(),
@@ -653,7 +928,11 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 String::new()
             },
             is_local: api_key_opt.is_none(),
-            protocol: None,
+            protocol: if is_anthropic_proto {
+                Some("anthropic".to_string())
+            } else {
+                Some("openai".to_string())
+            },
             context_window: None,
             models: all_models,
         });
@@ -672,9 +951,73 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
         return Some(entry_key);
     }
 
-    let group = catalog.into_iter().find(|g| g.id == chosen)?;
-    let _ = prompt_and_save_provider_key(&group, true);
+    let mut group = catalog.into_iter().find(|g| g.id == chosen)?;
 
+    // OMP-style Local Provider Flow (`ollama`, `lm-studio`, `llama.cpp`, `vllm`, `litellm`):
+    // Probes the local port first without nagging for an API key; if not running locally, offers custom URL + optional key!
+    if group.is_local {
+        let active_key = resolve_api_key(&group.api_key_env);
+        let mut spin = LiveSpinner::start(tr_en(
+            "Yerel sağlayıcı uç noktası kontrol ediliyor",
+            "Checking local provider endpoint",
+        ));
+        let remote_ids =
+            crate::router::fetch_remote_models(&group.base_url, active_key.as_deref(), 2);
+        spin.stop();
+        if !remote_ids.is_empty() {
+            crate::config::save_discovered_provider_models(&group.id, &remote_ids);
+            let (base_url, disc_url) =
+                crate::router::derive_base_and_discovery_urls(&group.base_url);
+            cfg.local_base_url = Some(base_url);
+            cfg.local_discovery_url = Some(disc_url);
+            let _ = save_user_config(&cfg);
+        } else {
+            println!(
+                "\n{}╭─ 🟢 {} ({}) ─────────────────────────────────{}",
+                CYAN, group.title, group.base_url, RESET
+            );
+            println!(
+                "{}│{} {}{}",
+                CYAN,
+                RESET,
+                YELLOW,
+                tr_en(
+                    "Varsayılan adreste yanıt alınamadı. Özel adres/anahtar girebilir veya Enter ile geçebilirsiniz.",
+                    "No response on default address. Enter custom URL/key or press Enter for default."
+                )
+            );
+            if let Some(custom_url) = prompt_inline_line(tr_en(
+                "│ Sunucu URL (Varsayılan için boş Enter)",
+                "│ Server URL (Empty Enter for default)",
+            )) {
+                let (base_url, disc_url) =
+                    crate::router::derive_base_and_discovery_urls(&custom_url);
+                group.base_url = base_url.clone();
+                cfg.local_base_url = Some(base_url);
+                cfg.local_discovery_url = Some(disc_url);
+                let _ = save_user_config(&cfg);
+            }
+            if !group.api_key_env.is_empty() {
+                if let Some(opt_key) = prompt_secret_line(tr_en(
+                    "│ Opsiyonel API Anahtarı (Yerel şifresiz mod için boş Enter)",
+                    "│ Optional API Key (Empty Enter for local no-auth mode)",
+                )) {
+                    let _ = upsert_spavn_secret(&group.api_key_env, &opt_key);
+                }
+            }
+            println!(
+                "{}╰────────────────────────────────────────────────────────────────────────────{}",
+                CYAN, RESET
+            );
+        }
+    } else {
+        let has_key = prompt_and_save_provider_key(&group, true);
+        if !has_key {
+            return None;
+        }
+    }
+
+    let active_key = resolve_api_key(&group.api_key_env);
     let mut model_items: Vec<MenuItem> = group
         .models
         .iter()
@@ -689,17 +1032,24 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
         })
         .collect();
 
-    let active_key = resolve_api_key(&group.api_key_env);
     if group.is_local || active_key.is_some() {
         let mut spin = LiveSpinner::start(tr_en(
-            "Sağlayıcı modelleri kontrol ediliyor",
-            "Checking provider models",
+            "Sağlayıcı modelleri senkronize ediliyor (/v1/models)",
+            "Syncing provider models (/v1/models)",
         ));
         let remote_ids =
             crate::router::fetch_remote_models(&group.base_url, active_key.as_deref(), 3);
         spin.stop();
+        if !remote_ids.is_empty() {
+            crate::config::save_discovered_provider_models(&group.id, &remote_ids);
+        }
         for rid in remote_ids {
-            let already_listed = group
+            let already_listed = model_items.iter().any(|item| {
+                item.key.eq_ignore_ascii_case(&rid)
+                    || item
+                        .key
+                        .eq_ignore_ascii_case(&format!("{}:{}", group.id, rid))
+            }) || group
                 .models
                 .iter()
                 .any(|m| m.model_id.eq_ignore_ascii_case(&rid) || m.key.eq_ignore_ascii_case(&rid));
