@@ -1,12 +1,15 @@
 pub mod edit;
+pub mod lsp;
 pub mod mcp_subagent;
 pub mod read;
 pub mod schema;
 pub mod search;
 pub mod shell;
+pub mod subagent;
 #[cfg(test)]
 mod tests;
 pub mod web;
+pub mod web_search;
 
 pub(crate) use edit::*;
 pub use edit::{
@@ -19,6 +22,7 @@ pub(crate) use read::*;
 pub use schema::{tool_definitions, tool_definitions_for_phase, tool_definitions_for_turn};
 pub(crate) use search::*;
 pub(crate) use shell::*;
+pub(crate) use subagent::*;
 pub(crate) use web::*;
 
 use crate::approval::ApprovalAnswer;
@@ -230,12 +234,47 @@ impl ToolContext {
         }
         let path = self.resolve_local_path(raw_path);
         let key = path.to_string_lossy().to_string();
-        if let Some(&recorded_hash) = self.read_hashes.get(&key) {
+        let canon_key = fs::canonicalize(&path)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let recorded_hash = self
+            .read_hashes
+            .get(&key)
+            .or_else(|| canon_key.as_ref().and_then(|k| self.read_hashes.get(k)))
+            .or_else(|| {
+                canon_key.as_ref().and_then(|ck| {
+                    self.read_hashes.iter().find_map(|(k, v)| {
+                        if let Ok(c) = fs::canonicalize(k) {
+                            if c.to_string_lossy() == *ck {
+                                return Some(v);
+                            }
+                        }
+                        None
+                    })
+                })
+            });
+        if let Some(&recorded_hash) = recorded_hash {
             if let Ok(bytes) = fs::read(&path) {
                 return fnv1a_hash64(&bytes) != recorded_hash;
             }
         }
-        if let Some(&recorded) = self.read_mtimes.get(&key) {
+        let recorded_mtime = self
+            .read_mtimes
+            .get(&key)
+            .or_else(|| canon_key.as_ref().and_then(|k| self.read_mtimes.get(k)))
+            .or_else(|| {
+                canon_key.as_ref().and_then(|ck| {
+                    self.read_mtimes.iter().find_map(|(k, v)| {
+                        if let Ok(c) = fs::canonicalize(k) {
+                            if c.to_string_lossy() == *ck {
+                                return Some(v);
+                            }
+                        }
+                        None
+                    })
+                })
+            });
+        if let Some(&recorded) = recorded_mtime {
             if let Ok(current) = fs::metadata(&path).and_then(|m| m.modified()) {
                 return current > recorded;
             }

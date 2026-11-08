@@ -105,7 +105,7 @@ Four bets, each visible in the source rather than the marketing:
 | Bet | Consequence in the code |
 | :--- | :--- |
 | **The gates live in code, never in the prompt** | Access, phase, path, egress and MCP checks are `if` statements in `guard.rs` / `tools.rs`. A model cannot talk its way past them. |
-| **No hidden network peers** | Search and desktop control have **no baked-in host**. Nothing external is reached until you name it in `config.json`. |
+| **No hidden network peers** | Desktop control has no built-in host. Built-in web search contacts only the providers listed under *Web / search backends*, and only when the model runs `web op=search`. `webSearchProviders` sets that list (`[]` turns it off). |
 | **Blocking, no async runtime, small** | `serde`, `serde_json`, `ureq`. No tokio, no async trait soup. Startup is a binary exec, not a runtime boot. |
 | **The harness is the product** | Audit chain, secret scrubbing, spill files, per-host remote exec, sub-agent isolation — features you feel on day three, not day one. |
 
@@ -454,15 +454,19 @@ flowchart TD
 <details>
 <summary><b>🌐 Web / search backends</b></summary>
 
+`web op=search` needs no API key and no setup. It starts with public keyless search APIs: Parallel's public MCP, Exa's public MCP, then Firecrawl's keyless search. Next come a configured SearXNG instance and the HTML scrapers (DuckDuckGo → Yahoo → Brave's results page). Setting `TAVILY_API_KEY` or `BRAVE_API_KEY` puts that API at the front of the chain. Setting `EXA_API_KEY` or `FIRECRAWL_API_KEY` makes that provider use its authenticated API, which has higher rate limits. A provider that errors, is rate-limited or returns nothing passes the query to the next one, and the result names every provider that failed before it (`[fallback] exa answered after: parallel: HTTP 429 (rate limited)`). The tool also takes `limit` (default 8, max 20) and `recency` (`day`/`week`/`month`/`year`).
+
 | Key | Meaning |
 | :--- | :--- |
-| `webSearchServer` / `webSearchTool` | Run `web` search through that `mcpServers` entry instead of any HTTP endpoint. |
+| `webSearchProviders` | Provider order, e.g. `["searxng", "duckduckgo"]`. Names: `tavily`, `brave`, `parallel`, `exa`, `firecrawl`, `searxng`, `duckduckgo`, `yahoo`, `brave-web`. Unset uses the default chain; `[]` turns built-in search off. |
+| `searxngUrl` | Your SearXNG instance (JSON output must be enabled in its config). LAN/loopback addresses are allowed. |
+| `webSearchServer` / `webSearchTool` | Send search to that `mcpServers` entry first; an empty answer falls back to the built-in chain. |
 | `webFetchTool` | Tool used for page fetch on `webSearchServer`; unset keeps the built-in fetch path. |
-| `webSearchUrl` | HTTP MCP endpoint for `web`. Empty or unset means **no** HTTP backend. |
+| `webSearchUrl` | HTTP MCP endpoint, tried before the built-in chain. |
 | `webSearchHttpTool` / `webFetchHttpTool` | Tool names your endpoint serves, if they differ. |
 | `webSearchApiKeyHeader` / `webSearchApiKeyEnv` | Header and env var carrying the endpoint's key (`x-api-key` is only the fallback header name). |
 
-> **No vendor host ships in the binary.** Search is off until you point `webSearchUrl` or `webSearchServer` at a backend. The refusal message names both routes, so an unconfigured `web` teaches instead of failing dumbly.
+> Keyless search sends the query to third-party services: Parallel, Exa, Firecrawl, DuckDuckGo, Yahoo and Brave. To keep queries off them, use `"webSearchProviders": ["searxng"]` with your own instance, or `[]` to turn search off.
 
 </details>
 
@@ -519,6 +523,9 @@ flowchart TD
 | `SPAVN_INSTALL_DIR` | Installer target (default `$HOME/.local/bin`). |
 | `SPAVN_LOCAL_MODELS_URL`, `SPAVN_LOCAL_BASE_URL` | Override local discovery / local base URL. |
 | `SPAVN_WEB_SEARCH_URL` | HTTP MCP endpoint for `web`, when `webSearchUrl` is unset. |
+| `TAVILY_API_KEY`, `BRAVE_API_KEY` | Put that API at the front of the `web` search chain. |
+| `EXA_API_KEY`, `FIRECRAWL_API_KEY` | Make Exa / Firecrawl use their authenticated API instead of the keyless one (higher rate limits). |
+| `SPAVN_SEARXNG_URL` | SearXNG instance, when `searxngUrl` is unset. |
 | `SPAVN_UPDATE_CHECK` | `0` / `false` / `off` disables the release check for this run. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY` | Provider credentials. |
 
@@ -679,7 +686,7 @@ Nothing is rebuilt per channel: one tag, three distribution paths.
 
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
-| `web` returns "no search backend" | Search is unconfigured by design | Set `webSearchUrl` or `webSearchServer` |
+| `web` search says "every provider failed" | Every keyless provider is rate-limiting this IP | Set an API key (`EXA_API_KEY`, `FIRECRAWL_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY`) or `searxngUrl` |
 | `search` tool errors | `ripgrep` missing | `brew install ripgrep` / `apt install ripgrep` |
 | Approval prompt never appears | No TTY (pipe, CI, `script`) | Run interactively, or use `safe`/`auto` with a TTY |
 | Installer refuses the binary | Killed on `execve` (quarantine, arch mismatch) | `cp` it to `/tmp` and run `--version` there |

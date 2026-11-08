@@ -363,12 +363,13 @@ pub fn render_markdown_table(raw_rows: &[String], term_cols: usize) -> String {
         let card_inner_w = term_cols.saturating_sub(6).max(4);
         let draw_card_rule = |left: &str, right: &str| -> String {
             format!(
-                "  {}{}{}{}{}\n",
+                "  {}{}{}{}{}{}\n",
                 DIM,
                 CYAN,
                 left,
                 "─".repeat(card_inner_w + 2),
-                format!("{}{}", right, RESET)
+                right,
+                RESET
             )
         };
         let bdr = format!("{}{}│{}", DIM, CYAN, RESET);

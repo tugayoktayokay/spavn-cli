@@ -232,7 +232,7 @@ fn main() {
                      Files:\n\
                      \x20 ~/.spavn/PROFILE.md               user profile injected into the prompt\n\
                      \x20 ~/.spavn/skills/                  on-demand domain instructions\n\
-                     \x20 ~/.spavn/tool-output/             spilled tool output, newest 40 kept\n\
+                     \x20 ~/.spavn/tool-output/             spilled tool output, kept 7 days (256 MB cap)\n\
                      \x20 ~/.spavn/audit.key                HMAC key for the audit chain\n\n\
                      Inside the TUI: /help lists every slash command, / lists the menu.\n\
                      /update checks for a newer release and prints the upgrade command.\n\
@@ -704,7 +704,7 @@ fn main() {
         ctx.current_model = endpoint.key.clone();
         ctx.current_prompt = input.clone();
         // Before the auto title lands the newest user line stays the topic; after it only the
-        // title is, so a follow-up prompt never rewrites it (OMP `session/title.ts` behaviour).
+        // title is, so a follow-up prompt never rewrites it.
         if let Some(title) = spavn::session_title::session_title() {
             hud::set_window_topic(&title);
         } else {

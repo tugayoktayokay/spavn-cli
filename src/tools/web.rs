@@ -93,9 +93,8 @@ pub(crate) fn strip_html_to_clean_text(html: &str) -> String {
 
 /// Endpoint the `web` tool posts its MCP calls to.
 ///
-/// There is no built-in host. Shipping one would send queries to a third party nobody chose, so
-/// the endpoint comes only from `webSearchUrl` or `SPAVN_WEB_SEARCH_URL`; unset or empty leaves
-/// the HTTP backend off and the caller reports how to switch it on.
+/// Comes only from `webSearchUrl` or `SPAVN_WEB_SEARCH_URL`; unset or empty leaves the HTTP MCP
+/// backend off and search goes to the built-in provider chain.
 pub(crate) fn web_search_endpoint() -> Option<String> {
     let configured = crate::config::load_user_config().web_search_url;
     let raw = configured.or_else(|| std::env::var("SPAVN_WEB_SEARCH_URL").ok())?;
@@ -146,12 +145,6 @@ pub(crate) fn resolve_web_search_target(
     }
     Ok(Some((server.to_string(), tool.to_string())))
 }
-
-/// Shown when `web` search has nowhere to go. Since no endpoint is baked in, this doubles as the
-/// setup note instead of silently reaching for some vendor host.
-pub(crate) const NO_SEARCH_BACKEND: &str = "Web search error: no search backend configured. Point \
-`webSearchServer` + `webSearchTool` at an `mcpServers` entry, or `webSearchUrl` + \
-`webSearchHttpTool` at an HTTP MCP endpoint.";
 
 /// Tool name the HTTP backend serves for one operation.
 ///
@@ -341,9 +334,20 @@ pub(crate) fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
     if query.is_empty() {
         return "Web search error: missing 'query' parameter.".to_string();
     }
+    let limit = super::web_search::clamp_limit(
+        args.get("limit")
+            .or_else(|| args.get("num_results"))
+            .and_then(Value::as_u64),
+    );
+    let recency = args
+        .get("recency")
+        .and_then(Value::as_str)
+        .and_then(super::web_search::Recency::parse);
+    // A configured MCP backend is the operator's explicit choice, so it answers first; an empty
+    // answer falls through to the built-in chain instead of ending the search.
     let search_args = json!({
         "query": query,
-        "numResults": 6
+        "numResults": limit
     });
     let cfg = crate::config::load_user_config();
     match web_search_server_tool() {
@@ -351,21 +355,22 @@ pub(crate) fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
             let Some(srv) = cfg.mcp_servers.get(&server) else {
                 return format!("Web search error: MCP server `{}` disappeared.", server);
             };
-            return call_stdio_mcp(&server, srv, &tool, &search_args);
+            let out = call_stdio_mcp(&server, srv, &tool, &search_args);
+            if !out.trim().is_empty() {
+                return out;
+            }
         }
         Ok(None) => {}
         Err(message) => return message,
     }
-    let Some(tool) = web_http_tool(cfg.web_search_http_tool.as_deref()) else {
-        return NO_SEARCH_BACKEND.to_string();
-    };
-    // A tool name without an endpoint has nothing to call; say so instead of reporting an empty
-    // result set the caller would read as "nothing matched".
-    if web_search_endpoint().is_none() {
-        return NO_SEARCH_BACKEND.to_string();
+    if let Some(tool) = web_http_tool(cfg.web_search_http_tool.as_deref()) {
+        if let Some(results) = call_web_http(&tool, search_args) {
+            return results;
+        }
     }
-    if let Some(results) = call_web_http(&tool, search_args) {
-        return results;
-    }
-    "Web search returned no results.".to_string()
+    super::web_search::search(&super::web_search::Query {
+        text: query,
+        limit,
+        recency,
+    })
 }

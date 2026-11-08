@@ -224,6 +224,7 @@ const FULL_CONSTITUTION: &str = r#"# Engineering Constitution (High-Signal Rules
 5. **Non-Interactive Shell & Verification Gate:**
    - In `bash`, always pass non-interactive flags (`-y`, `--no-pager`, `CI=1`) and avoid blocking pagers/editors (`less`, `vim`, `git log` without `-n`).
    - After any code modification, MUST run a real verification check via `bash` (`cargo check`/`cargo test`, `pytest`, `npm test`, `node --check`, etc.) and confirm it passes before yielding to the user.
+   - Never claim fixed/done without a behavioral check (test or runtime smoke) executed after the last edit; always report the verification level actually exercised (compile-only vs test vs runtime).
 6. **Remote Host Symmetry:** All file tools (`read`, `edit`, `write`, `search`) accept `<host>:/path` prefixes configured in `~/.spavn/config.json` alongside `bash(host="<host>")`.
 7. **Batch Independent Lookups:** Every tool call is a full model round trip. When a step needs several *independent* lookups, emit them together as multiple `tool_calls` in ONE assistant message — never one per turn. Never batch a write with a read of the file it is about to change.
 8. **Copy-Ready Output Discipline:** Whenever you present draft replies, message options, prompts, social posts, commands, or config snippets meant for the user to copy and paste elsewhere, ALWAYS place each option's copyable text inside a fenced code block (e.g. ```` ```text ````), never inside `>` blockquotes or wrapped in outer quotation marks."#;
@@ -233,7 +234,7 @@ const COMPACT_CONSTITUTION: &str = r#"# Rules
 2. Match the neighboring code's naming, errors and imports. No dead code, no parallel conventions.
 3. Prefer `edit` over `write`. `old_text` = exact snippet plus 2-4 unchanged lines so it is unique; never include `123:` line-number prefixes. If `edit` warns, fix it next step.
 4. Finish fully: no TODO, stubs or mocks; update every caller and import.
-5. `bash` is non-interactive: pass `-y`, `--no-pager`, `CI=1`; no pagers or editors. After any code change run a real check (`cargo check`/`cargo test`, `pytest`, `npm test`) and confirm it passes before replying.
+5. `bash` is non-interactive: pass `-y`, `--no-pager`, `CI=1`; no pagers or editors. After any code change run a real check (`cargo check`/`cargo test`, `pytest`, `npm test`) and confirm it passes before replying. Never claim fixed/done without a behavioral check after the last edit; report the verification level actually exercised.
 6. File tools and `bash(host=...)` accept `<host>:/path` for hosts in `~/.spavn/config.json`.
 7. Batch independent `read`/`search`/`glob` lookups into ONE message: each separate turn is a full model round trip."#;
 
@@ -378,6 +379,21 @@ mod tests {
         for rules in [super::FULL_CONSTITUTION, super::COMPACT_CONSTITUTION] {
             assert!(rules.contains(":97-112,1066-1076"), "span example missing");
             assert!(rules.contains("sed"), "the bash-inspection ban is missing");
+        }
+    }
+
+    #[test]
+    fn both_constitutions_teach_verification_level_discipline() {
+        for rules in [super::FULL_CONSTITUTION, super::COMPACT_CONSTITUTION] {
+            assert!(
+                rules.contains("never claim fixed/done without a behavioral check")
+                    || rules.contains("Never claim fixed/done without a behavioral check"),
+                "behavioral check rule missing"
+            );
+            assert!(
+                rules.contains("report the verification level actually exercised"),
+                "verification level reporting rule missing"
+            );
         }
     }
 }

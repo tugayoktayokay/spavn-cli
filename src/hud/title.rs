@@ -1,6 +1,6 @@
 //! The terminal window title (`OSC 0`).
 //!
-//! A title is three parts, in the shape OMP popularised: a static brand glyph, a state glyph
+//! A title is three parts: a static brand glyph, a state glyph
 //! that doubles as the progress indicator while a request runs, and the topic of the session
 //! (`⚡ ⠂ düzelt: parser testi`). The topic is the newest user line, so a screenshot drop lands
 //! in the title as its chip (`🖼️ Screenshot.png (11 KB)`) without any special case.

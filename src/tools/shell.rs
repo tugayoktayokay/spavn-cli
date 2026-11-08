@@ -229,8 +229,8 @@ pub(crate) fn check_bash_gate(
 ///
 /// Three states, in order: `Private` (RFC1918, link-local, IMDS, CGNAT) is refused outright — no
 /// prompt can make it safe, and it is where cloud credentials live. `Loopback` needs an explicit
-/// `allow_local` from the caller. `Public` asks in SAFE, or in PLAN where the phase must stay
-/// read-only for the workspace.
+/// `allow_local` from the caller. `Public` asks only in SAFE: reading a public page never touches
+/// the workspace, so PLAN (a read-only research phase) needs it as much as CODE does.
 pub(crate) fn check_egress_gate(
     ctx: &mut ToolContext,
     url: &str,
@@ -270,9 +270,7 @@ pub(crate) fn check_egress_gate(
         EgressTarget::Public => {
             // A sub-agent has no terminal: prompting would resolve to "no" and cost it the
             // only tool that can reach documentation, so policy alone decides there.
-            let needs_prompt = ctx.can_prompt
-                && (ctx.access == AccessMode::Safe
-                    || ctx.phase == crate::spavn_engine::AgentPhase::Plan);
+            let needs_prompt = ctx.can_prompt && ctx.access == AccessMode::Safe;
             if needs_prompt
                 && !prompt_user_approval(
                     ctx,
@@ -282,8 +280,8 @@ pub(crate) fn check_egress_gate(
             {
                 return Some(
                     crate::config::tr_en(
-                        "Web fetch reddedildi (onay yok).",
-                        "Web fetch rejected (no approval).",
+                        "Web fetch reddedildi (onay yok). Sayfa OKUNMADI; içeriği hakkında tahmin yürütme, kullanıcıya okunamadığını söyle.",
+                        "Web fetch rejected (no approval). The page was NOT read; do not guess its contents, tell the user it could not be read.",
                     )
                     .to_owned(),
                 );
@@ -293,7 +291,7 @@ pub(crate) fn check_egress_gate(
     }
 }
 
-/// OMP-style Bash Interceptor: blocks standalone shell commands (`grep -rn`, `find`, `cat`,
+/// Bash Interceptor: blocks standalone shell commands (`grep -rn`, `find`, `cat`,
 /// `sed -n`, `head`, `tail`) when the dedicated built-in tool (`search`, `glob`, `read`)
 /// handles the request faster, respects ignore globs (`node_modules`, `target`, `.git`),
 /// and never stalls the turn for 120s.

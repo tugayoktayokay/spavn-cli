@@ -14,7 +14,7 @@ pub fn tool_definitions() -> Value {
         )
     };
     let lsp_desc = format!(
-        "Symbol navigation (`op=definition|references|symbols`) and generic MCP client (`op='mcp'`). {}",
+        "Real Language Server Protocol client (`op=definition|references|hover|symbols|diagnostics|implementation|type_definition|workspace_symbol`) for Rust (rust-analyzer), TS/JS (typescript-language-server), Python (pyright), Go (gopls), C/C++ (clangd), with ripgrep heuristic fallback; also generic MCP client (`op='mcp'`). {}",
         mcp_hint
     );
     json!([
@@ -187,13 +187,15 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "web",
-                "description": "Web search (`op='search'`) or fetch a URL as Markdown (`op='fetch'`).",
+                "description": "Web search (`op='search'`, built-in provider chain with fallback) or fetch a URL as Markdown (`op='fetch'`).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": { "type": "string", "enum": ["search", "fetch"], "description": "search | fetch" },
                         "query": { "type": "string", "description": "Query, or URL" },
-                        "url": { "type": "string", "description": "URL for op='fetch'" }
+                        "url": { "type": "string", "description": "URL for op='fetch'" },
+                        "limit": { "type": "integer", "description": "Max search results (default 8, max 20)" },
+                        "recency": { "type": "string", "enum": ["day", "week", "month", "year"], "description": "Only results from this period" }
                     },
                     "required": ["op"]
                 }
@@ -203,23 +205,28 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "subagent",
-                "description": "Delegate isolated read-only investigations to sub-agents with their own context: one `task`, or several via `tasks` in parallel.",
+                "description": "Delegate investigations or code modifications to isolated sub-agents: one `task` or up to 8 `tasks` concurrently. Supports read-only `scout` (default) and full-capability `worker` agents in isolated worktrees.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "task": { "type": "string", "description": "The sub-question" },
-                        "context": { "type": "string", "description": "File paths or background" },
-                        "expected_output": { "type": "string", "description": "Findings to return" },
+                        "task": { "type": "string", "description": "The sub-question or modification objective" },
+                        "context": { "type": "string", "description": "Shared file paths or background context" },
+                        "expected_output": { "type": "string", "description": "Findings or changes to report" },
+                        "kind": { "type": "string", "enum": ["scout", "worker"], "description": "Agent kind: 'scout' (read-only, default) or 'worker' (full tools in isolated git worktree)" },
+                        "max_steps": { "type": "integer", "description": "Step budget (default 24 scout / 40 worker, max 80)" },
                         "model": { "type": "string", "description": "Model override, e.g. local | flash" },
                         "tasks": {
                             "type": "array",
-                            "description": "Up to 4 sub-tasks run concurrently",
+                            "description": "Up to 8 sub-tasks run concurrently",
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "task": { "type": "string" },
                                     "context": { "type": "string" },
-                                    "expected_output": { "type": "string" }
+                                    "expected_output": { "type": "string" },
+                                    "kind": { "type": "string", "enum": ["scout", "worker"] },
+                                    "max_steps": { "type": "integer" },
+                                    "model": { "type": "string" }
                                 },
                                 "required": ["task"]
                             }
@@ -236,12 +243,29 @@ pub fn tool_definitions() -> Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "op": { "type": "string", "enum": ["definition", "references", "symbols", "mcp"], "description": "Operation" },
-                        "symbol": { "type": "string", "description": "Symbol for definition/references" },
-                        "path": { "type": "string", "description": "Path for symbols" },
-                        "server": { "type": "string", "description": "MCP server name" },
-                        "tool": { "type": "string", "description": "MCP tool (omit to list)" },
-                        "arguments": { "type": "object", "description": "JSON arguments" }
+                        "op": {
+                            "type": "string",
+                            "enum": [
+                                "definition",
+                                "references",
+                                "hover",
+                                "symbols",
+                                "diagnostics",
+                                "implementation",
+                                "type_definition",
+                                "workspace_symbol",
+                                "mcp"
+                            ],
+                            "description": "LSP or MCP operation to perform"
+                        },
+                        "path": { "type": "string", "description": "Target file or directory path relative to workspace root" },
+                        "line": { "type": "integer", "description": "1-based line number for position-based ops (definition, references, hover)" },
+                        "column": { "type": "integer", "description": "1-based column number (optional; computed automatically from `symbol` if omitted)" },
+                        "symbol": { "type": "string", "description": "Target symbol or query string. For position ops, finds the symbol on `line` to calculate column. For definition/references without path/line, searches workspace symbols first." },
+                        "timeout_sec": { "type": "integer", "description": "Timeout in seconds (e.g. wait time for diagnostics)" },
+                        "server": { "type": "string", "description": "MCP server name (for op='mcp')" },
+                        "tool": { "type": "string", "description": "MCP tool name (omit to list tools)" },
+                        "arguments": { "type": "object", "description": "MCP JSON arguments" }
                     },
                     "required": ["op"]
                 }
@@ -294,12 +318,20 @@ pub fn tool_definitions_for_turn(
         || lower.contains("fetch")
         || lower.contains("internette");
     let want_skill = lower.contains('@') || lower.contains("skill") || lower.contains("yetenek");
-    let want_subagent =
-        lower.contains("subagent") || lower.contains("alt ajan") || lower.contains("paralel");
+    let want_subagent = lower.contains("subagent")
+        || lower.contains("alt ajan")
+        || lower.contains("paralel")
+        || lower.contains("worker")
+        || lower.contains("scout")
+        || lower.contains("delegate");
     let want_lsp = lower.contains("lsp")
         || lower.contains("mcp")
         || lower.contains("definition")
-        || lower.contains("references");
+        || lower.contains("references")
+        || lower.contains("diagnostics")
+        || lower.contains("hover")
+        || lower.contains("symbols")
+        || lower.contains("symbol");
     if let Value::Array(items) = base {
         let filtered: Vec<Value> = items
             .into_iter()

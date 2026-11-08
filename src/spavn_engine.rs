@@ -236,8 +236,25 @@ impl AgentPhase {
     }
 }
 
+/// True when `kw` starts a word in `text`. Suffixes stay allowed (Turkish "incelesene",
+/// "testleri"), but a keyword inside another word ("latest", "Authenticate") does not count.
+fn starts_a_word(text: &str, kw: &str) -> bool {
+    text.match_indices(kw).any(|(i, _)| {
+        text[..i]
+            .chars()
+            .next_back()
+            .map_or(true, |c| !c.is_alphanumeric())
+    })
+}
+
 pub fn dispatch_role_from_prompt(prompt: &str) -> AgentRoleKey {
-    let lower = prompt.to_lowercase();
+    // URLs carry file names and query strings (`Test%20Bulgular.xlsx`), not intent.
+    let lower = prompt
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|w| !w.contains("://") && !w.starts_with("www."))
+        .collect::<Vec<_>>()
+        .join(" ");
     let rules: &[(AgentRoleKey, &[&str])] = &[
         (
             AgentRoleKey::Reviewer,
@@ -306,7 +323,7 @@ pub fn dispatch_role_from_prompt(prompt: &str) -> AgentRoleKey {
     let mut best = AgentRoleKey::Coder;
     let mut best_score = 0usize;
     for (role, kws) in rules {
-        let score = kws.iter().filter(|kw| lower.contains(**kw)).count();
+        let score = kws.iter().filter(|kw| starts_a_word(&lower, kw)).count();
         if score > best_score {
             best_score = score;
             best = *role;
@@ -787,6 +804,20 @@ pub fn detect_project_gates(cwd: &str) -> Vec<(String, String)> {
     if root.join("pyproject.toml").exists() || root.join("pytest.ini").exists() {
         gates.push(("pytest".to_string(), "pytest -q".to_string()));
     }
+    if root.join("go.work").exists() {
+        if let Ok(content) = fs::read_to_string(root.join("go.work")) {
+            let modules = crate::tools::edit::parse_go_work_modules(&content);
+            for m in modules {
+                let m_clean = m.trim_start_matches("./");
+                gates.push((
+                    format!("go-vet-{}", m_clean),
+                    format!("cd {} && go vet ./...", m),
+                ));
+            }
+        }
+    } else if root.join("go.mod").exists() {
+        gates.push(("go-vet".to_string(), "go vet ./...".to_string()));
+    }
     gates
 }
 
@@ -1175,6 +1206,31 @@ mod engine_tests {
         assert_eq!(
             dispatch_role_from_prompt("implement the new streaming feature"),
             AgentRoleKey::Coder
+        );
+    }
+
+    #[test]
+    fn dispatch_role_ignores_keywords_inside_words_and_urls() {
+        // A comparison request whose SharePoint link names `Test Bulguları.xlsx` was
+        // routed to TEST and told to write tests.
+        assert_eq!(
+            dispatch_role_from_prompt(
+                "şu bulguları bizim sistemle karşılaştır https://x.sharepoint.com/Doc.aspx?file=Test%20Bulgular.xlsx"
+            ),
+            AgentRoleKey::Coder
+        );
+        assert_eq!(
+            dispatch_role_from_prompt("bump to the latest release of the community crate"),
+            AgentRoleKey::Coder
+        );
+        // Turkish suffixes on a keyword still route.
+        assert_eq!(
+            dispatch_role_from_prompt("şu kodu incelesene"),
+            AgentRoleKey::Reviewer
+        );
+        assert_eq!(
+            dispatch_role_from_prompt("testleri yaz"),
+            AgentRoleKey::Test
         );
     }
 

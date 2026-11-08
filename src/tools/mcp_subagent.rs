@@ -1,94 +1,5 @@
 use super::*;
 
-pub(crate) fn run_single_subagent_worker(
-    model_key: &str,
-    default_host: &str,
-    policy: &PathPolicy,
-    task: &str,
-    extra_ctx: &str,
-    expected: &str,
-) -> String {
-    let ep = crate::router::resolve_endpoint(model_key);
-    let mut sub_ctx = ToolContext::new(
-        AccessMode::Safe,
-        default_host.to_string(),
-        policy.cwd.clone(),
-        crate::spavn_engine::AgentPhase::Plan,
-    );
-    sub_ctx.policy = policy.clone();
-    sub_ctx.can_prompt = false;
-
-    let mut sub_tools = tool_definitions_for_phase(crate::spavn_engine::AgentPhase::Plan);
-    if let Value::Array(ref mut items) = sub_tools {
-        items.retain(|it| {
-            it.get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-                != Some("subagent")
-        });
-    }
-
-    let mut user_prompt = format!("## Sub-Agent Task\n{}", task.trim());
-    if !extra_ctx.trim().is_empty() {
-        user_prompt.push_str(&format!("\n\n## Context\n{}", extra_ctx.trim()));
-    }
-    if !expected.trim().is_empty() {
-        user_prompt.push_str(&format!("\n\n## Expected Output\n{}", expected.trim()));
-    }
-
-    let mut msgs = vec![
-        crate::router::ChatMessage::system(
-            "You are a focused, read-only SPAVN Sub-Agent. Use `read` and `search` to investigate the codebase and return a concise, high-signal summary with exact file:line references. Do not speculate.",
-        ),
-        crate::router::ChatMessage::user(user_prompt),
-    ];
-
-    for step in 0..6 {
-        if crate::is_interrupted() {
-            return "[Subagent cancelled via Esc/Ctrl+C]".to_string();
-        }
-        crate::hud::set_spinner_label(&format!("🐝 Subagent searching (step {}/6)", step + 1));
-        let Ok(res) = crate::router::stream_chat_completion(&ep, &msgs, &sub_tools, |_| {}, |_| {})
-        else {
-            break;
-        };
-        let msg = res.message;
-        msgs.push(msg.clone());
-        if let Some(tcs) = msg.tool_calls {
-            for tc in tcs.into_iter().take(4) {
-                let tname = tc.function.name.trim().to_string();
-                let out = if matches!(
-                    tname.as_str(),
-                    "read" | "search" | "memory" | "web" | "lsp" | "skill"
-                ) {
-                    execute_tool(&mut sub_ctx, &tname, &tc.function.arguments)
-                } else {
-                    "Subagent error: only read-only tools (read, search, memory, web, lsp, skill) are allowed."
-                        .to_string()
-                };
-                msgs.push(crate::router::ChatMessage::tool_result(tc.id, tname, out));
-            }
-            continue;
-        }
-        let ans = msg
-            .content
-            .or(msg.reasoning_content)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if !ans.is_empty() {
-            return ans;
-        }
-        break;
-    }
-
-    msgs.into_iter()
-        .rev()
-        .find(|m| m.role == "assistant")
-        .and_then(|m| m.content.or(m.reasoning_content))
-        .unwrap_or_else(|| "(Sub-agent completed without textual summary)".to_string())
-}
-
 /// Runs one JSON-RPC exchange against a stdio MCP server and formats the reply.
 ///
 /// Split out of the `lsp` dispatcher so the transport can be exercised against a throwaway server
@@ -217,108 +128,24 @@ pub(crate) fn call_stdio_mcp(
     }
 }
 
-/// Collapses a sub-agent task into one short, single-line header label.
-pub(crate) fn one_line_task(task: &str) -> String {
-    let flat = task.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= 72 {
-        return flat;
-    }
-    let mut cut = flat.chars().take(72).collect::<String>();
-    cut.push('…');
-    cut
-}
-
-pub(crate) fn exec_subagent(ctx: &mut ToolContext, args: &Value) -> String {
-    let model_override = get_str_alias(args, &["model", "endpoint"]);
-    let target_model = if model_override.is_empty() {
-        ctx.current_model.clone()
-    } else if model_override.eq_ignore_ascii_case("local") {
-        let cfg = crate::config::load_user_config();
-        cfg.local_discovery_url
-            .as_deref()
-            .and_then(crate::router::detect_active_local_model)
-            .unwrap_or(cfg.default_model)
-    } else {
-        model_override.to_string()
-    };
-
-    if let Some(tasks_arr) = args.get("tasks").and_then(|v| v.as_array()) {
-        if !tasks_arr.is_empty() {
-            let batch: Vec<(String, String, String)> = tasks_arr
-                .iter()
-                .take(4)
-                .filter_map(|item| {
-                    let t = get_str_alias(item, &["task", "prompt", "query", "objective"]);
-                    if t.trim().is_empty() {
-                        return None;
-                    }
-                    let c = get_str_alias(item, &["context", "files", "background"]);
-                    let e = get_str_alias(item, &["expected_output", "format", "output"]);
-                    Some((t.to_string(), c.to_string(), e.to_string()))
-                })
-                .collect();
-            if batch.is_empty() {
-                return "Subagent error: missing 'task' parameter in tasks array.".to_string();
-            }
-            let host = ctx.default_host.clone();
-            let policy = ctx.policy.clone();
-            let results: Vec<String> = std::thread::scope(|s| {
-                let handles: Vec<_> = batch
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, (t, c, e))| {
-                        let m = target_model.as_str();
-                        let h = host.as_str();
-                        let p = &policy;
-                        s.spawn(move || {
-                            let res = run_single_subagent_worker(m, h, p, t, c, e);
-                            // The task text can be paragraphs long; the header only needs
-                            // enough of it to tell the sub-agents apart.
-                            format!("### Sub-Agent #{} ({})\n{}", idx + 1, one_line_task(t), res)
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, h)| match h.join() {
-                        Ok(out) => out,
-                        // A panicking worker used to vanish silently, leaving the parent
-                        // model one result short with no hint that anything failed.
-                        Err(_) => format!(
-                            "### Sub-Agent #{} (failed)\n[Subagent panicked; its result is missing. Re-run it alone with `subagent`.]",
-                            idx + 1
-                        ),
-                    })
-                    .collect()
-            });
-            return results.join("\n\n");
-        }
-    }
-
-    let task = get_str_alias(args, &["task", "prompt", "query", "objective"]);
-    if task.trim().is_empty() {
-        return "Subagent error: missing 'task' parameter.".to_string();
-    }
-    let extra_ctx = get_str_alias(args, &["context", "files", "background"]);
-    let expected = get_str_alias(args, &["expected_output", "format", "output"]);
-
-    run_single_subagent_worker(
-        &target_model,
-        &ctx.default_host,
-        &ctx.policy,
-        task,
-        extra_ctx,
-        expected,
-    )
-}
-
 pub(crate) fn format_mcp_jsonrpc_response(
     server_name: &str,
     tool_name: &str,
     raw_json: &str,
 ) -> String {
-    let Ok(v) = serde_json::from_str::<Value>(raw_json) else {
+    let trimmed = raw_json.trim();
+    let v: Value = if trimmed.starts_with('{') {
+        match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => return raw_json.chars().take(12_000).collect(),
+        }
+    } else if let Some(sse_v) = trimmed
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("data:"))
+        .find_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+    {
+        sse_v
+    } else {
         return raw_json.chars().take(12_000).collect();
     };
     if let Some(err) = v.get("error") {
@@ -412,8 +239,8 @@ pub(crate) fn cap_mcp_text(text: &str, max_chars: usize) -> String {
     format!(
         "{}\n… (MCP response truncated: first {} of {} chars)",
         kept,
-        text.chars().count(),
-        max_chars
+        max_chars,
+        text.chars().count()
     )
 }
 
@@ -514,13 +341,36 @@ pub(crate) fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
                     json!({ "name": tool_name, "arguments": mcp_args })
                 }
             });
-            return match crate::http::post_json(
-                url,
-                &req_body.to_string(),
-                &[("Accept", "application/json, text/event-stream")],
-                30,
-            ) {
-                Ok((_, body)) => format_mcp_jsonrpc_response(server_name, &tool_name, &body),
+            let mut headers: Vec<(&str, &str)> =
+                vec![("Accept", "application/json, text/event-stream")];
+            for (k, v) in &srv.headers {
+                headers.push((k.as_str(), v.as_str()));
+            }
+            return match crate::http::post_json(url, &req_body.to_string(), &headers, 30) {
+                Ok((status, body)) if (200..300).contains(&status) => {
+                    format_mcp_jsonrpc_response(server_name, &tool_name, &body)
+                }
+                Ok((status, body)) => {
+                    if status == 401
+                        && body.contains("https://www.lazyweb.com/mcp/public")
+                        && srv.headers.is_empty()
+                    {
+                        if let Ok((200..=299, pub_body)) = crate::http::post_json(
+                            "https://www.lazyweb.com/mcp/public",
+                            &req_body.to_string(),
+                            &headers,
+                            30,
+                        ) {
+                            return format_mcp_jsonrpc_response(server_name, &tool_name, &pub_body);
+                        }
+                    }
+                    format!(
+                        "MCP HTTP {} ({}): {}",
+                        status,
+                        server_name,
+                        cap_mcp_text(body.trim(), 600)
+                    )
+                }
                 Err(e) => format!("MCP HTTP error ({}): {}", server_name, e),
             };
         }
@@ -533,52 +383,5 @@ pub(crate) fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
         );
     }
 
-    let symbol = get_str_alias(args, &["symbol", "name", "query", "identifier"]);
-    let raw_path = {
-        let p = get_str_alias(args, &["path", "file", "dir"]);
-        if p.is_empty() {
-            "."
-        } else {
-            p
-        }
-    };
-    if op == "symbols" || (symbol.is_empty() && !raw_path.is_empty()) {
-        let target = ctx.resolve_local_path(raw_path);
-        if target.is_file() {
-            if let Ok(content) = fs::read_to_string(&target) {
-                let mut syms = Vec::new();
-                for (idx, line) in content.lines().enumerate() {
-                    if is_structural_outline_line(line) {
-                        syms.push(format!("{:>4}: {}", idx + 1, line.trim()));
-                    }
-                }
-                if syms.is_empty() {
-                    return "(No structural symbols found in file)".to_string();
-                }
-                return syms.join("\n");
-            }
-        }
-        return build_live_project_signatures(&target.to_string_lossy());
-    }
-
-    if symbol.is_empty() {
-        return "LSP error: missing 'symbol' parameter.".to_string();
-    }
-    let is_def = op == "definition" || op == "def";
-    let pattern = if is_def {
-        format!(
-            r"(fn|struct|enum|trait|type|const|let|static|def|class|function|interface|func)\s+{}\b",
-            symbol
-        )
-    } else {
-        format!(r"\b{}\b", symbol)
-    };
-    exec_search(
-        ctx,
-        &json!({
-            "pattern": pattern,
-            "path": raw_path,
-            "context": if is_def { 6 } else { 0 }
-        }),
-    )
+    crate::tools::lsp::exec_lsp(ctx, args)
 }

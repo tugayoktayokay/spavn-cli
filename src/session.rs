@@ -471,6 +471,202 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
         .sum()
 }
 
+pub const USER_MESSAGES_HEADER: &str =
+    "[User Messages — verbatim, chronological; later messages override earlier ones]:";
+pub const USER_MESSAGES_OVERRIDE_NOTE: &str =
+    "(Later instructions supersede earlier conflicting ones, e.g. 'don't deploy' then 'deploy'. Latest instruction always wins.)";
+pub const USER_MESSAGES_BUDGET: usize = 16_000;
+pub const USER_MSG_SHORT_THRESHOLD: usize = 500;
+pub const USER_MSG_HEAD_CHARS: usize = 400;
+pub const USER_MSG_TRUNC_SUFFIX: &str = "… [kısaltıldı: tamamı oturum dosyasında]";
+pub const KEEP_LAST_VERBATIM_COUNT: usize = 8;
+
+pub fn strip_spavn_internal_blocks(raw: &str) -> String {
+    let mut s = raw.to_string();
+    while let Some(start) = s.find("<spavn_knowledge_artifacts") {
+        if let Some(end) = s[start..].find("</spavn_knowledge_artifacts>") {
+            let after_idx = start + end + "</spavn_knowledge_artifacts>".len();
+            s = format!("{}{}", &s[..start], &s[after_idx..]);
+        } else {
+            s = s[..start].to_string();
+            break;
+        }
+    }
+    while let Some(start) = s.find("<active_skill") {
+        if let Some(end) = s[start..].find("</active_skill>") {
+            let mut after_idx = start + end + "</active_skill>".len();
+            let after_slice = &s[after_idx..];
+            let trimmed_after = after_slice.trim_start();
+            if trimmed_after.starts_with("(The above @") {
+                if let Some(close_paren) = trimmed_after.find(')') {
+                    let offset = after_slice.len() - trimmed_after.len();
+                    after_idx += offset + close_paren + 1;
+                }
+            }
+            s = format!("{}{}", &s[..start], &s[after_idx..]);
+        } else {
+            s = s[..start].to_string();
+            break;
+        }
+    }
+    let mut trimmed = s.trim();
+    loop {
+        if trimmed.starts_with("[SPAVN ROLE:") || trimmed.starts_with("[SPAVN PHASE:") {
+            if let Some(nl) = trimmed.find("\n\n") {
+                trimmed = trimmed[nl + 2..].trim();
+                continue;
+            } else if let Some(nl) = trimmed.find('\n') {
+                trimmed = trimmed[nl + 1..].trim();
+                continue;
+            } else {
+                trimmed = "";
+                break;
+            }
+        }
+        if let Some(stripped) =
+            trimmed.strip_prefix("[LIVE USER STEERING INSTRUCTION — Prioritize this immediately]: ")
+        {
+            trimmed = stripped.trim();
+            continue;
+        }
+        break;
+    }
+    trimmed.to_string()
+}
+
+pub fn clean_user_message(raw: &str) -> Option<String> {
+    let cleaned = strip_spavn_internal_blocks(raw);
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() || trimmed.starts_with("[SPAVN ") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub fn is_user_entry_header(line: &str) -> Option<(usize, &str)> {
+    let rest = line.trim_start().strip_prefix('U')?;
+    let digits_len = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits_len == 0 {
+        return None;
+    }
+    let num = rest[..digits_len].parse::<usize>().ok()?;
+    let after_num = &rest[digits_len..];
+    if let Some(msg_start) = after_num.strip_prefix(':') {
+        let trimmed_start = msg_start.strip_prefix(' ').unwrap_or(msg_start);
+        Some((num, trimmed_start))
+    } else {
+        None
+    }
+}
+
+pub fn format_user_messages_section(msgs: &[String]) -> String {
+    if msgs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(USER_MESSAGES_HEADER);
+    out.push('\n');
+    out.push_str(USER_MESSAGES_OVERRIDE_NOTE);
+    for (idx, msg) in msgs.iter().enumerate() {
+        out.push('\n');
+        out.push_str(&format!("U{}: {}", idx + 1, msg));
+    }
+    out
+}
+
+pub fn apply_user_messages_budget(msgs: &mut [String]) {
+    let total_chars = format_user_messages_section(msgs).chars().count();
+    if total_chars <= USER_MESSAGES_BUDGET {
+        return;
+    }
+    let n = msgs.len();
+    let candidate_end = n.saturating_sub(KEEP_LAST_VERBATIM_COUNT);
+    for i in 0..candidate_end {
+        if msgs[i].chars().count() > USER_MSG_SHORT_THRESHOLD
+            && !msgs[i].ends_with(USER_MSG_TRUNC_SUFFIX)
+        {
+            let head: String = msgs[i].chars().take(USER_MSG_HEAD_CHARS).collect();
+            msgs[i] = format!("{}{}", head, USER_MSG_TRUNC_SUFFIX);
+            if format_user_messages_section(msgs).chars().count() <= USER_MESSAGES_BUDGET {
+                break;
+            }
+        }
+    }
+}
+
+pub fn build_user_messages_section(msgs: &mut [String]) -> String {
+    apply_user_messages_budget(msgs);
+    format_user_messages_section(msgs)
+}
+
+pub fn extract_user_messages_from_handoff(content: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    if let Some(idx) = content.find(USER_MESSAGES_HEADER) {
+        let after = &content[idx + USER_MESSAGES_HEADER.len()..];
+        let mut current_msg: Option<String> = None;
+        for line in after.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("[Active User Request")
+                || trimmed.starts_with("[Active Live Task")
+                || trimmed.starts_with("- [tools/files]:")
+                || trimmed.starts_with("- [prior]:")
+                || trimmed.starts_with("- [assistant]:")
+                || (trimmed.starts_with("[SPAVN ") && !trimmed.starts_with("[SPAVN Shaken"))
+            {
+                break;
+            }
+            if let Some((_num, entry_text)) = is_user_entry_header(line) {
+                if let Some(prev) = current_msg.take() {
+                    let cleaned = prev.trim().to_string();
+                    if !cleaned.is_empty() && !result.contains(&cleaned) {
+                        result.push(cleaned);
+                    }
+                }
+                current_msg = Some(entry_text.to_string());
+            } else if let Some(cur) = &mut current_msg {
+                cur.push('\n');
+                cur.push_str(line);
+            }
+        }
+        if let Some(last) = current_msg.take() {
+            let cleaned = last.trim().to_string();
+            if !cleaned.is_empty() && !result.contains(&cleaned) {
+                result.push(cleaned);
+            }
+        }
+        if !result.is_empty() {
+            return result;
+        }
+    }
+
+    // Fallback for legacy handoffs without USER_MESSAGES_HEADER
+    for line in content.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("- [user]: ") {
+            if let Some(clean) = clean_user_message(rest) {
+                if !result.contains(&clean) {
+                    result.push(clean);
+                }
+            }
+        }
+    }
+    const MARKER: &str = "[Active User Request — MUST complete all items]:\n";
+    if let Some((_, after)) = content.split_once(MARKER) {
+        let clean = after
+            .split("\n\n[Active Live Task Checklist]:")
+            .next()
+            .unwrap_or(after)
+            .trim();
+        if let Some(cleaned) = clean_user_message(clean) {
+            if !result.contains(&cleaned) {
+                result.push(cleaned);
+            }
+        }
+    }
+
+    result
+}
 pub fn perform_manual_compact(
     endpoint: &ModelEndpoint,
     messages: &mut Vec<ChatMessage>,
@@ -493,12 +689,15 @@ pub fn perform_manual_compact(
 
     let before_tok = estimate_tokens(messages);
     let active_user_idx = messages.iter().rposition(|m| {
-        m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
+        m.role == "user" && clean_user_message(m.content.as_deref().unwrap_or("")).is_some()
     });
     let active_user_prompt = active_user_idx
-        .and_then(|idx| messages[idx].content.clone())
-        .map(|c| hud::strip_internal_tags_for_display(&c).trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|idx| {
+            messages[idx]
+                .content
+                .as_deref()
+                .and_then(clean_user_message)
+        })
         .or_else(|| {
             const MARKER: &str = "[Active User Request — MUST complete all items]:\n";
             messages.iter().rev().find_map(|m| {
@@ -511,9 +710,8 @@ pub fn perform_manual_compact(
                     .split("\n\n[Active Live Task Checklist]:")
                     .next()
                     .unwrap_or(after)
-                    .trim()
-                    .to_string();
-                (!clean.is_empty()).then_some(clean)
+                    .trim();
+                clean_user_message(clean)
             })
         });
     let mut tail_start = if messages.len() > 6 {
@@ -574,45 +772,84 @@ pub fn perform_manual_compact(
     if messages.len() > 6 {
         let sys = messages[0].clone();
         let mut transcript_lines = Vec::new();
+        let mut user_messages = Vec::new();
         // tail_start 0 kalabiliyor (system'siz oturum): [1..0] panic yerine boş aralık.
         let shake_end = tail_start.max(1).min(messages.len());
         for m in &messages[1..shake_end] {
-            if m.role == "user" || m.role == "assistant" {
-                if let Some(c) = &m.content {
-                    if m.role == "user"
-                        && (c.starts_with("[SPAVN Auto-Compact")
-                            || c.starts_with("[SPAVN Semantic Context Handoff"))
-                    {
-                        let body = c
-                            .split("\n\n[Active User Request")
-                            .next()
-                            .unwrap_or(c)
-                            .split("\n\n[Active Live Task Checklist]:")
-                            .next()
-                            .unwrap_or(c);
-                        for line in body.lines().skip(1) {
-                            let t = line.trim();
-                            if let Some(rest) = t.strip_prefix("- [tools/files]:") {
-                                for item in rest.split(',').map(str::trim).filter(|s| !s.is_empty())
-                                {
-                                    let owned = item.to_string();
-                                    if !touched_tools.contains(&owned) && touched_tools.len() < 24 {
-                                        touched_tools.push(owned);
-                                    }
-                                }
-                            } else if !t.is_empty() && !t.contains("[SPAVN Auto-Compact") {
-                                let formatted = if t.starts_with("- [") {
-                                    t.to_string()
-                                } else {
-                                    format!("- [prior]: {}", t.trim_start_matches(['-', '*', ' ']))
-                                };
-                                if !transcript_lines.contains(&formatted) {
-                                    transcript_lines.push(formatted);
-                                }
+            if let Some(c) = &m.content {
+                if m.role == "user"
+                    && (c.starts_with("[SPAVN Auto-Compact")
+                        || c.starts_with("[SPAVN Semantic Context Handoff"))
+                {
+                    // 1. Extract tools/files from older handoff
+                    if let Some(idx) = c.find("- [tools/files]:") {
+                        let after = &c[idx + "- [tools/files]:".len()..];
+                        let line = after.lines().next().unwrap_or("").trim();
+                        for item in line.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                            let owned = item.to_string();
+                            if !touched_tools.contains(&owned) && touched_tools.len() < 24 {
+                                touched_tools.push(owned);
                             }
                         }
-                        continue;
                     }
+
+                    // 2. Extract and merge verbatim user messages from older handoff
+                    let prior_users = extract_user_messages_from_handoff(c);
+                    for u in prior_users {
+                        if !user_messages.contains(&u) {
+                            user_messages.push(u);
+                        }
+                    }
+
+                    // 3. Extract prior summary/assistant lines for transcript_lines,
+                    // strictly excluding user messages section, active request, live tasks, and headers.
+                    let body = c
+                        .split("\n\n[Active User Request")
+                        .next()
+                        .unwrap_or(c)
+                        .split("\n\n[Active Live Task Checklist]:")
+                        .next()
+                        .unwrap_or(c);
+                    let transcript_body = if let Some(idx) = body.find(USER_MESSAGES_HEADER) {
+                        &body[..idx]
+                    } else {
+                        body
+                    };
+
+                    for line in transcript_body.lines().skip(1) {
+                        let t = line.trim();
+                        if t.is_empty() {
+                            continue;
+                        }
+                        if t.starts_with("- [tools/files]:") {
+                            continue;
+                        }
+                        if t.starts_with("- [user]:") {
+                            continue;
+                        }
+                        if t.contains("[SPAVN Auto-Compact")
+                            || t.contains("[SPAVN Semantic Context")
+                            || t.starts_with("[User Messages")
+                        {
+                            continue;
+                        }
+                        let formatted = if t.starts_with("- [") {
+                            t.to_string()
+                        } else {
+                            format!("- [prior]: {}", t.trim_start_matches(['-', '*', ' ']))
+                        };
+                        if !transcript_lines.contains(&formatted) {
+                            transcript_lines.push(formatted);
+                        }
+                    }
+                    continue;
+                } else if m.role == "user" {
+                    if let Some(clean) = clean_user_message(c) {
+                        if !user_messages.contains(&clean) {
+                            user_messages.push(clean);
+                        }
+                    }
+                } else if m.role == "assistant" {
                     let clean = hud::strip_internal_tags_for_display(c);
                     let snippet: String = clean
                         .lines()
@@ -625,11 +862,23 @@ pub fn perform_manual_compact(
                         .take(260)
                         .collect();
                     if !snippet.is_empty() {
-                        transcript_lines.push(format!("- [{}]: {}", m.role, snippet));
+                        transcript_lines.push(format!("- [assistant]: {}", snippet));
                     }
                 }
             }
         }
+
+        let user_in_tail = active_user_idx.map(|u| u >= tail_start).unwrap_or(false);
+        if !user_in_tail {
+            if let Some(prompt) = &active_user_prompt {
+                if !user_messages.contains(prompt) {
+                    user_messages.push(prompt.clone());
+                }
+            }
+        }
+
+        let user_messages_section = build_user_messages_section(&mut user_messages);
+
         let focus_note = focus.map(|f| format!(" (Odak: {})", f)).unwrap_or_default();
         // Try LLM-powered semantic compaction on cloud endpoints (or when an explicit `/compact <focus>`
         // is requested). On local models (`endpoint.is_local()`) during auto-compact, skip the LLM
@@ -637,7 +886,7 @@ pub fn perform_manual_compact(
         let mut llm_summary: Option<String> = None;
         let use_llm_compact = focus.is_some()
             || (!endpoint.is_local() && !endpoint.model.contains("free") && messages.len() <= 80);
-        if !transcript_lines.is_empty() && use_llm_compact {
+        if (!transcript_lines.is_empty() || !user_messages_section.is_empty()) && use_llm_compact {
             let mut spin = LiveSpinner::start(tr_en(
                 "🗜️  Bağlam LLM ile anlamsal olarak özetleniyor",
                 "🗜️  Summarizing context semantically with LLM",
@@ -648,9 +897,11 @@ pub fn perform_manual_compact(
             let prompt_body = format!(
                 "Summarize the following coding session history into a dense, high-signal technical handoff (<300 words) preserving:\n\
                  1. Goal & User Preferences\n\
-                 2. Files Modified & Key Architectural Decisions\n\
-                 3. Current State & Pending Next Steps{}\n\n\
+                 2. Constraints & Decisions (latest wins)\n\
+                 3. Files Modified & Key Architectural Decisions\n\
+                 4. Current State & Pending Next Steps{}\n\n\
                  Touched tools/files: {}\n\n\
+                 User Messages:\n{}\n\n\
                  Conversation Transcript:\n{}",
                 focus_instruction,
                 if touched_tools.is_empty() {
@@ -658,7 +909,16 @@ pub fn perform_manual_compact(
                 } else {
                     touched_tools.join(", ")
                 },
-                transcript_lines.join("\n")
+                if user_messages_section.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    user_messages_section.clone()
+                },
+                if transcript_lines.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    transcript_lines.join("\n")
+                }
             );
             let compact_msgs = vec![
                 ChatMessage::system(
@@ -702,7 +962,6 @@ pub fn perform_manual_compact(
                 .collect();
             format!("\n\n[Active Live Task Checklist]:\n{}", lines.join("\n"))
         };
-        let user_in_tail = active_user_idx.map(|u| u >= tail_start).unwrap_or(false);
         let preserved_user_suffix = match active_user_prompt.as_deref() {
             Some(prompt) if !user_in_tail => {
                 format!(
@@ -713,25 +972,45 @@ pub fn perform_manual_compact(
             _ => tasks_handoff_suffix,
         };
         if let Some(semantic_summary) = llm_summary {
-            new_msgs.push(ChatMessage::user(format!(
-                "[SPAVN Semantic Context Handoff{}]:\n{}{}",
-                focus_note, semantic_summary, preserved_user_suffix
-            )));
-        } else if !transcript_lines.is_empty() {
-            let tools_note = if touched_tools.is_empty() {
-                String::new()
-            } else {
-                format!("\n- [tools/files]: {}", touched_tools.join(", "))
-            };
+            let mut handoff_text = format!(
+                "[SPAVN Semantic Context Handoff{}]:\n{}",
+                focus_note, semantic_summary
+            );
+            if !user_messages_section.is_empty() {
+                handoff_text.push_str("\n\n");
+                handoff_text.push_str(&user_messages_section);
+            }
+            handoff_text.push_str(&preserved_user_suffix);
+            new_msgs.push(ChatMessage::user(handoff_text));
+        } else if !transcript_lines.is_empty()
+            || !user_messages_section.is_empty()
+            || !touched_tools.is_empty()
+        {
+            let mut summary_body = String::new();
+            if !transcript_lines.is_empty() {
+                summary_body.push_str(&transcript_lines.join("\n"));
+            }
+            if !touched_tools.is_empty() {
+                if !summary_body.is_empty() {
+                    summary_body.push('\n');
+                }
+                summary_body.push_str(&format!("- [tools/files]: {}", touched_tools.join(", ")));
+            }
+            if !user_messages_section.is_empty() {
+                if !summary_body.is_empty() {
+                    summary_body.push_str("\n\n");
+                }
+                summary_body.push_str(&user_messages_section);
+            }
+            summary_body.push_str(&preserved_user_suffix);
+
             new_msgs.push(ChatMessage::user(
                 tr_en(
-                    "[SPAVN Auto-Compact Özet{0}]:\n{1}{2}{3}",
-                    "[SPAVN Auto-Compact Summary{0}]:\n{1}{2}{3}",
+                    "[SPAVN Auto-Compact Özet{0}]:\n{1}",
+                    "[SPAVN Auto-Compact Summary{0}]:\n{1}",
                 )
                 .replace("{0}", &focus_note)
-                .replace("{1}", &transcript_lines.join("\n"))
-                .replace("{2}", &tools_note)
-                .replace("{3}", &preserved_user_suffix),
+                .replace("{1}", &summary_body),
             ));
         }
         new_msgs.extend_from_slice(&messages[tail_start..]);
@@ -994,5 +1273,271 @@ mod tests {
             "banner missing after_tok: {banner}"
         );
         assert!(banner.contains("86"), "banner missing saved_pct: {banner}");
+    }
+
+    fn dummy_local_endpoint() -> ModelEndpoint {
+        ModelEndpoint {
+            key: "local".to_string(),
+            model: "qwen-coder".to_string(),
+            base_url: "http://127.0.0.1:8000/v1".to_string(),
+            api_key: "local".to_string(),
+            label: "Local".to_string(),
+            is_local_flag: true,
+            has_quota_pool: false,
+            configured_context_window: None,
+        }
+    }
+
+    fn dummy_assistant_tool_call(step: usize) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            reasoning_content: None,
+            tool_calls: Some(vec![crate::router::ToolCall {
+                id: format!("tc_{step}"),
+                call_type: "function".to_string(),
+                function: crate::router::ToolFunction {
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": format!("src/f{step}.rs") }).to_string(),
+                },
+                thought_signature: None,
+            }]),
+            tool_call_id: None,
+            name: None,
+            thought_signature: None,
+        }
+    }
+
+    fn dummy_assistant(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(text.to_string()),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            thought_signature: None,
+        }
+    }
+
+    fn dummy_tool_result(step: usize, len: usize) -> ChatMessage {
+        ChatMessage::tool_result(format!("tc_{step}"), "read", "x".repeat(len))
+    }
+
+    #[test]
+    fn compaction_preserves_900_char_user_message_with_directive_verbatim() {
+        let ep = dummy_local_endpoint();
+        let filler = "A".repeat(889);
+        let long_user_msg = format!("{}\ncanlıya al", filler);
+        assert_eq!(long_user_msg.chars().count(), 900);
+
+        let mut msgs = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user(long_user_msg.clone()),
+        ];
+        for step in 0..10 {
+            msgs.push(dummy_assistant_tool_call(step));
+            msgs.push(dummy_tool_result(step, 400));
+        }
+        perform_manual_compact(&ep, &mut msgs, None);
+
+        let handoff = msgs[1].content.clone().unwrap_or_default();
+        assert!(
+            handoff.contains(&long_user_msg),
+            "Handoff must contain 900-char user message verbatim: {handoff}"
+        );
+        assert!(
+            handoff.contains("canlıya al"),
+            "Last line 'canlıya al' must survive compaction: {handoff}"
+        );
+        assert!(
+            handoff.contains(USER_MESSAGES_HEADER),
+            "Handoff must contain dedicated verbatim user section header"
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_conflicting_user_instructions_with_override_note() {
+        let ep = dummy_local_endpoint();
+        let mut msgs = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("canlıya alma"),
+            dummy_assistant("anlaşıldı"),
+            ChatMessage::user("tamam canlıya al"),
+        ];
+        for step in 0..10 {
+            msgs.push(dummy_assistant_tool_call(step));
+            msgs.push(dummy_tool_result(step, 400));
+        }
+        perform_manual_compact(&ep, &mut msgs, None);
+
+        let handoff = msgs[1].content.clone().unwrap_or_default();
+        let pos1 = handoff
+            .find("canlıya alma")
+            .expect("must contain early instruction 'canlıya alma'");
+        let pos2 = handoff
+            .find("tamam canlıya al")
+            .expect("must contain later instruction 'tamam canlıya al'");
+        assert!(
+            pos1 < pos2,
+            "Instructions must appear in chronological order: pos1={pos1}, pos2={pos2}"
+        );
+        assert!(
+            handoff.contains("later messages override earlier ones")
+                || handoff.contains("supersede earlier conflicting ones"),
+            "Handoff must contain override note explaining later instructions supersede earlier ones: {handoff}"
+        );
+        assert!(
+            handoff.contains("U1: canlıya alma") && handoff.contains("U2: tamam canlıya al"),
+            "User messages must be numbered U1..Un: {handoff}"
+        );
+    }
+
+    #[test]
+    fn double_compaction_preserves_both_without_nesting_or_duplication() {
+        let ep = dummy_local_endpoint();
+        let mut msgs = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("canlıya alma"),
+            dummy_assistant("anlaşıldı"),
+            ChatMessage::user("tamam canlıya al"),
+        ];
+        for step in 0..10 {
+            msgs.push(dummy_assistant_tool_call(step));
+            msgs.push(dummy_tool_result(step, 400));
+        }
+        perform_manual_compact(&ep, &mut msgs, None);
+        let handoff_1 = msgs[1].content.clone().unwrap_or_default();
+        assert!(handoff_1.contains("U1: canlıya alma"));
+        assert!(handoff_1.contains("U2: tamam canlıya al"));
+
+        // Second round of work
+        for step in 10..20 {
+            msgs.push(dummy_assistant_tool_call(step));
+            msgs.push(dummy_tool_result(step, 400));
+        }
+        perform_manual_compact(&ep, &mut msgs, None);
+        let handoff_2 = msgs[1].content.clone().unwrap_or_default();
+
+        assert!(
+            handoff_2.contains("U1: canlıya alma"),
+            "Second compaction must preserve U1: {handoff_2}"
+        );
+        assert!(
+            handoff_2.contains("U2: tamam canlıya al"),
+            "Second compaction must preserve U2: {handoff_2}"
+        );
+        let header_count = handoff_2.matches(USER_MESSAGES_HEADER).count();
+        assert_eq!(
+            header_count, 1,
+            "User messages header must not be nested or repeated: count={header_count}"
+        );
+        assert!(
+            !handoff_2.contains("- [prior]: [User Messages"),
+            "Must not convert User Messages header into a prior bullet"
+        );
+        assert!(
+            !handoff_2.contains("- [prior]: U1:"),
+            "Must not convert U1 into a prior bullet"
+        );
+        assert!(
+            !handoff_2.contains("- [user]: [SPAVN Auto-Compact"),
+            "Must not nest Auto-Compact header"
+        );
+    }
+
+    #[test]
+    fn budget_overflow_keeps_last_8_verbatim_and_truncates_oldest_long_messages() {
+        let mut messages = Vec::new();
+        // Create 12 user messages of 2000 chars each = 24,000 chars (exceeds 16,000 budget)
+        for i in 1..=12 {
+            messages.push(format!("msg_{:02}: {}", i, "Z".repeat(1990)));
+        }
+        assert_eq!(messages.len(), 12);
+        for m in &messages {
+            assert!(m.chars().count() > 500);
+        }
+
+        apply_user_messages_budget(&mut messages);
+
+        // Messages 1..4 (indices 0..3) are the oldest candidate messages
+        assert!(
+            messages[0].contains("… [kısaltıldı: tamamı oturum dosyasında]"),
+            "Oldest long message must be truncated: {}",
+            messages[0]
+        );
+        assert_eq!(
+            messages[0].chars().take(400).collect::<String>(),
+            format!("msg_01: {}", "Z".repeat(392))
+        );
+
+        // The last 8 messages (indices 4..11, msgs 5..12) MUST be kept verbatim!
+        for (i, msg) in messages.iter().enumerate().skip(4).take(8) {
+            assert!(
+                !msg.contains("… [kısaltıldı:"),
+                "Message index {i} is in last 8 and must be kept verbatim!"
+            );
+            assert_eq!(
+                msg.chars().count(),
+                1998,
+                "Message index {i} must have original length preserved"
+            );
+        }
+
+        // Short messages (<= 500 chars) are never truncated even if before the last 8
+        let mut mixed = vec![
+            "short early instruction".to_string(),
+            format!("long early: {}", "X".repeat(15000)),
+            format!("long second: {}", "Y".repeat(15000)),
+        ];
+        for i in 1..=8 {
+            mixed.push(format!("recent_{i}"));
+        }
+        apply_user_messages_budget(&mut mixed);
+        assert_eq!(
+            mixed[0], "short early instruction",
+            "Short message (<=500 chars) must never be truncated even on budget overflow"
+        );
+    }
+
+    #[test]
+    fn internal_spavn_blocks_and_gate_messages_stripped() {
+        let raw_with_role =
+            "[SPAVN ROLE: CODER] Implement the requested change cleanly.\n\nreal user prompt 1";
+        assert_eq!(
+            clean_user_message(raw_with_role),
+            Some("real user prompt 1".to_string())
+        );
+
+        let raw_with_artifacts = "<spavn_knowledge_artifacts>\nrepo map\n</spavn_knowledge_artifacts>\n\nreal user prompt 2";
+        assert_eq!(
+            clean_user_message(raw_with_artifacts),
+            Some("real user prompt 2".to_string())
+        );
+
+        let raw_with_both = "[SPAVN ROLE: CODER] preamble\n\n<spavn_knowledge_artifacts>\nstuff\n</spavn_knowledge_artifacts>\n\ncanlıya al";
+        assert_eq!(
+            clean_user_message(raw_with_both),
+            Some("canlıya al".to_string())
+        );
+
+        let gate_verification = "[SPAVN VERIFICATION GATE]: You modified file(s)...";
+        assert_eq!(clean_user_message(gate_verification), None);
+
+        let gate_length = "[SPAVN LENGTH-STOP RECOVERY]: Your previous response...";
+        assert_eq!(clean_user_message(gate_length), None);
+
+        let gate_claim = "[SPAVN CLAIM GATE]: Claim not verified...";
+        assert_eq!(clean_user_message(gate_claim), None);
+
+        let auto_compact = "[SPAVN Auto-Compact Özet]: ...";
+        assert_eq!(clean_user_message(auto_compact), None);
+
+        let steering =
+            "[LIVE USER STEERING INSTRUCTION — Prioritize this immediately]: revert that commit";
+        assert_eq!(
+            clean_user_message(steering),
+            Some("revert that commit".to_string())
+        );
     }
 }

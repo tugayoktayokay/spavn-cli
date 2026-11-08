@@ -20,9 +20,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// must never fill the disk just because its output was large.
 pub const SPILL_MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// How many spill files to keep. Older ones are pruned on every write so the directory
-/// stays bounded without a background janitor.
-pub const SPILL_KEEP: usize = 40;
+/// How long a spill stays recoverable. Shaken session turns persist their `recover:`
+/// path in the session file, so the file must outlive the turn that wrote it — a
+/// count cap did not: one shake pass writes dozens of spills at once and evicted
+/// files other live sessions had just been told to read.
+pub const SPILL_MAX_AGE_MS: u128 = 7 * 24 * 60 * 60 * 1000;
+
+/// Disk ceiling for the whole spill directory. Only when it is exceeded are the
+/// oldest spills evicted before their age limit, so a burst never touches recent files.
+pub const SPILL_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
 const SPILL_DIR: &str = "tool-output";
 
@@ -67,12 +73,9 @@ pub fn spill_output_in(dir: &Path, label: &str, text: &str) -> Option<PathBuf> {
         slug
     };
 
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let stamp = now_ms();
     let seq = SPILL_SEQ.fetch_add(1, Ordering::Relaxed);
-    // Zero-padded name parts: `prune_old_spills` orders by name, and a bare `seq`
+    // Zero-padded name parts: `prune_spills_in` orders by name, and a bare `seq`
     // would sort "10" before "9" and evict the newest file.
     let path = dir.join(format!(
         "{:013}-{:06}-{:06}-{}.txt",
@@ -99,30 +102,59 @@ pub fn spill_output_in(dir: &Path, label: &str, text: &str) -> Option<PathBuf> {
     f.write_all(body.as_bytes()).ok()?;
     f.flush().ok()?;
 
-    prune_old_spills(&dir);
+    prune_spills_in(&dir, stamp, SPILL_MAX_AGE_MS, SPILL_BUDGET_BYTES);
     Some(path)
 }
 
-/// Keeps the newest `SPILL_KEEP` spill files, deleting the rest.
-fn prune_old_spills(dir: &std::path::Path) {
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// The creation stamp embedded in a spill name (`<13-digit ms>-…`).
+fn spill_stamp(path: &Path) -> Option<u128> {
+    let name = path.file_name()?.to_str()?;
+    name.get(..13)?.parse().ok()
+}
+
+/// Deletes spills older than `max_age_ms`, then — only if the directory still exceeds
+/// `budget_bytes` — evicts the oldest until it fits, never the newest file.
+///
+/// Names embed a monotonic millisecond stamp and a padded counter, so ordering by
+/// name is exact. Ordering by mtime was not: files written inside the same
+/// filesystem timestamp tick compare equal.
+fn prune_spills_in(dir: &Path, now_ms: u128, max_age_ms: u128, budget_bytes: u64) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    // Names embed a monotonic millisecond stamp and a padded counter, so ordering by
-    // name is exact. Ordering by mtime was not: files written inside the same
-    // filesystem timestamp tick compare equal, and a stable sort then kept the arbitrary
-    // `read_dir` order — which could evict the file we just handed to the model.
-    let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
-        .collect();
-    if files.len() <= SPILL_KEEP {
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    for path in entries.flatten().map(|e| e.path()) {
+        if !path.extension().is_some_and(|x| x == "txt") {
+            continue;
+        }
+        let expired = spill_stamp(&path).is_some_and(|t| now_ms.saturating_sub(t) > max_age_ms);
+        if expired {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        files.push((path, size));
+    }
+    let mut total: u64 = files.iter().map(|(_, s)| s).sum();
+    if total <= budget_bytes {
         return;
     }
-    files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-    for path in files.into_iter().skip(SPILL_KEEP) {
-        let _ = fs::remove_file(path);
+    files.sort_by(|a, b| a.0.file_name().cmp(&b.0.file_name()));
+    let newest = files.len().saturating_sub(1);
+    for (path, size) in files.into_iter().take(newest) {
+        if total <= budget_bytes {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total -= size;
+        }
     }
 }
 
@@ -204,32 +236,65 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "body");
     }
 
+    fn name(stamp: u128, seq: usize) -> String {
+        format!("{:013}-000001-{:06}-x.txt", stamp, seq)
+    }
+
     #[test]
-    fn prune_keeps_the_newest_by_name_not_by_timestamp() {
-        let root = TempRoot::new("prune");
+    fn a_burst_of_fresh_spills_evicts_nothing() {
+        // One shake pass wrote 52 spills and the old 40-file cap deleted the rest,
+        // including files another live session had just been handed.
+        let root = TempRoot::new("burst");
         let dir = root.path();
-        // Same second, descending counters: mtime ordering is ambiguous here, name order is not.
-        for i in 0..(SPILL_KEEP + 5) {
-            let _ = fs::write(
-                dir.join(format!("0000000000001-000001-{:06}-x.txt", i)),
-                "b",
-            );
+        let paths: Vec<_> = (0..120)
+            .map(|i| spill_output_in(dir, "shaken-turn", &format!("turn {i}")).expect("spill"))
+            .collect();
+        for p in &paths {
+            assert!(p.exists(), "fresh spill evicted: {}", p.display());
         }
-        prune_old_spills(dir);
-        let left = fs::read_dir(dir).unwrap().count();
-        assert_eq!(
-            left, SPILL_KEEP,
-            "prune must leave exactly SPILL_KEEP files"
-        );
+    }
+
+    #[test]
+    fn spills_past_the_age_limit_are_deleted_and_younger_ones_kept() {
+        let root = TempRoot::new("age");
+        let dir = root.path();
+        let now = 10_000_000u128;
+        let old = dir.join(name(now - 5_001, 0));
+        let edge = dir.join(name(now - 5_000, 1));
+        let young = dir.join(name(now - 10, 2));
+        for p in [&old, &edge, &young] {
+            fs::write(p, "b").unwrap();
+        }
+        prune_spills_in(dir, now, 5_000, u64::MAX);
+        assert!(!old.exists(), "expired spill must be deleted");
         assert!(
-            dir.join(format!("0000000000001-000001-{:06}-x.txt", SPILL_KEEP + 4))
-                .exists(),
-            "newest file must survive"
+            edge.exists(),
+            "spill exactly at the age limit is still recoverable"
         );
-        assert!(
-            !dir.join("0000000000001-000001-000000-x.txt").exists(),
-            "oldest file must be evicted"
-        );
+        assert!(young.exists());
+    }
+
+    #[test]
+    fn over_budget_evicts_oldest_first_and_never_the_newest() {
+        let root = TempRoot::new("budget");
+        let dir = root.path();
+        let now = 10_000_000u128;
+        let files: Vec<_> = (0..5)
+            .map(|i| dir.join(name(now - 100 + i, i as usize)))
+            .collect();
+        for p in &files {
+            fs::write(p, "x".repeat(10)).unwrap();
+        }
+        // 50 bytes on disk, 25 allowed: the three oldest go, the two newest stay.
+        prune_spills_in(dir, now, u128::MAX, 25);
+        let alive: Vec<bool> = files.iter().map(|p| p.exists()).collect();
+        assert_eq!(alive, vec![false, false, false, true, true]);
+
+        // A single file bigger than the whole budget is the newest: it survives.
+        let huge = dir.join(name(now, 9));
+        fs::write(&huge, "x".repeat(100)).unwrap();
+        prune_spills_in(dir, now, u128::MAX, 25);
+        assert!(huge.exists(), "the newest spill must never be evicted");
     }
 
     #[test]

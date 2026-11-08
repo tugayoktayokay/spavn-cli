@@ -16,7 +16,6 @@ pub(crate) const RG_IGNORE_GLOBS: &[&str] = &[
     "!**/node_modules/**",
     "!**/target/**",
     "!**/.git/**",
-    "!**/.omp/**",
     "!**/.cache/**",
     "!**/.cargo/**",
     "!**/.npm/**",
@@ -44,7 +43,6 @@ pub(crate) fn is_ignored_dir_name(name: &str, hidden: bool) -> bool {
             | "node_modules"
             | "target"
             | ".git"
-            | ".omp"
             | ".cache"
             | ".cargo"
             | ".npm"

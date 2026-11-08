@@ -1,5 +1,48 @@
 # Changelog
 
+## 2026-11-08 — `v0.2.9`: Claim Gate & Loop Guard, Keyless Web Search Chain, Verbatim Compaction, Real LSP Client & Isolated Worktree Sub-Agents
+
+### Built-in Web Search With Provider Fallback (`src/tools/web_search.rs`, `src/tools/web.rs`, `src/http.rs`, `src/config.rs`)
+- **Bug**: `web op=search` refused to run unless the user had set up an MCP search backend. Sessions with no backend never got a single search result.
+- **Fix**: Search now goes through an ordered provider chain with automatic fallback. With no API key it uses public keyless search APIs: Parallel's public MCP, Exa's public MCP, then Firecrawl's keyless search. Next come a configured SearXNG instance and the DuckDuckGo, Yahoo and Brave HTML scrapers. Setting `TAVILY_API_KEY` or `BRAVE_API_KEY` puts that API first. `EXA_API_KEY` and `FIRECRAWL_API_KEY` switch those providers to their authenticated APIs. Errors, rate limits and empty results pass the query to the next provider, and the answer lists every provider that failed before it. `webSearchProviders` sets the order (an empty list turns search off). The tool takes `limit` and `recency`. A configured MCP search backend is still tried first.
+
+### Claim Gate & Verification Levels (`src/harness.rs`, `src/turn.rs`, `src/memory.rs`)
+- **Bug**: In 19 of 29 logged turns that ended with "düzelttim / kalıcı / çözüldü", nothing was run after the last edit, and any passing compile command counted as proof.
+- **Fix**: Each turn records the strongest check run after the last mutation: `None < Compile < Test < Runtime`. A final answer that claims success while the level is below `Test` is sent back once or twice: the model must run a real test/smoke or say plainly what was not verified. If no real check follows, the answer is accepted with a visible `⚠ Doğrulama: … (davranış test edilmedi)` footer. An honest "not tested" disclosure, or a prompt that forbids running commands, is accepted without forcing a run. The legacy verification nudge no longer fires on top of the claim gate.
+- **Failing tests stay failing**: when a test command fails in a turn, a later green run only counts as proof if it is the same command or a broader one. For example, `cargo test` clears a failed `cargo test parser`, but `pytest tests/a.py` does not clear a failed `pytest`. Until that happens, no shell call counts above `Compile`, including a passing run after an earlier green one. The gate message and footer name the command that is still failing (`⚠ Hâlâ başarısız / Still failing: …`). This footer appears even when the answer makes no success claim.
+- **Loop guard**: identical calls warn at 3 repeats, are blocked (not executed) at 4, and stop the turn at 6. A repeated failing call with the same error counts as identical. Counters for a path reset when that path is edited, so re-reading after an edit is never blocked.
+
+### Compaction Keeps User Messages Verbatim (`src/session.rs`)
+- **Bug**: Earlier user messages were cut to 4 lines / 260 chars, so a later "canlıya al" could vanish while an earlier "canlıya alma" survived.
+- **Fix**: Every real user message is carried verbatim in a numbered `[User Messages — verbatim, chronological; later messages override earlier ones]` section (16k-char budget; the last 8 messages and anything ≤500 chars are never cut). The section survives repeated compaction without nesting, and both the LLM and the local deterministic paths use it. The LLM summary must include `Constraints & Decisions (latest wins)`.
+
+### Edit Safety & Go Workspaces (`src/tools/edit.rs`, `src/tools/mod.rs`, `src/spavn_engine.rs`)
+- **Fix**: A text edit to a file that changed on disk since Spavn last read or wrote it now fails with `Edit error [FS_STALE_VERSION]`; before, it only warned. Spavn's own writes update the tracked version, so consecutive edits still succeed.
+- **Fix**: `go.work` repos run `go vet ./...` inside each `use` module (preferring modules with modified files) and never at the workspace root, where it always failed.
+- Fuzzy self-heal output now names the changed lines and the similarity score.
+
+### Real Language Server Client (`src/tools/lsp.rs`, `src/tools/schema.rs`, `src/config.rs`)
+- `lsp` is now a std-only LSP client (Content-Length JSON-RPC over stdio). It caches one server per workspace and supports `definition`, `references`, `hover`, `symbols`, `diagnostics`, `implementation`, `type_definition` and `workspace_symbol`. Defaults: rust-analyzer, typescript-language-server, pyright, gopls, clangd; override them with `lspServers` in `~/.spavn/config.json`.
+- Server stderr is kept and shown when a server fails, including the rustup hint `rustup component add rust-analyzer`. Queries retry while the server is indexing, and URIs are normalized. The old ripgrep heuristic is used only when no server binary exists, and its output is labeled `[heuristic: …]`.
+
+### Parallel, Isolated Sub-Agents (`src/tools/subagent.rs`)
+- `subagent` runs up to 8 tasks concurrently. `scout` agents are read-only (24 steps by default); `worker` agents get full tools (40 steps by default, capped at 80) and a 15-minute timeout.
+- In git repos each worker runs in its own `git worktree` seeded with the parent's uncommitted state. Its patch is applied with `git apply --check` followed by an atomic `git apply`. A conflicting patch touches nothing: it is saved to `~/.spavn/patches/<id>.patch` and reported. The worktree is always removed afterward.
+- Under SAFE access, workers are refused because a background agent cannot ask for approval. Multiple workers are also refused in non-git directories. Model-call errors are reported instead of `(no tool activity recorded)`.
+
+### Spill Retention (`src/spill.rs`, `src/main.rs`)
+- **Bug**: `~/.spavn/tool-output/` kept only the newest 40 files across all sessions. One context-shake pass writes a spill per old tool result (52 in one observed turn), so it evicted spills other live sessions had just been handed and its own `recover:` paths — the model's next `read` hit `No such file`.
+- **Fix**: Spills now live 7 days (`SPILL_MAX_AGE_MS`); oldest-first eviction only kicks in when the directory exceeds 256 MB (`SPILL_BUDGET_BYTES`), and never removes the newest file.
+
+### Role Dispatch (`src/spavn_engine.rs`)
+- **Bug**: Auto role keywords matched anywhere, including inside words and URLs: a SharePoint link to `Test Bulguları.xlsx` routed a comparison request to the TEST role ("write tests"); `latest`/`Authenticate` hit `test`/`auth`.
+- **Fix**: A keyword must start a word (Turkish suffixes still match: `incelesene`, `testleri`), and URL tokens are ignored.
+
+### MCP Transport & Truncation (`src/tools/mcp_subagent.rs`, `src/config.rs`, `src/tools/shell.rs`)
+- **Fix**: The truncation notice printed its counts swapped (`first 18496 of 16000 chars`); it now reads `first <kept> of <total>`.
+- **Fix**: HTTP MCP servers now send configured `headers` from `mcpServers`, parse both JSON and SSE (`text/event-stream`) responses, and report HTTP status errors cleanly instead of dumping raw bodies.
+- **Fix**: Public `web op=fetch` calls now prompt only in `SAFE` mode, so read-only research during `PLAN` mode runs uninterrupted in `AUTO` and `SOVEREIGN`.
+
 ## 2026-11-07 — `v0.2.7`: Bottom-Pinned Input Dock, Mid-Turn Typing Persistence, Clean `/copy` Regions & Self-Update Fixes
 
 ### Bottom-Pinned Input Dock (`src/ansi.rs`, `src/hud/dock.rs`, `src/hud/input.rs`, `src/hud/mod.rs`)

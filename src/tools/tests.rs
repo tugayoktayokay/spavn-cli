@@ -252,7 +252,7 @@ mod timeout_tests {
     #[test]
     fn timeout_kills_grandchildren_and_does_not_hang() {
         let mut c = Command::new("sh");
-        c.args(["-c", "sleep 30 & sleep 30"]);
+        c.args(["-c", "(sleep 30 >/dev/null 2>&1 </dev/null &) ; sleep 30"]);
         let t = std::time::Instant::now();
         let (_, _, _, timed_out) = run_command_with_timeout(c, 1).unwrap();
         assert!(timed_out && t.elapsed().as_secs() < 5);
@@ -315,7 +315,6 @@ mod timeout_tests {
     }
 }
 
-#[cfg(all(test, unix))]
 #[cfg(all(test, unix))]
 mod bash_spill_tests {
     use super::*;
@@ -858,20 +857,6 @@ mod security_tests {
     }
 
     #[test]
-    fn missing_search_backend_names_both_ways_to_wire_it_up() {
-        // Nothing is baked in, so the refusal is the onboarding text: it has to point at the stdio
-        // route and the HTTP route instead of implying a hidden default host.
-        assert!(
-            NO_SEARCH_BACKEND.contains("webSearchServer"),
-            "{NO_SEARCH_BACKEND}"
-        );
-        assert!(
-            NO_SEARCH_BACKEND.contains("webSearchUrl"),
-            "{NO_SEARCH_BACKEND}"
-        );
-    }
-
-    #[test]
     fn web_fetch_asks_in_safe_mode() {
         // Sovereign egress to a public host is unattended by design; SAFE must still ask, and
         // with no TTY that ask fails closed.
@@ -1004,6 +989,7 @@ for line in sys.stdin:
             command: Some("python3".to_string()),
             args: vec![server.display().to_string()],
             env: Default::default(),
+            headers: Default::default(),
             url: None,
             read_only: false,
         };
@@ -1042,6 +1028,7 @@ for line in sys.stdin:
             command: Some("spavn-no-such-binary".to_string()),
             args: Vec::new(),
             env: Default::default(),
+            headers: Default::default(),
             url: None,
             read_only: false,
         };

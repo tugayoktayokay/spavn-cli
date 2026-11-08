@@ -135,8 +135,42 @@ pub fn post_json(
     headers: &[(&str, &str)],
     timeout_secs: u64,
 ) -> Result<(u16, String), String> {
-    let agent = agent_with_timeout(timeout_secs);
-    let mut request = agent.post(url).header("Content-Type", "application/json");
+    post_with(
+        &agent_with_timeout(timeout_secs),
+        url,
+        "application/json",
+        body,
+        headers,
+    )
+}
+
+/// Form POST to a public host; DNS is pinned like [`get_text_public`]. No redirects are followed.
+pub fn post_form_public(
+    url: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+    timeout_secs: u64,
+) -> Result<(u16, String), String> {
+    if crate::guard::egress_is_blocked(url) {
+        return Err(format!("{url} is not a public address (egress policy)"));
+    }
+    post_with(
+        &agent_public_only(timeout_secs),
+        url,
+        "application/x-www-form-urlencoded",
+        body,
+        headers,
+    )
+}
+
+fn post_with(
+    agent: &ureq::Agent,
+    url: &str,
+    content_type: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> Result<(u16, String), String> {
+    let mut request = agent.post(url).header("Content-Type", content_type);
     for (name, value) in headers {
         request = request.header(*name, *value);
     }

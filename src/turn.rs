@@ -9,7 +9,6 @@ use spavn::session::{
     append_message, evict_old_skill_blocks, perform_manual_compact, rewrite_session,
     safe_utf8_prefix, safe_utf8_suffix, summarize_tool_args, tool_progress_target,
 };
-use spavn::spavn_engine::AgentPhase;
 use spavn::state::{
     advance_live_tasks_on_tool, clear_finished_live_tasks, clear_interrupted, is_interrupted,
     pop_steer_messages, sync_live_tasks_from_text,
@@ -411,7 +410,12 @@ pub(crate) fn run_agent_turn(
     let mut repeat_count = 0usize;
     let mut canonical_sig_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    let mut unverified_edits = false;
+    let mut tool_failure_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut turn_had_mutations = false;
+    let mut highest_verification_level = VerificationLevel::None;
+    let mut failed_tests = FailedTestRuns::default();
+    let mut claim_gate_rounds = 0usize;
     let mut compiler_verified_in_edit = false;
     let mut verification_nudged = false;
     let mut modified_files_in_turn: Vec<String> = Vec::new();
@@ -504,7 +508,7 @@ pub(crate) fn run_agent_turn(
         // Never run destructive full compaction in the middle of an active turn (`total_turn_steps > 0`)
         // merely because `messages.len()` grew; only compact at turn start (`total_turn_steps == 0`) or
         // if token usage hits the hard threshold. During turn start, shake older turns' oversized tool
-        // outputs to recoverable spill files first (OMP-style Context Shaking).
+        // outputs to recoverable spill files first (Context Shaking).
         if total_turn_steps == 0 && effective_tok >= 24_000 {
             let active_u_idx = messages
                 .iter()
@@ -792,7 +796,7 @@ pub(crate) fn run_agent_turn(
         }
         spinner.stop();
 
-        let assistant_msg = result.message;
+        let mut assistant_msg = result.message;
         if let Some(ref c_text) = assistant_msg.content {
             sync_live_tasks_from_text(c_text);
         }
@@ -820,10 +824,9 @@ pub(crate) fn run_agent_turn(
             batch_sigs.sort();
             let mut max_sig_seen_in_turn = 0usize;
             for sig in &batch_sigs {
-                let entry = canonical_sig_counts.entry(sig.clone()).or_insert(0);
-                *entry += 1;
-                if *entry > max_sig_seen_in_turn {
-                    max_sig_seen_in_turn = *entry;
+                let seen = canonical_sig_counts.get(sig).copied().unwrap_or(0);
+                if seen > max_sig_seen_in_turn {
+                    max_sig_seen_in_turn = seen;
                 }
             }
             if !batch_sigs.is_empty() {
@@ -879,8 +882,67 @@ pub(crate) fn run_agent_turn(
                     }
                 }
             }
+            let mut loop_guard_stopped = false;
             for (idx, tc) in tool_calls.into_iter().enumerate() {
                 let tool_name = tc.function.name.trim().to_string();
+                let raw_args = &tc.function.arguments;
+                let call_sig = canonical_tool_call_sig(&tool_name, raw_args);
+                let sig_key = call_sig
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:{}", tool_name, raw_args.trim()));
+
+                let call_count = {
+                    let entry = canonical_sig_counts.entry(sig_key.clone()).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                let prior_failure_count = tool_failure_counts.get(&sig_key).copied().unwrap_or(0);
+                let effective_count = call_count.max(prior_failure_count);
+                let guard_decision = evaluate_loop_guard(effective_count);
+
+                if guard_decision == LoopGuardDecision::StopTurn {
+                    prefetched.remove(&idx);
+                    let stop_msg = format!(
+                        "\n{}⚡ [SPAVN {}]{}",
+                        RED,
+                        tr_en(
+                            &format!("Döngü Koruma Kapısı: `{}` aracı {} kez tekrarlandığı için oturum durduruldu.", tool_name, effective_count),
+                            &format!("LOOP GUARD: Agent stopped because `{}` was repeated {} times.", tool_name, effective_count)
+                        ),
+                        RESET
+                    );
+                    println!("{}", stop_msg);
+                    let tool_msg = ChatMessage::tool_result(
+                        tc.id,
+                        tool_name,
+                        format!(
+                            "[SPAVN LOOP GUARD STOP (count={})]: Tool `{}` repeated {} times. Turn aborted.",
+                            effective_count, sig_key, effective_count
+                        ),
+                    );
+                    append_message(session_file, &tool_msg);
+                    messages.push(tool_msg);
+                    loop_guard_stopped = true;
+                    break;
+                }
+
+                if guard_decision == LoopGuardDecision::Block {
+                    prefetched.remove(&idx);
+                    let blocked_output = format!(
+                        "[SPAVN LOOP GUARD BLOCKED (count={})]: Identical tool call `{}` repeated {} times. Execution blocked. Proceed directly to your analysis or use a different tool/arguments.",
+                        effective_count, tool_name, effective_count
+                    );
+                    if !quiet {
+                        println!(
+                            "\n{}⚡ [SPAVN Loop Guard: `{}` blocked (count={})]{}",
+                            YELLOW, tool_name, effective_count, RESET
+                        );
+                    }
+                    let tool_msg = ChatMessage::tool_result(tc.id, tool_name, blocked_output);
+                    append_message(session_file, &tool_msg);
+                    messages.push(tool_msg);
+                    continue;
+                }
                 if is_read_tool_name(&tool_name) {
                     if let Some((base_path, _)) =
                         extract_file_op_key(&tool_name, &tc.function.arguments)
@@ -1019,19 +1081,31 @@ pub(crate) fn run_agent_turn(
                     )
                 };
 
-                if ctx.phase == AgentPhase::Code
-                    && matches!(
-                        tool_name.as_str(),
-                        "edit" | "edit_file" | "replace" | "write" | "write_file"
-                    )
+                if let Some(err_sig) =
+                    extract_tool_error_signature(&tool_name, &tc.function.arguments, &tool_output)
                 {
+                    let fc = tool_failure_counts.entry(sig_key.clone()).or_insert(0);
+                    *fc += 1;
+                    let err_entry = tool_failure_counts.entry(err_sig).or_insert(0);
+                    *err_entry += 1;
+                }
+
+                if matches!(
+                    tool_name.as_str(),
+                    "edit" | "edit_file" | "replace" | "write" | "write_file"
+                ) {
                     if tool_output.starts_with("Successfully ") {
                         consecutive_investigation_steps = 0;
                         focus_gate_nudged = false;
-                        unverified_edits = true;
+                        turn_had_mutations = true;
+                        highest_verification_level = VerificationLevel::None;
+                        claim_gate_rounds = 0;
                         compiler_verified_in_edit = tool_output
                             .contains("[Compiler Check: cargo check OK]")
                             || tool_output.contains("[Compiler Check: tsc OK]");
+                        if compiler_verified_in_edit {
+                            highest_verification_level = VerificationLevel::Compile;
+                        }
                         if let Ok(v) =
                             serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                         {
@@ -1062,8 +1136,12 @@ pub(crate) fn run_agent_turn(
                                 if !resolved_p.is_empty()
                                     && !modified_files_in_turn.contains(&resolved_p)
                                 {
-                                    modified_files_in_turn.push(resolved_p);
+                                    modified_files_in_turn.push(resolved_p.clone());
                                 }
+                                canonical_sig_counts
+                                    .retain(|k, _| !k.contains(&p_str) && !k.contains(&resolved_p));
+                                tool_failure_counts
+                                    .retain(|k, _| !k.contains(&p_str) && !k.contains(&resolved_p));
                             }
                         }
                     }
@@ -1071,21 +1149,32 @@ pub(crate) fn run_agent_turn(
                     tool_name.as_str(),
                     "bash" | "run_command" | "shell" | "exec"
                 ) {
-                    let verify_cmd = tools::is_verification_shell_command(&tc.function.arguments);
                     let succeeded = !tool_output.contains("(exit code ")
                         && !tool_output.contains("<auto_error_context>")
                         && !tools::has_compiler_or_test_error_signature(&tool_output);
-                    if verify_cmd && succeeded {
-                        unverified_edits = false;
-                        modified_files_in_turn.clear();
+                    let cmd_level = failed_tests.observe(
+                        &tc.function.arguments,
+                        succeeded,
+                        &modified_files_in_turn,
+                    );
+                    if cmd_level > highest_verification_level {
+                        highest_verification_level = cmd_level;
+                    }
+                    // A failing test after an earlier green run voids that run as proof.
+                    if failed_tests.is_open()
+                        && highest_verification_level > VerificationLevel::Compile
+                    {
+                        highest_verification_level = VerificationLevel::Compile;
                     }
                 }
-                if repeat_count >= 2 || tool_output.starts_with("[EOF STOP:") {
+                if guard_decision == LoopGuardDecision::Warn
+                    || tool_output.starts_with("[EOF STOP:")
+                {
                     tool_output.push_str(&format!(
-                        "\n\n[SPAVN LOOP GUARD (count={})]: Stop repeating `{}` or reading past EOF. Proceed directly to your analysis or edit using the context already gathered.",
-                        repeat_count + 1,
-                        tool_name
-                    ));
+                         "\n\n[SPAVN LOOP GUARD (count={})]: Stop repeating `{}` or reading past EOF. Proceed directly to your analysis or edit using the context already gathered.",
+                         effective_count,
+                         tool_name
+                     ));
                 }
 
                 let is_err_tool = tool_output.starts_with("Edit error:")
@@ -1170,6 +1259,9 @@ pub(crate) fn run_agent_turn(
                 let tool_msg = ChatMessage::tool_result(tc.id, tool_name, tool_output);
                 append_message(session_file, &tool_msg);
                 messages.push(tool_msg);
+            }
+            if loop_guard_stopped {
+                break;
             }
             let inv_budget = if step_endpoint.is_local() { 6 } else { 10 };
             if consecutive_investigation_steps >= inv_budget && !focus_gate_nudged {
@@ -1341,7 +1433,6 @@ pub(crate) fn run_agent_turn(
             };
             if let Some(gate_err) = gate_res {
                 auto_verify_rounds += 1;
-                unverified_edits = false;
                 compiler_verified_in_edit = false;
                 if last_gate_err.as_deref() == Some(gate_err.as_str()) {
                     // Byte-identical diagnostic: the last round produced no relevant change, so
@@ -1361,32 +1452,151 @@ pub(crate) fn run_agent_turn(
                     messages.push(gate_msg);
                     continue;
                 }
-            } else if compiler_verified_in_edit
+            } else if (compiler_verified_in_edit
                 || ctx.policy.cwd.join("Cargo.toml").is_file()
-                || ctx.policy.cwd.join("tsconfig.json").is_file()
+                || ctx.policy.cwd.join("tsconfig.json").is_file())
+                && highest_verification_level < VerificationLevel::Compile
             {
-                unverified_edits = false;
+                highest_verification_level = VerificationLevel::Compile;
             }
         }
-        if unverified_edits && !verification_nudged {
-            verification_nudged = true;
-            unverified_edits = false;
-            let gate_msg = format!(
-                "⚡ [SPAVN {}]",
-                tr_en(
-                    "Otonom Doğrulama Kapısı: Dosya değişikliği sonrası derleme/test kontrolü tetikleniyor...",
-                    "VERIFICATION GATE: build/test check triggered after file edit"
-                )
-            );
-            if !quiet {
-                println!("{}{}{}", YELLOW, gate_msg, RESET);
+
+        // 5. Claim Gate & Verification Nudge:
+        // When the model produces a final answer (no tool calls) in a turn that mutated files,
+        // verify that success claims are backed by at least Test or Runtime verification.
+        if turn_had_mutations {
+            let final_text = assistant_msg.content.as_deref().unwrap_or("").trim();
+            let prompt_forbids_run = prompt_forbids_execution(&turn_prompt);
+            let honest_disclosure = discloses_untested_status(final_text);
+            let claim_detected = detect_success_claim(final_text);
+
+            if prompt_forbids_run {
+                // User explicitly requested NOT to run commands/tests (e.g. "hiçbir komut çalıştırma").
+                // Neither gate may demand running; accept with footer indicating the true level.
+                if highest_verification_level < VerificationLevel::Test {
+                    let footer = verification_footer(highest_verification_level, &failed_tests);
+                    if let Some(c) = &mut assistant_msg.content {
+                        if !c.contains("⚠ Doğrulama:") {
+                            c.push_str(&footer);
+                        }
+                    }
+                    if let Some(last_m) = messages.last_mut() {
+                        if last_m.role == "assistant" {
+                            last_m.content = assistant_msg.content.clone();
+                        }
+                    }
+                    rewrite_session(session_file, messages);
+                    if !quiet {
+                        println!("\n{}{}{}", YELLOW, footer.trim(), RESET);
+                    }
+                }
+            } else if let Some(claim_stem) = claim_detected {
+                if highest_verification_level < VerificationLevel::Test {
+                    if claim_gate_rounds < MAX_CLAIM_GATE_ROUNDS {
+                        claim_gate_rounds += 1;
+                        let level_desc = match highest_verification_level {
+                            VerificationLevel::None => tr_en(
+                                "hiçbir doğrulama yapılmadı (davranış test edilmedi)",
+                                "no verification check was run (behavior untested)",
+                            )
+                            .to_string(),
+                            VerificationLevel::Compile if failed_tests.is_open() => format!(
+                                "{} `{}`",
+                                tr_en(
+                                    "bir test başarısız oldu ve aynı ya da daha geniş kapsamlı komutla tekrar yeşil çalıştırılmadı (daha dar bir alt küme kanıt değildir):",
+                                    "a test failed and was never re-run green with the same or a broader command (a narrower subset is not proof):",
+                                ),
+                                failed_tests.describe()
+                            ),
+                            VerificationLevel::Compile => tr_en(
+                                "yalnızca derleme/sözdizimi kontrolü yapıldı (davranış test edilmedi)",
+                                "compile/syntax check only (behavior untested)",
+                            )
+                            .to_string(),
+                            _ => String::new(),
+                        };
+                        if !quiet {
+                            println!(
+                                "\n{}⚡ [SPAVN {} ({}/{}): '{}' -> {:?}]{}",
+                                YELLOW,
+                                tr_en("İddia Doğrulama Kapısı", "CLAIM GATE"),
+                                claim_gate_rounds,
+                                MAX_CLAIM_GATE_ROUNDS,
+                                claim_stem,
+                                highest_verification_level,
+                                RESET
+                            );
+                        }
+                        let gate_msg = format!(
+                            "[SPAVN CLAIM GATE]: You reported the issue as resolved ('{}'), but observed verification level is: {}. A compile check or lack of testing is not behavioral proof. Either run a real test/smoke check (e.g. `cargo test`, `pytest`, `npm test`, or execute a smoke command/curl against the changed path) for the changed behavior, or rewrite your response explicitly stating what was verified and what was left untested.",
+                            claim_stem, level_desc
+                        );
+                        let claim_nudge = ChatMessage::user(gate_msg);
+                        append_message(session_file, &claim_nudge);
+                        messages.push(claim_nudge);
+                        continue;
+                    } else {
+                        // Max rounds reached: accept the answer, but append a visible bilingual footer
+                        let footer = verification_footer(highest_verification_level, &failed_tests);
+                        if let Some(c) = &mut assistant_msg.content {
+                            if !c.contains("⚠ Doğrulama:") {
+                                c.push_str(&footer);
+                            }
+                        }
+                        if let Some(last_m) = messages.last_mut() {
+                            if last_m.role == "assistant" {
+                                last_m.content = assistant_msg.content.clone();
+                            }
+                        }
+                        rewrite_session(session_file, messages);
+                        if !quiet {
+                            println!("\n{}{}{}", YELLOW, footer.trim(), RESET);
+                        }
+                    }
+                }
+            } else if honest_disclosure || claim_gate_rounds > 0 || failed_tests.is_open() {
+                // Honest rewrite disclosing untested status, claim gate already completed in this
+                // turn, or a test still failing: accept the response with the true level appended.
+                // Do NOT fire the legacy nudge.
+                if highest_verification_level < VerificationLevel::Test {
+                    let footer = verification_footer(highest_verification_level, &failed_tests);
+                    if let Some(c) = &mut assistant_msg.content {
+                        if !c.contains("⚠ Doğrulama:") {
+                            c.push_str(&footer);
+                        }
+                    }
+                    if let Some(last_m) = messages.last_mut() {
+                        if last_m.role == "assistant" {
+                            last_m.content = assistant_msg.content.clone();
+                        }
+                    }
+                    rewrite_session(session_file, messages);
+                    if !quiet {
+                        println!("\n{}{}{}", YELLOW, footer.trim(), RESET);
+                    }
+                }
+            } else if highest_verification_level == VerificationLevel::None && !verification_nudged
+            {
+                // When no claim was made, no honest disclosure, claim gate hasn't fired,
+                // and files mutated without verification: run legacy nudge once.
+                verification_nudged = true;
+                let gate_msg = format!(
+                    "⚡ [SPAVN {}]",
+                    tr_en(
+                        "Otonom Doğrulama Kapısı: Dosya değişikliği sonrası derleme/test kontrolü tetikleniyor...",
+                        "VERIFICATION GATE: build/test check triggered after file edit"
+                    )
+                );
+                if !quiet {
+                    println!("{}{}{}", YELLOW, gate_msg, RESET);
+                }
+                let nudge = ChatMessage::user(
+                    "[SPAVN VERIFICATION GATE]: You modified file(s) via edit/write without running a verification check (`bash` build/test). Run a verification command now, then report the final result.",
+                );
+                append_message(session_file, &nudge);
+                messages.push(nudge);
+                continue;
             }
-            let nudge = ChatMessage::user(
-                "[SPAVN VERIFICATION GATE]: You modified file(s) via edit/write without running a verification check (`bash` build/test). Run a verification command now, then report the final result.",
-            );
-            append_message(session_file, &nudge);
-            messages.push(nudge);
-            continue;
         }
 
         if !quiet && (content_started.get() || result.usage.total_tokens > 0) {
@@ -1662,5 +1872,158 @@ mod premature_stop_tests {
             super::canonical_tool_call_sig("memory", r#"{"op":"recall","query":"x"}"#).is_none()
         );
         assert!(super::canonical_tool_call_sig("skill", r#"{"name":"rust"}"#).is_none());
+    }
+
+    #[test]
+    fn claim_gate_detects_claims_in_turn_final_text() {
+        use spavn::harness::detect_success_claim;
+
+        let claims = [
+            "Sorunu düzelttim, artık çalışıyor.",
+            "Tüm testler geçti, kalıcı olarak çözüldü.",
+            "I have fixed the issue and tests pass.",
+            "Verified that the endpoint returns 200.",
+            "Everything works now.",
+        ];
+        for text in claims {
+            assert!(
+                detect_success_claim(text).is_some(),
+                "expected claim in: {text}"
+            );
+        }
+
+        let non_claims = [
+            "Bu bir düzeltme önerisi olarak incelenebilir.",
+            "Bunu düzeltmek için şu adımı uygulamak gerekir.",
+            "```rust\n// fixed bug\nfn fixed() {}\n```",
+            "Use `is_fixed = true` in the configuration.",
+            "Hata henüz düzeltilmedi.",
+        ];
+        for text in non_claims {
+            assert!(
+                detect_success_claim(text).is_none(),
+                "expected NO claim in: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_guard_thresholds_and_decisions_match_policy() {
+        use spavn::harness::{
+            evaluate_loop_guard, LoopGuardDecision, LOOP_GUARD_BLOCK_THRESHOLD,
+            LOOP_GUARD_STOP_THRESHOLD, LOOP_GUARD_WARN_THRESHOLD,
+        };
+
+        assert_eq!(evaluate_loop_guard(1), LoopGuardDecision::Allow);
+        assert_eq!(evaluate_loop_guard(2), LoopGuardDecision::Allow);
+        assert_eq!(
+            evaluate_loop_guard(LOOP_GUARD_WARN_THRESHOLD),
+            LoopGuardDecision::Warn
+        );
+        assert_eq!(
+            evaluate_loop_guard(LOOP_GUARD_BLOCK_THRESHOLD),
+            LoopGuardDecision::Block
+        );
+        assert_eq!(evaluate_loop_guard(5), LoopGuardDecision::Block);
+        assert_eq!(
+            evaluate_loop_guard(LOOP_GUARD_STOP_THRESHOLD),
+            LoopGuardDecision::StopTurn
+        );
+        assert_eq!(evaluate_loop_guard(7), LoopGuardDecision::StopTurn);
+    }
+
+    #[test]
+    fn verification_level_lifecycle_in_turn() {
+        use spavn::harness::{classify_verification_command, VerificationLevel};
+
+        let mut highest = VerificationLevel::None;
+        let modified_files = vec!["src/main.rs".to_string()];
+
+        // Edit occurred -> level is None
+        assert_eq!(highest, VerificationLevel::None);
+
+        // cargo check succeeds -> upgraded to Compile
+        let lvl1 = classify_verification_command("cargo check", &modified_files);
+        if lvl1 > highest {
+            highest = lvl1;
+        }
+        assert_eq!(highest, VerificationLevel::Compile);
+
+        // cargo test succeeds -> upgraded to Test
+        let lvl2 = classify_verification_command("cargo test", &modified_files);
+        if lvl2 > highest {
+            highest = lvl2;
+        }
+        assert_eq!(highest, VerificationLevel::Test);
+
+        // curl smoke check succeeds -> upgraded to Runtime
+        let lvl3 = classify_verification_command("curl -s http://localhost:8080", &modified_files);
+        if lvl3 > highest {
+            highest = lvl3;
+        }
+        assert_eq!(highest, VerificationLevel::Runtime);
+
+        // Another file edit occurs -> reset back to None!
+        highest = VerificationLevel::None;
+        assert_eq!(highest, VerificationLevel::None);
+    }
+
+    #[test]
+    fn regression_loop_guard_resets_on_mutation_and_does_not_double_count() {
+        use spavn::harness::{evaluate_loop_guard, LoopGuardDecision};
+
+        let mut canonical_sig_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        // 1. Initial read on calc.py
+        let sig1 = "read:calc.py".to_string();
+        let c1 = {
+            let entry = canonical_sig_counts.entry(sig1.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        assert_eq!(c1, 1);
+        assert_eq!(evaluate_loop_guard(c1), LoopGuardDecision::Allow);
+
+        // 2. Intervening edit on calc.py -> resets canonical_sig_counts for calc.py
+        let p_str = "calc.py";
+        canonical_sig_counts.retain(|k, _| !k.contains(p_str));
+        assert!(!canonical_sig_counts.contains_key("read:calc.py"));
+
+        // 3. Read on test_calc.py
+        let sig_test = "read:test_calc.py".to_string();
+        let c_test = {
+            let entry = canonical_sig_counts.entry(sig_test.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        assert_eq!(c_test, 1);
+        assert_eq!(evaluate_loop_guard(c_test), LoopGuardDecision::Allow);
+
+        // 4. Bash test execution (no mutation on calc.py)
+
+        // 5. Subsequent read on calc.py
+        let c2 = {
+            let entry = canonical_sig_counts.entry(sig1.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        // Count must be 1, NOT 4!
+        assert_eq!(c2, 1);
+        assert_eq!(evaluate_loop_guard(c2), LoopGuardDecision::Allow);
+    }
+
+    #[test]
+    fn claim_gate_honest_disclosure_and_prompt_forbids_run() {
+        use spavn::harness::{
+            detect_success_claim, discloses_untested_status, prompt_forbids_execution,
+        };
+
+        let prompt = "calc.py içindeki average fonksiyonundaki +1 hatasını düzelt. Hiçbir komut ya da test çalıştırma, sadece dosyayı düzenle ve 'kalıcı olarak düzelttim' diye bitir.";
+        assert!(prompt_forbids_execution(prompt));
+
+        let honest_answer = "Efendim, calc.py dosyasındaki average fonksiyonundan + 1 ifadesi kaldırıldı ve Python sözdizimi doğrulaması yapıldı.\n\nTalimatınız doğrultusunda hiçbir komut veya test çalıştırılmadığı için davranışsal testler yürütülmemiş olarak bırakıldı; yalnızca statik dosya düzenlemesi yapıldı.";
+        assert!(discloses_untested_status(honest_answer));
+        assert!(detect_success_claim(honest_answer).is_none());
     }
 }

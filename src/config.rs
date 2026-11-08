@@ -224,6 +224,8 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
     pub url: Option<String>,
     /// Claims the server has no side effects, so its tools skip the mutating-tool gate.
     /// Opt-in only: the default treats every unlisted tool as a mutator.
@@ -270,6 +272,14 @@ pub struct SpavnUserConfig {
     /// Tool name on `webSearchUrl` serving fetch. Unset falls back to the plain GET path.
     #[serde(default, rename = "webFetchHttpTool")]
     pub web_fetch_http_tool: Option<String>,
+    /// Built-in search providers in the order to try them, e.g. `["brave", "duckduckgo"]`.
+    /// Unset uses the default chain (configured API keys first, then DuckDuckGo and Brave's
+    /// web page); an empty list turns built-in search off.
+    #[serde(default, rename = "webSearchProviders")]
+    pub web_search_providers: Option<Vec<String>>,
+    /// SearXNG instance for the built-in `searxng` provider (`SPAVN_SEARXNG_URL` also works).
+    #[serde(default, rename = "searxngUrl")]
+    pub searxng_url: Option<String>,
     /// Serve the built-in BYOK provider catalog alongside `providers`.
     /// Set `false` to run the provider list entirely from config.
     #[serde(
@@ -311,6 +321,8 @@ pub struct SpavnUserConfig {
     pub hosts: Vec<RemoteHostConfig>,
     #[serde(default, rename = "mcpServers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    #[serde(default, rename = "lspServers")]
+    pub lsp_servers: HashMap<String, Vec<String>>,
 }
 
 fn default_model_key() -> String {
@@ -866,45 +878,12 @@ fn default_hosts() -> Vec<RemoteHostConfig> {
     }]
 }
 
-fn merge_fallback_mcp_servers(target: &mut HashMap<String, McpServerConfig>) {
-    let home = home_dir();
-    for fallback_path in [
-        home.join(".omp").join("agent").join("mcp.json"),
-        home.join(".claude.json"),
-    ] {
-        let Ok(raw) = fs::read_to_string(&fallback_path) else {
-            continue;
-        };
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
-        };
-        let servers_obj = val
-            .get("mcpServers")
-            .and_then(|v| v.as_object())
-            .or_else(|| val.as_object());
-        let Some(map) = servers_obj else {
-            continue;
-        };
-        for (k, v) in map {
-            if target.contains_key(k) {
-                continue;
-            }
-            if let Ok(srv) = serde_json::from_value::<McpServerConfig>(v.clone()) {
-                if srv.command.is_some() || srv.url.is_some() {
-                    target.insert(k.clone(), srv);
-                }
-            }
-        }
-    }
-}
-
 pub fn load_user_config() -> SpavnUserConfig {
     let cfg_path = spavn_dir().join("config.json");
     if let Ok(raw) = fs::read_to_string(&cfg_path) {
         set_owner_only_mode(&cfg_path, 0o600);
-        if let Ok(mut parsed) = serde_json::from_str::<SpavnUserConfig>(&raw) {
+        if let Ok(parsed) = serde_json::from_str::<SpavnUserConfig>(&raw) {
             set_lang_en(parsed.language.eq_ignore_ascii_case("en"));
-            merge_fallback_mcp_servers(&mut parsed.mcp_servers);
             return parsed;
         }
     }
@@ -925,6 +904,8 @@ pub fn load_user_config() -> SpavnUserConfig {
         web_search_api_key_env: None,
         web_search_http_tool: None,
         web_fetch_http_tool: None,
+        web_search_providers: None,
+        searxng_url: None,
         byok_catalog: true,
         update_check: true,
         update_check_interval_hours: default_update_interval(),
@@ -937,11 +918,8 @@ pub fn load_user_config() -> SpavnUserConfig {
         allowed_paths: Vec::new(),
         providers: Vec::new(),
         hosts: default_hosts(),
-        mcp_servers: {
-            let mut m = HashMap::new();
-            merge_fallback_mcp_servers(&mut m);
-            m
-        },
+        mcp_servers: HashMap::new(),
+        lsp_servers: HashMap::new(),
     }
 }
 

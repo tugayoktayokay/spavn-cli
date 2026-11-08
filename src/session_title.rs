@@ -1,4 +1,4 @@
-//! OMP-style auto session title (opencode `session/title.ts` port).
+//! Auto session title.
 //!
 //! The first real user prompt of a session spawns a detached, non-blocking LLM call with the
 //! original request wrapped in `<message>` tags — the wrapper keeps the model from *executing*
@@ -19,7 +19,7 @@ use std::sync::Mutex;
 static TITLING: AtomicBool = AtomicBool::new(false);
 static SESSION_TITLE: Mutex<Option<String>> = Mutex::new(None);
 
-/// Longest title accepted from the model (OMP truncates at 100; [`hud`] clamps harder).
+/// Longest title accepted from the model ([`hud`] clamps harder).
 const MAX_TITLE_CHARS: usize = 80;
 /// Requests at least 4 tokens short of this budget do not need truncating for the title call.
 const REQUEST_BUDGET_BYTES: usize = 2000;
@@ -69,7 +69,7 @@ fn clean_model_title(reply: &str) -> Option<String> {
     match title.chars().last() {
         Some(c) if !c.is_ascii_punctuation() => {}
         _ => {
-            // Trim trailing punctuation (".", "…" etc.) like OMP's clean-title step.
+            // Trim trailing punctuation (".", "…" etc.).
             while title.ends_with(|c: char| c.is_ascii_punctuation() || c == '…') {
                 title.pop();
             }

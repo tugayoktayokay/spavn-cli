@@ -41,6 +41,23 @@ pub(crate) fn leading_ws_len(s: &str) -> usize {
     s.bytes().take_while(|&b| b == b' ' || b == b'\t').count()
 }
 
+/// Re-indents replacement lines when a model omitted or shifted base indentation.
+///
+/// # Indentation Rules
+/// 1. **Intentional Dedent with Exact-Indented `old_text`**: When `old_text` matches the
+///    source code's indentation (`old_indent_len == src_indent.len()`) and the model
+///    intentionally dedents in `new_text` (e.g. unnesting a block where `new_min_indent_len < old_indent_len`),
+///    `base_strip` is `None` and `new_text` is NOT re-indented. The model's explicit dedent is preserved verbatim.
+/// 2. **Unindented `old_text` & `new_text`**: When the model omits base indentation altogether
+///    (`old_indent_len == 0 && new_min_indent_len == 0`) while the target code block has leading
+///    whitespace (`!src_indent.is_empty()`), the replacement lines are re-anchored to `src_indent`
+///    while preserving any relative child indentation.
+/// 3. **Shifted Base Indentation**: When `old_text` has a shifted indentation that matches
+///    `new_min_indent_len` but differs from `src_indent`, the common shift is stripped and
+///    re-anchored to `src_indent`.
+/// 4. **Intentional Dedent with Unindented `old_text`**: When `old_text` is unindented (`0`) but
+///    `new_text` has positive indentation or when `old_indent_len != new_min_indent_len`,
+///    `base_strip` is `None`, preserving `new_text` without arbitrary re-anchoring.
 pub(crate) fn reindent_replacement_lines(
     src_matched_lines: &[&str],
     old_text: &str,
@@ -113,6 +130,106 @@ pub(crate) fn find_project_manifest_dir(file_path: &Path, manifest_name: &str) -
         }
     }
     None
+}
+
+/// Parses module paths from a `go.work` file content.
+/// Handles single-line directives (`use ./foo`, `use "bar"`),
+/// block directives (`use (\n  ./foo\n  ./bar\n)`),
+/// quoted strings, and inline/whole-line comments (`// ...`).
+pub fn parse_go_work_modules(content: &str) -> Vec<String> {
+    let mut modules = Vec::new();
+    let mut in_use_block = false;
+
+    for raw_line in content.lines() {
+        let line = strip_go_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if in_use_block {
+            if let Some(close_idx) = line.find(')') {
+                let inside = line[..close_idx].trim();
+                for token in split_go_work_tokens(inside) {
+                    if !token.is_empty() {
+                        modules.push(token);
+                    }
+                }
+                in_use_block = false;
+            } else {
+                for token in split_go_work_tokens(line) {
+                    if !token.is_empty() {
+                        modules.push(token);
+                    }
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("use") {
+            let rest = rest.trim();
+            if let Some(inner) = rest.strip_prefix('(') {
+                in_use_block = true;
+                let inside_paren = inner.trim();
+                if let Some(close_idx) = inside_paren.find(')') {
+                    let before_close = inside_paren[..close_idx].trim();
+                    for token in split_go_work_tokens(before_close) {
+                        if !token.is_empty() {
+                            modules.push(token);
+                        }
+                    }
+                    in_use_block = false;
+                } else {
+                    for token in split_go_work_tokens(inside_paren) {
+                        if !token.is_empty() {
+                            modules.push(token);
+                        }
+                    }
+                }
+            } else if !rest.is_empty() {
+                for token in split_go_work_tokens(rest) {
+                    if !token.is_empty() {
+                        modules.push(token);
+                    }
+                }
+            }
+        }
+    }
+    modules
+}
+
+fn strip_go_comment(s: &str) -> &str {
+    let mut in_quote = false;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            in_quote = !in_quote;
+        } else if !in_quote && i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            return &s[..i];
+        }
+        i += 1;
+    }
+    s
+}
+
+fn split_go_work_tokens(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+
+    for ch in s.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch.is_whitespace() && !in_quotes {
+            if !cur.is_empty() {
+                tokens.push(cur.clone());
+                cur.clear();
+            }
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 pub(crate) fn first_n_diagnostic_lines(out: &[u8], err: &[u8], max_lines: usize) -> String {
@@ -332,6 +449,61 @@ pub fn run_project_verification_gate(cwd: &str, modified_files: &[String]) -> Op
                         "[SPAVN ZERO-STOP COMPILER GATE]: `tsc --noEmit` failed with errors. Fix these type/syntax errors immediately before finishing:\n{}{}",
                         diag, snippets
                     ));
+                }
+            }
+        }
+    } else if let Some(go_work_dir) = find_manifest_dir_for_gate(&root, modified_files, "go.work") {
+        if let Ok(content) = fs::read_to_string(go_work_dir.join("go.work")) {
+            let modules = parse_go_work_modules(&content);
+            let mod_dirs: Vec<(String, PathBuf)> = modules
+                .into_iter()
+                .map(|m| {
+                    let dir = go_work_dir.join(&m);
+                    (m, dir)
+                })
+                .filter(|(_, d)| d.is_dir())
+                .collect();
+
+            let mut target_dirs: Vec<(&str, &PathBuf)> = Vec::new();
+            if !modified_files.is_empty() {
+                for (m_name, m_dir) in &mod_dirs {
+                    let m_canon = fs::canonicalize(m_dir).unwrap_or_else(|_| m_dir.clone());
+                    let has_modified = modified_files.iter().any(|raw| {
+                        if split_remote_prefix(raw).is_some() {
+                            return false;
+                        }
+                        let expanded = expand_tilde(raw);
+                        let cand = if expanded.is_absolute() {
+                            expanded
+                        } else {
+                            root.join(expanded)
+                        };
+                        let cand_canon = fs::canonicalize(&cand).unwrap_or(cand);
+                        cand_canon.starts_with(&m_canon)
+                    });
+                    if has_modified {
+                        target_dirs.push((m_name.as_str(), m_dir));
+                    }
+                }
+            }
+            if target_dirs.is_empty() {
+                target_dirs = mod_dirs.iter().map(|(m, d)| (m.as_str(), d)).collect();
+            }
+
+            for (m_name, m_dir) in target_dirs {
+                let mut cmd = Command::new("go");
+                cmd.args(["vet", "./..."]).current_dir(m_dir);
+                if let Ok((code, out, err, timed_out)) = run_command_with_timeout(cmd, 12) {
+                    if !timed_out && code != 0 {
+                        let diag = first_n_diagnostic_lines(&out, &err, 20);
+                        if !diag.is_empty() {
+                            let snippets = extract_compiler_error_snippets(m_dir, &diag, None);
+                            return Some(format!(
+                                "[SPAVN ZERO-STOP COMPILER GATE]: `go vet` failed in module `{}` with errors. Fix these errors immediately before finishing:\n{}{}",
+                                m_name, diag, snippets
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1021,6 +1193,7 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 if !out.starts_with("Successfully ") {
                     for (p, orig) in snapshots.iter().rev() {
                         let _ = write_target_file(p, orig);
+                        ctx.record_file_mtime(p);
                     }
                     for _ in 0..idx {
                         let _ = ctx.undo_stack.pop();
@@ -1092,6 +1265,12 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 )
             {
                 return "User rejected edit in SAFE mode.".to_string();
+            }
+            if ctx.is_external_stale_version(raw_path) {
+                return format!(
+                    "Edit error [FS_STALE_VERSION]: {} changed on disk since your last read; re-read the region and retry",
+                    raw_path
+                );
             }
             let mtime_warn = ctx.check_external_mtime_shift(raw_path);
             let resolved_target = ctx.resolve_target_arg(raw_path);
@@ -1295,11 +1474,18 @@ fn exec_edit_single_with_range(
         return "User rejected edit in SAFE mode.".to_string();
     }
 
-    if old_text.is_empty() && ctx.is_external_stale_version(raw_path) {
-        return format!(
-            "Edit error [FS_STALE_VERSION]: {} was modified externally since your last read/edit. Re-read the file first before applying a line-range edit.",
-            raw_path
-        );
+    if ctx.is_external_stale_version(raw_path) {
+        if old_text.is_empty() {
+            return format!(
+                "Edit error [FS_STALE_VERSION]: {} was modified externally since your last read/edit. Re-read the file first before applying a line-range edit.",
+                raw_path
+            );
+        } else {
+            return format!(
+                "Edit error [FS_STALE_VERSION]: {} changed on disk since your last read; re-read the region and retry",
+                raw_path
+            );
+        }
     }
     let mtime_warn = ctx.check_external_mtime_shift(raw_path);
     let resolved_target = ctx.resolve_target_arg(raw_path);
@@ -1759,10 +1945,12 @@ pub(crate) fn apply_edit_hunk_in_memory(
                         return Ok((
                             joined,
                             format!(
-                                "fuzzy self-healed match ({:.0}% similarity) at lines {}-{} — file state is current in context, no need to re-read",
+                                "fuzzy self-healed match ({:.0}% similarity) at lines {}-{} — lines {}-{} changed; verify surrounding lines to confirm the edit applied cleanly",
                                 best_sim * 100.0,
                                 first_src_line + 1,
-                                last_src_line + 1
+                                last_src_line + 1,
+                                first_src_line + 1,
+                                first_src_line + reindented_len
                             ),
                             effective_old,
                             effective_new,
@@ -2129,5 +2317,248 @@ mod cognitive_harness_tests {
         .expect("Layer B anchor-locked fuzzy self-heal should succeed");
         assert!(label_b.contains("fuzzy self-healed match"));
         assert!(updated_b.contains("items.iter().sum()"));
+    }
+
+    #[test]
+    fn stale_external_modification_rejects_text_edit() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("spavn_test_stale_{}", unique_id));
+        let _ = fs::create_dir_all(&temp_dir);
+        let test_file = temp_dir.join("code.rs");
+        fs::write(&test_file, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            temp_dir.clone(),
+            crate::spavn_engine::AgentPhase::Code,
+        );
+        let file_path = test_file.to_string_lossy().to_string();
+
+        // 1. Spavn reads/records the initial file version
+        c.record_file_mtime(&file_path);
+        assert!(!c.is_external_stale_version(&file_path));
+
+        // 2. External modification happens on disk
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(
+            &test_file,
+            "fn main() {\n    println!(\"externally modified\");\n}\n",
+        )
+        .unwrap();
+        assert!(c.is_external_stale_version(&file_path));
+
+        // 3. Spavn edit with non-empty old_text must be rejected with FS_STALE_VERSION
+        let edit_args = serde_json::json!({
+            "path": &file_path,
+            "old_text": "    println!(\"hello\");",
+            "new_text": "    println!(\"spavn edit\");"
+        });
+        let result = exec_edit(&mut c, &edit_args);
+        assert!(
+            result.contains("Edit error [FS_STALE_VERSION]"),
+            "Expected FS_STALE_VERSION error, got: {}",
+            result
+        );
+        assert!(
+            result.contains("changed on disk since your last read; re-read the region and retry"),
+            "Expected exact prompt error message, got: {}",
+            result
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn consecutive_spavn_edits_to_same_file_succeed() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("spavn_test_consec_{}", unique_id));
+        let _ = fs::create_dir_all(&temp_dir);
+        let test_file = temp_dir.join("main.rs");
+        fs::write(&test_file, "fn a() {}\nfn b() {}\n").unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            temp_dir.clone(),
+            crate::spavn_engine::AgentPhase::Code,
+        );
+        let file_path = test_file.to_string_lossy().to_string();
+        c.record_file_mtime(&file_path);
+
+        // Edit 1: change fn a
+        let args1 = serde_json::json!({
+            "path": &file_path,
+            "old_text": "fn a() {}",
+            "new_text": "fn a() { println!(\"1\"); }"
+        });
+        let res1 = exec_edit(&mut c, &args1);
+        assert!(
+            res1.starts_with("Successfully edited"),
+            "res1 failed: {}",
+            res1
+        );
+        assert!(!c.is_external_stale_version(&file_path));
+
+        // Edit 2: consecutive edit to fn b should NOT be blocked as stale
+        let args2 = serde_json::json!({
+            "path": &file_path,
+            "old_text": "fn b() {}",
+            "new_text": "fn b() { println!(\"2\"); }"
+        });
+        let res2 = exec_edit(&mut c, &args2);
+        assert!(
+            res2.starts_with("Successfully edited"),
+            "res2 failed: {}",
+            res2
+        );
+
+        let content = fs::read_to_string(&test_file).unwrap();
+        assert!(content.contains("fn a() { println!(\"1\"); }"));
+        assert!(content.contains("fn b() { println!(\"2\"); }"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn unseen_file_edit_succeeds() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("spavn_test_unseen_{}", unique_id));
+        let _ = fs::create_dir_all(&temp_dir);
+        let test_file = temp_dir.join("unseen.rs");
+        fs::write(
+            &test_file,
+            "fn greeting() -> &'static str {\n    \"hi\"\n}\n",
+        )
+        .unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            temp_dir.clone(),
+            crate::spavn_engine::AgentPhase::Code,
+        );
+        let file_path = test_file.to_string_lossy().to_string();
+        // File was never read/recorded in this session
+        assert!(!c.is_external_stale_version(&file_path));
+
+        let args = serde_json::json!({
+            "path": &file_path,
+            "old_text": "    \"hi\"",
+            "new_text": "    \"hello world\""
+        });
+        let res = exec_edit(&mut c, &args);
+        assert!(
+            res.starts_with("Successfully edited"),
+            "Edit should succeed for unseen file: {}",
+            res
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn go_work_parser_handles_blocks_single_line_and_comments() {
+        let content = r#"
+go 1.22.0
+
+// Root workspace comment
+use (
+    ./services/auth // auth service
+    ./services/billing
+    "services/payment"
+)
+
+use ./gateway
+use "services/notification" // trailing comment
+use ( ./single-paren-mod )
+
+replace example.com/auth => ./services/auth
+"#;
+        let mods = parse_go_work_modules(content);
+        assert_eq!(
+            mods,
+            vec![
+                "./services/auth",
+                "./services/billing",
+                "services/payment",
+                "./gateway",
+                "services/notification",
+                "./single-paren-mod",
+            ]
+        );
+    }
+
+    #[test]
+    fn gate_command_construction_for_go_work_root_does_not_run_at_root() {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("spavn_test_gowork_{}", unique_id));
+        let _ = fs::create_dir_all(temp_dir.join("svc1"));
+        let _ = fs::create_dir_all(temp_dir.join("svc2"));
+        fs::write(
+            temp_dir.join("go.work"),
+            "go 1.22\n\nuse (\n    ./svc1\n    ./svc2\n)\n",
+        )
+        .unwrap();
+
+        let gates = crate::spavn_engine::detect_project_gates(&temp_dir.to_string_lossy());
+        let go_gates: Vec<&(String, String)> = gates
+            .iter()
+            .filter(|(name, _)| name.starts_with("go-vet"))
+            .collect();
+        assert_eq!(go_gates.len(), 2);
+        for (_, cmd) in &go_gates {
+            assert!(
+                !cmd.starts_with("go vet ./..."),
+                "Command must not run at workspace root! Got: {}",
+                cmd
+            );
+            assert!(
+                cmd.contains("cd ./svc1 && go vet ./...")
+                    || cmd.contains("cd ./svc2 && go vet ./..."),
+                "Command must change into module dir! Got: {}",
+                cmd
+            );
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn reindent_replacement_lines_intentional_dedent_and_unindented_rules() {
+        // Scenario 1: Model intentionally dedents with exact-indented old_text (should NOT re-indent)
+        let src = [
+            "        if condition {",
+            "            do_work();",
+            "        }",
+        ];
+        let old_exact = "        if condition {\n            do_work();\n        }";
+        let new_dedent = "    do_work();"; // Intentionally dedented to 4 spaces
+        let res1 = reindent_replacement_lines(&src, old_exact, new_dedent);
+        assert_eq!(res1, vec!["    do_work();"]); // NOT re-indented to 8 spaces!
+
+        // Scenario 2: Model intentionally dedents to 0 spaces with exact-indented old_text
+        let new_dedent_zero = "do_work();";
+        let res2 = reindent_replacement_lines(&src, old_exact, new_dedent_zero);
+        assert_eq!(res2, vec!["do_work();"]); // Preserves 0 spaces!
+
+        // Scenario 3: Model supplies unindented old_text & unindented new_text
+        // (Model omitted indentation; should re-anchor replacement to src_indent)
+        let old_unindented = "if condition {\n    do_work();\n}";
+        let new_unindented = "do_work();";
+        let res3 = reindent_replacement_lines(&src, old_unindented, new_unindented);
+        assert_eq!(res3, vec!["        do_work();"]); // Re-anchored to matched block base indent (8 spaces)
     }
 }

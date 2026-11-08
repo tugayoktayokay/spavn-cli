@@ -1521,7 +1521,7 @@ pub fn dispatch_slash_command(
             return SlashOutcome::Handled;
         }
 
-        // OMP-style in-place upgrade: ask the release endpoint what is newest (this also refreshes
+        // In-place upgrade: ask the release endpoint what is newest (this also refreshes
         // the cache the banner reads), and when a native prebuilt asset exists for this platform,
         // download it, replace the installed binary on a fresh inode, verify it execs, then re-exec
         // into it — no manual command. Falls back to status/advice for cargo/brew/custom installs.
