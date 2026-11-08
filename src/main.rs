@@ -457,6 +457,9 @@ fn main() {
         );
         if let Some(new_model_key) = hud::interactive_provider_login(None) {
             endpoint = resolve_endpoint(&new_model_key);
+            let mut cfg = load_user_config();
+            cfg.default_model = endpoint.key.clone();
+            let _ = spavn::config::save_user_config(&cfg);
             if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
                 *first = ChatMessage::system(cached_system_prompt(
                     &cwd,

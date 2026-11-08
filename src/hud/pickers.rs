@@ -17,6 +17,126 @@ pub(crate) fn prompt_inline_line(prompt_label: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn mask_secret_preview(val: &str) -> String {
+    let trimmed = val.trim();
+    if trimmed.eq_ignore_ascii_case("o") || trimmed.eq_ignore_ascii_case("open") {
+        return trimmed.to_string();
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let len = chars.len();
+    if len == 0 {
+        String::new()
+    } else if len <= 8 {
+        "•".repeat(len)
+    } else {
+        let prefix: String = chars[..4].iter().collect();
+        let suffix: String = chars[len - 4..].iter().collect();
+        let dots = "•".repeat((len - 8).min(16));
+        format!("{}{}{}", prefix, dots, suffix)
+    }
+}
+
+pub(crate) fn prompt_secret_line(prompt_label: &str) -> Option<String> {
+    let mut orig_termios = empty_termios();
+    if unsafe { tcgetattr(0, &mut orig_termios) } != 0 {
+        return prompt_inline_line(prompt_label);
+    }
+    let _term_guard = TermiosGuard(orig_termios);
+    enter_raw_mode(&orig_termios, 0);
+
+    print!("{}{}{}: {}", CYAN, BOLD, prompt_label, RESET);
+    let _ = io::stdout().flush();
+
+    let mut stdin = io::stdin();
+    let mut buf = String::new();
+    let mut kbuf = [0u8; 128];
+    let mut out_val = None;
+    loop {
+        let Ok(n) = stdin.read(&mut kbuf) else {
+            println!();
+            break;
+        };
+        if n == 0 {
+            println!();
+            break;
+        }
+        match kbuf[0] {
+            b'\r' | b'\n' => {
+                println!();
+                let trimmed = buf.trim().to_string();
+                if !trimmed.is_empty() {
+                    out_val = Some(trimmed);
+                }
+                break;
+            }
+            3 => {
+                println!();
+                break;
+            }
+            27 => {
+                if n == 1 {
+                    enter_raw_mode(&orig_termios, 1);
+                    let mut seq = [0u8; 8];
+                    let sn = stdin.read(&mut seq).unwrap_or(0);
+                    enter_raw_mode(&orig_termios, 0);
+                    if sn == 0 {
+                        println!();
+                        break;
+                    }
+                }
+            }
+            127 | 8 => {
+                buf.pop();
+                let masked = mask_secret_preview(&buf);
+                print!(
+                    "\r\x1b[2K{}{}{}: {}{}{}{}",
+                    CYAN, BOLD, prompt_label, RESET, GREEN, masked, RESET
+                );
+                let _ = io::stdout().flush();
+            }
+            21 => {
+                buf.clear();
+                print!("\r\x1b[2K{}{}{}: {}", CYAN, BOLD, prompt_label, RESET);
+                let _ = io::stdout().flush();
+            }
+            b if b >= 32 => {
+                if let Ok(text) = std::str::from_utf8(&kbuf[..n]) {
+                    let mut newline_hit = false;
+                    for ch in text.chars() {
+                        if ch == '\r' || ch == '\n' {
+                            newline_hit = true;
+                            break;
+                        }
+                        if !ch.is_control() {
+                            buf.push(ch);
+                        }
+                    }
+                    let masked = mask_secret_preview(&buf);
+                    print!(
+                        "\r\x1b[2K{}{}{}: {}{}{}{}",
+                        CYAN, BOLD, prompt_label, RESET, GREEN, masked, RESET
+                    );
+                    let _ = io::stdout().flush();
+                    if newline_hit {
+                        println!();
+                        let trimmed = buf.trim().to_string();
+                        if !trimmed.is_empty() {
+                            out_val = Some(trimmed);
+                        }
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    drop(_term_guard);
+    unsafe {
+        tcsetattr(0, TCSANOW, &orig_termios);
+    }
+    out_val
+}
+
 pub(crate) fn open_url_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -60,27 +180,149 @@ pub(crate) fn detect_cli_token_for_provider(provider_id: &str) -> Option<(String
             }
             None
         }
-        "gemini" => {
-            let out = Command::new("gcloud")
-                .args(["auth", "print-access-token"])
-                .output()
-                .ok()?;
-            if out.status.success() {
-                let tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !tok.is_empty() {
-                    return Some((tok, "Google Cloud CLI (`gcloud auth`)"));
-                }
-            }
-            None
-        }
         _ => None,
     }
 }
 
+pub(crate) fn prompt_and_save_provider_key(
+    group: &ProviderGroupConfig,
+    allow_replace_existing: bool,
+) -> bool {
+    if group.is_local || group.api_key_env.trim().is_empty() {
+        return true;
+    }
+    let existing = resolve_api_key(&group.api_key_env);
+    if existing.is_some() && !allow_replace_existing {
+        return true;
+    }
+    if existing.is_none() {
+        if let Some((auto_tok, source_label)) = detect_cli_token_for_provider(&group.id) {
+            let _ = upsert_spavn_secret(&group.api_key_env, &auto_tok);
+            println!(
+                "\n{}╭─ 🔐 {} ───────────────────────────────────────────{}\n{}│{} {}⚡ {} automatic session auto-detected and connected!{}\n{}╰────────────────────────────────────────────────────────────────────────────{}",
+                CYAN,
+                group.title,
+                RESET,
+                CYAN,
+                RESET,
+                GREEN,
+                source_label,
+                RESET,
+                CYAN,
+                RESET
+            );
+            return true;
+        }
+    }
+
+    let portal = provider_portal_url(&group.id);
+    println!(
+        "\n{}╭─ 🔐 {} {} (~/.spavn/secrets.env — 0600) ───────────{}",
+        CYAN,
+        group.title,
+        tr_en("BAĞLANTI & GİRİŞ", "LOGIN & CONNECT"),
+        RESET
+    );
+    if let Some(ref cur_key) = existing {
+        println!(
+            "{}│{} {}🔑 {}: {}{}{} {}{}",
+            CYAN,
+            RESET,
+            GREEN,
+            tr_en("Mevcut Anahtar", "Current Key"),
+            BOLD,
+            mask_secret_preview(cur_key),
+            RESET,
+            DIM,
+            tr_en(
+                "(Korumak için doğrudan Enter'a basın)",
+                "(Press Enter to keep existing)"
+            )
+        );
+    }
+    if let Some(u) = portal {
+        println!(
+            "{}│{} {}🌐 {}: {}{}{} {}",
+            CYAN,
+            RESET,
+            DIM,
+            tr_en("Anahtar Sayfası", "Key Portal"),
+            CYAN,
+            u,
+            RESET,
+            tr_en(
+                "(Tarayıcıda açmak için 'o' yazıp Enter'a basın)",
+                "(Type 'o' + Enter to open in browser)"
+            )
+        );
+    }
+    let prompt_msg = format!(
+        "│ {} {}",
+        group.api_key_env,
+        tr_en(
+            "anahtarını yapıştırın ('o' = Tarayıcıda Aç, boş Enter = Geç/Koru)",
+            "paste key ('o' = Open Browser, empty Enter = Skip/Keep)"
+        )
+    );
+    if let Some(first_in) = prompt_secret_line(&prompt_msg) {
+        let final_key =
+            if first_in.eq_ignore_ascii_case("o") || first_in.eq_ignore_ascii_case("open") {
+                if let Some(u) = portal {
+                    open_url_in_browser(u);
+                    println!(
+                        "{}│{} {}🌐 {}{}",
+                        CYAN,
+                        RESET,
+                        GREEN,
+                        tr_en(
+                            "Tarayıcı açıldı — anahtarı kopyalayıp aşağıya yapıştırın:",
+                            "Browser opened — copy your key and paste below:"
+                        ),
+                        RESET
+                    );
+                }
+                prompt_secret_line(&format!("│ {}", group.api_key_env))
+            } else {
+                Some(first_in)
+            };
+        if let Some(new_key) = final_key {
+            match upsert_spavn_secret(&group.api_key_env, &new_key) {
+                Ok(()) => println!(
+                    "{}│{} {}✅ {} ({}) {}{}",
+                    CYAN,
+                    RESET,
+                    GREEN,
+                    group.api_key_env,
+                    mask_secret_preview(&new_key),
+                    tr_en(
+                        "güvenli olarak ~/.spavn/secrets.env dosyasına kaydedildi ve bağlandı.",
+                        "securely saved to ~/.spavn/secrets.env and connected."
+                    ),
+                    RESET
+                ),
+                Err(e) => println!(
+                    "{}│{} {}✗ {}: {}{}",
+                    CYAN,
+                    RESET,
+                    RED,
+                    tr_en("Hata", "Error"),
+                    e,
+                    RESET
+                ),
+            }
+        }
+    }
+    println!(
+        "{}╰────────────────────────────────────────────────────────────────────────────{}",
+        CYAN, RESET
+    );
+    resolve_api_key(&group.api_key_env).is_some()
+}
+
 /// Interactive BYOK / Login / Provider Connection Manager (`/login`, `/provider`, `/connect`, `/byok`):
-/// Allows any user to connect providers via auto-detected CLI auth (`gh`, `gcloud`), one-click browser
-/// portal launch, API key entry (saved in `~/.spavn/secrets.env` with 0600), local server discovery,
-/// OR custom OpenAI-compatible Base URL + Model + API Key!
+/// Allows any user to connect providers via auto-detected CLI auth (`gh`), one-click browser
+/// portal launch, masked API key entry (saved in `~/.spavn/secrets.env` with 0600), local server discovery,
+/// OR custom OpenAI-compatible Base URL + live `/v1/models` discovery + API Key!
 pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<String> {
     let catalog = byok_catalog(&load_user_config());
     let chosen = if let Some(pre) = preselected_provider
@@ -180,7 +422,107 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
     };
 
     if chosen == "local-server" {
-        let cfg = load_user_config();
+        let mut cfg = load_user_config();
+        let mut spin = LiveSpinner::start(tr_en(
+            "Yerel portlar taranıyor (11434 · 1234 · 8080 · 8000)",
+            "Scanning local ports (11434 · 1234 · 8080 · 8000)",
+        ));
+        let probed = crate::router::probe_local_endpoints(cfg.local_discovery_url.as_deref());
+        spin.stop();
+
+        if let Some((base_url, disc_url, discovered)) = probed {
+            cfg.local_base_url = Some(base_url.clone());
+            cfg.local_discovery_url = Some(disc_url.clone());
+            let _ = save_user_config(&cfg);
+            let mut local_items: Vec<MenuItem> = discovered
+                .iter()
+                .map(|m| MenuItem {
+                    key: format!("local:{}", m.id),
+                    badge: if m.loaded {
+                        format!("{}{}🟢 VRAM{}", BOLD, GREEN, RESET)
+                    } else {
+                        format!("{}⚪ Local{}", DIM, RESET)
+                    },
+                    desc: format!("{} · {}", m.spec_badge, base_url),
+                })
+                .collect();
+            local_items.push(MenuItem {
+                key: "__custom_local_url__".to_string(),
+                badge: format!(
+                    "{}{}{}",
+                    CYAN,
+                    tr_en("🔗 Farklı URL", "🔗 Custom URL"),
+                    RESET
+                ),
+                desc: tr_en(
+                    "Farklı bir yerel/LAN sunucu adresi gir (ör. http://192.168.1.50:8080/v1)",
+                    "Enter a different local/LAN server URL (e.g. http://192.168.1.50:8080/v1)",
+                )
+                .to_string(),
+            });
+            if let Some(pick) = select_interactive_menu(
+                &format!(
+                    "🟢 {} ({})",
+                    tr_en("YEREL SUNUCU MODELLERİ", "LOCAL SERVER MODELS"),
+                    base_url
+                ),
+                &local_items,
+                0,
+            ) {
+                if pick != "__custom_local_url__" {
+                    return Some(pick);
+                }
+            } else {
+                return None;
+            }
+        }
+
+        println!(
+            "\n{}╭─ 🟢 {} (~/.spavn/config.json) ─────────────────────────{}",
+            CYAN,
+            tr_en("YEREL SUNUCU BAĞLANTISI", "LOCAL SERVER CONNECTION"),
+            RESET
+        );
+        let raw_url = prompt_inline_line(tr_en(
+            "│ Yerel Sunucu URL (ör. http://127.0.0.1:11434/v1 veya http://192.168.1.50:8080/v1)",
+            "│ Local Server URL (e.g. http://127.0.0.1:11434/v1 or http://192.168.1.50:8080/v1)",
+        ))?;
+        let (base_url, disc_url) = crate::router::derive_base_and_discovery_urls(&raw_url);
+        cfg.local_base_url = Some(base_url.clone());
+        cfg.local_discovery_url = Some(disc_url.clone());
+        let _ = save_user_config(&cfg);
+        let discovered = crate::router::discover_local_models(&disc_url, true);
+        println!(
+            "{}╰─ ✅ {}: {}{}{}",
+            CYAN,
+            tr_en("Yerel sunucu kaydedildi", "Local server saved"),
+            GREEN,
+            base_url,
+            RESET
+        );
+        if !discovered.is_empty() {
+            let local_items: Vec<MenuItem> = discovered
+                .into_iter()
+                .map(|m| MenuItem {
+                    key: format!("local:{}", m.id),
+                    badge: if m.loaded {
+                        format!("{}{}🟢 VRAM{}", BOLD, GREEN, RESET)
+                    } else {
+                        format!("{}⚪ Local{}", DIM, RESET)
+                    },
+                    desc: format!("{} · {}", m.spec_badge, base_url),
+                })
+                .collect();
+            return select_interactive_menu(
+                &format!(
+                    "🟢 {} ({})",
+                    tr_en("YEREL SUNUCU MODELLERİ", "LOCAL SERVER MODELS"),
+                    base_url
+                ),
+                &local_items,
+                0,
+            );
+        }
         return interactive_select_model(&cfg.default_model, true);
     }
 
@@ -199,11 +541,7 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             "│ Base URL (ör. https://api.together.xyz/v1 veya http://127.0.0.1:8000/v1)",
             "│ Base URL (e.g. https://api.together.xyz/v1 or http://127.0.0.1:8000/v1)",
         ))?;
-        let model_id = prompt_inline_line(tr_en(
-            "│ Model Kimliği (ör. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
-            "│ Model ID (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
-        ))?;
-        let api_key_opt = prompt_inline_line(tr_en(
+        let api_key_opt = prompt_secret_line(tr_en(
             "│ API Anahtarı (Yerel ise boş bırakıp Enter'a basın)",
             "│ API Key (Leave empty and press Enter if local)",
         ));
@@ -223,8 +561,88 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             let _ = upsert_spavn_secret(&env_var_name, secret_val);
         }
 
+        let mut spin = LiveSpinner::start(tr_en(
+            "Sunucudan model listesi (/v1/models) sorgulanıyor",
+            "Querying model list (/v1/models) from endpoint",
+        ));
+        let discovered_ids =
+            crate::router::fetch_remote_models(&base_url, api_key_opt.as_deref(), 5);
+        spin.stop();
+
+        let model_id = if !discovered_ids.is_empty() {
+            println!(
+                "{}│{} {}✅ {} {}{}",
+                CYAN,
+                RESET,
+                GREEN,
+                discovered_ids.len(),
+                tr_en(
+                    "model sunucudan otomatik keşfedildi!",
+                    "models auto-discovered from server!"
+                ),
+                RESET
+            );
+            let mut disc_items: Vec<MenuItem> = discovered_ids
+                .iter()
+                .map(|id| MenuItem {
+                    key: id.clone(),
+                    badge: "🌐 Live".to_string(),
+                    desc: format!("{} ({})", id, prov_name),
+                })
+                .collect();
+            disc_items.push(MenuItem {
+                key: "__manual_model__".to_string(),
+                badge: "✍️  Manual".to_string(),
+                desc: tr_en("Model kimliğini elle yaz", "Type model ID manually").to_string(),
+            });
+            let picked = select_interactive_menu(
+                &format!(
+                    "🔌 {} — {}",
+                    prov_name,
+                    tr_en("KEŞFEDİLEN MODELLER", "DISCOVERED MODELS")
+                ),
+                &disc_items,
+                0,
+            )?;
+            if picked == "__manual_model__" {
+                prompt_inline_line(tr_en(
+                    "│ Model Kimliği (ör. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
+                    "│ Model ID (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
+                ))?
+            } else {
+                picked
+            }
+        } else {
+            prompt_inline_line(tr_en(
+                "│ Model Kimliği (ör. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
+                "│ Model ID (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo)",
+            ))?
+        };
+
         let mut cfg = load_user_config();
         let entry_key = format!("{}:{}", prov_name, model_id);
+        let mut all_models = vec![ModelConfigEntry {
+            key: entry_key.clone(),
+            model_id: model_id.clone(),
+            label: format!("{} ({})", model_id, prov_name),
+            badge: "🔌 Custom".to_string(),
+            desc: tr_en("Kullanıcı tanımlı sağlayıcı", "User-defined provider").to_string(),
+            context_window: None,
+        }];
+        for extra_id in discovered_ids {
+            if extra_id != model_id {
+                all_models.push(ModelConfigEntry {
+                    key: format!("{}:{}", prov_name, extra_id),
+                    model_id: extra_id.clone(),
+                    label: format!("{} ({})", extra_id, prov_name),
+                    badge: "🌐 Live".to_string(),
+                    desc: format!("{} ({})", extra_id, prov_name),
+                    context_window: None,
+                });
+            }
+        }
+        cfg.providers
+            .retain(|p| !p.id.eq_ignore_ascii_case(&prov_name));
         cfg.providers.push(ProviderGroupConfig {
             id: prov_name.clone(),
             title: format!("🔌 {} (Custom BYOK)", prov_name),
@@ -237,14 +655,7 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             is_local: api_key_opt.is_none(),
             protocol: None,
             context_window: None,
-            models: vec![ModelConfigEntry {
-                key: entry_key.clone(),
-                model_id: model_id.clone(),
-                label: format!("{} ({})", model_id, prov_name),
-                badge: "🔌 Custom".to_string(),
-                desc: tr_en("Kullanıcı tanımlı sağlayıcı", "User-defined provider").to_string(),
-                context_window: None,
-            }],
+            models: all_models,
         });
         let _ = save_user_config(&cfg);
         println!(
@@ -262,122 +673,46 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
     }
 
     let group = catalog.into_iter().find(|g| g.id == chosen)?;
-    if !group.is_local {
-        let mut key_configured = false;
-        if let Some((auto_tok, source_label)) = detect_cli_token_for_provider(&group.id) {
-            let _ = upsert_spavn_secret(&group.api_key_env, &auto_tok);
-            println!(
-                "\n{}╭─ 🔐 {} ───────────────────────────────────────────{}\n{}│{} {}⚡ {} automatic session auto-detected and connected!{}\n{}╰────────────────────────────────────────────────────────────────────────────{}",
-                CYAN,
-                group.title,
-                RESET,
-                CYAN,
-                RESET,
-                GREEN,
-                source_label,
-                RESET,
-                CYAN,
-                RESET
-            );
-            key_configured = true;
-        }
-        if !key_configured {
-            let portal = provider_portal_url(&group.id);
-            println!(
-                "\n{}╭─ 🔐 {} {} (~/.spavn/secrets.env — 0600) ───────────{}",
-                CYAN,
-                group.title,
-                tr_en("BAĞLANTI & GİRİŞ", "LOGIN & CONNECT"),
-                RESET
-            );
-            if let Some(u) = portal {
-                println!(
-                    "{}│{} {}🌐 {}: {}{}{} {}",
-                    CYAN,
-                    RESET,
-                    DIM,
-                    tr_en("Anahtar Sayfası", "Key Portal"),
-                    CYAN,
-                    u,
-                    RESET,
-                    tr_en(
-                        "(Tarayıcıda açmak için 'o' yazıp Enter'a basın)",
-                        "(Type 'o' + Enter to open in browser)"
-                    )
-                );
-            }
-            let prompt_msg = format!(
-                "│ {} {}",
-                group.api_key_env,
-                tr_en(
-                    "anahtarını yapıştırın ('o' = Tarayıcıda Aç, boş Enter = Mevcutu Koru)",
-                    "paste key ('o' = Open Browser, empty Enter = Keep Existing)"
-                )
-            );
-            if let Some(first_in) = prompt_inline_line(&prompt_msg) {
-                let final_key = if first_in.eq_ignore_ascii_case("o")
-                    || first_in.eq_ignore_ascii_case("open")
-                {
-                    if let Some(u) = portal {
-                        open_url_in_browser(u);
-                        println!(
-                            "{}│{} {}🌐 {}{}",
-                            CYAN,
-                            RESET,
-                            GREEN,
-                            tr_en(
-                                "Tarayıcı açıldı — anahtarı kopyalayıp aşağıya yapıştırın:",
-                                "Browser opened — copy your key and paste below:"
-                            ),
-                            RESET
-                        );
-                    }
-                    prompt_inline_line(&format!("│ {} ", group.api_key_env))
-                } else {
-                    Some(first_in)
-                };
-                if let Some(new_key) = final_key {
-                    match upsert_spavn_secret(&group.api_key_env, &new_key) {
-                        Ok(()) => println!(
-                            "{}│{} {}✅ {} {}{}",
-                            CYAN,
-                            RESET,
-                            GREEN,
-                            group.api_key_env,
-                            tr_en(
-                                "güvenli olarak ~/.spavn/secrets.env dosyasına kaydedildi ve bağlandı.",
-                                "securely saved to ~/.spavn/secrets.env and connected."
-                            ),
-                            RESET
-                        ),
-                        Err(e) => println!(
-                            "{}│{} {}✗ {}: {}{}",
-                            CYAN,
-                            RESET,
-                            RED,
-                            tr_en("Hata", "Error"),
-                            e,
-                            RESET
-                        ),
-                    }
-                }
-            }
-            println!(
-                "{}╰────────────────────────────────────────────────────────────────────────────{}",
-                CYAN, RESET
-            );
-        }
-    }
+    let _ = prompt_and_save_provider_key(&group, true);
 
-    let model_items: Vec<MenuItem> = group
+    let mut model_items: Vec<MenuItem> = group
         .models
         .iter()
         .map(|m| MenuItem {
-            key: m.key.clone(),
+            key: if m.key.contains(':') {
+                m.key.clone()
+            } else {
+                format!("{}:{}", group.id, m.key)
+            },
             badge: m.badge.clone(),
             desc: m.desc.clone(),
         })
         .collect();
+
+    let active_key = resolve_api_key(&group.api_key_env);
+    if group.is_local || active_key.is_some() {
+        let mut spin = LiveSpinner::start(tr_en(
+            "Sağlayıcı modelleri kontrol ediliyor",
+            "Checking provider models",
+        ));
+        let remote_ids =
+            crate::router::fetch_remote_models(&group.base_url, active_key.as_deref(), 3);
+        spin.stop();
+        for rid in remote_ids {
+            let already_listed = group
+                .models
+                .iter()
+                .any(|m| m.model_id.eq_ignore_ascii_case(&rid) || m.key.eq_ignore_ascii_case(&rid));
+            if !already_listed {
+                model_items.push(MenuItem {
+                    key: format!("{}:{}", group.id, rid),
+                    badge: "🌐 Live".to_string(),
+                    desc: format!("{} ({})", rid, group.id),
+                });
+            }
+        }
+    }
+
     select_interactive_menu(
         &format!(
             "🧠 {} — {}",
@@ -981,5 +1316,54 @@ mod menu_tests {
         crate::add_live_task("tatlı test görevi".to_string());
         assert_eq!(interactive_select_live_task(), None);
         crate::clear_live_tasks();
+    }
+
+    #[test]
+    fn mask_secret_preview_masks_keys_while_preserving_browser_shortcut() {
+        assert_eq!(mask_secret_preview(""), "");
+        assert_eq!(mask_secret_preview("o"), "o");
+        assert_eq!(mask_secret_preview("OPEN"), "OPEN");
+        assert_eq!(mask_secret_preview("short123"), "••••••••");
+        assert_eq!(
+            mask_secret_preview("sk-proj-1234567890abcdef"),
+            "sk-p••••••••••••••••cdef"
+        );
+    }
+
+    #[test]
+    fn derive_base_and_discovery_urls_normalizes_all_local_url_forms() {
+        assert_eq!(
+            crate::router::derive_base_and_discovery_urls("127.0.0.1:11434"),
+            (
+                "http://127.0.0.1:11434/v1".to_string(),
+                "http://127.0.0.1:11434/v1/models".to_string()
+            )
+        );
+        assert_eq!(
+            crate::router::derive_base_and_discovery_urls("http://127.0.0.1:8080/v1/"),
+            (
+                "http://127.0.0.1:8080/v1".to_string(),
+                "http://127.0.0.1:8080/v1/models".to_string()
+            )
+        );
+        assert_eq!(
+            crate::router::derive_base_and_discovery_urls("http://127.0.0.1:1234/v1/models"),
+            (
+                "http://127.0.0.1:1234/v1".to_string(),
+                "http://127.0.0.1:1234/v1/models".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_endpoint_routes_prefixed_provider_model_to_requested_provider() {
+        let ep = crate::router::resolve_endpoint("openrouter:deepseek-chat");
+        assert_eq!(ep.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(ep.model, "deepseek-chat");
+
+        let claude = crate::router::resolve_endpoint("anthropic:claude-opus-5-5");
+        assert_eq!(claude.model, "claude-opus-5-5");
+        assert_eq!(claude.base_url, "https://api.anthropic.com/v1");
+        assert_eq!(claude.key, "anthropic:claude-opus-5-5");
     }
 }

@@ -183,6 +183,173 @@ pub fn discover_local_models(
     models
 }
 
+pub fn derive_base_and_discovery_urls(raw_url: &str) -> (String, String) {
+    let trimmed = raw_url.trim().trim_end_matches('/');
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{}", trimmed)
+    };
+    if let Some(base) = with_scheme.strip_suffix("/v1/models") {
+        (format!("{}/v1", base), with_scheme)
+    } else if let Some(base) = with_scheme.strip_suffix("/models") {
+        (base.to_string(), with_scheme)
+    } else if with_scheme.ends_with("/v1") {
+        (with_scheme.clone(), format!("{}/models", with_scheme))
+    } else {
+        (
+            format!("{}/v1", with_scheme),
+            format!("{}/v1/models", with_scheme),
+        )
+    }
+}
+
+fn local_tcp_port_reachable(url: &str, timeout_ms: u64) -> bool {
+    let no_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = no_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let Some((host, port_str)) = host_port.rsplit_once(':') else {
+        return true;
+    };
+    let Ok(port) = port_str.parse::<u16>() else {
+        return true;
+    };
+    let clean_host = host.trim_matches(['[', ']']);
+    let ip: std::net::IpAddr = if clean_host.eq_ignore_ascii_case("localhost") {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    } else if let Ok(parsed) = clean_host.parse() {
+        parsed
+    } else {
+        return true;
+    };
+    let addr = std::net::SocketAddr::new(ip, port);
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(timeout_ms))
+        .is_ok()
+}
+
+pub fn probe_local_endpoints(
+    configured_discovery_url: Option<&str>,
+) -> Option<(String, String, Vec<DiscoveredLocalModel>)> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(u) = configured_discovery_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        candidates.push(u.to_string());
+    }
+    for std_url in [
+        "http://127.0.0.1:11434/v1/models",
+        "http://127.0.0.1:1234/v1/models",
+        "http://127.0.0.1:8080/v1/models",
+        "http://127.0.0.1:8000/v1/models",
+    ] {
+        if !candidates.iter().any(|c| c.eq_ignore_ascii_case(std_url)) {
+            candidates.push(std_url.to_string());
+        }
+    }
+    for cand in candidates {
+        if !local_tcp_port_reachable(&cand, 120) {
+            continue;
+        }
+        let (base_url, disc_url) = derive_base_and_discovery_urls(&cand);
+        let models = discover_local_models(&disc_url, true);
+        if !models.is_empty() {
+            return Some((base_url, disc_url, models));
+        }
+    }
+    None
+}
+
+pub fn fetch_remote_models(
+    base_url: &str,
+    api_key: Option<&str>,
+    timeout_secs: u64,
+) -> Vec<String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.starts_with("http://127.0.0.1")
+        || trimmed.starts_with("http://localhost")
+        || trimmed.starts_with("http://[::1]")
+    {
+        if !local_tcp_port_reachable(trimmed, 150) {
+            return Vec::new();
+        }
+    }
+    let primary_url = if trimmed.ends_with("/models") {
+        trimmed.to_string()
+    } else {
+        format!("{}/models", trimmed)
+    };
+    let clean_key = api_key
+        .map(str::trim)
+        .filter(|k| !k.is_empty() && *k != "local");
+    let is_anthropic = trimmed.to_ascii_lowercase().contains("anthropic.com");
+    let auth_header = clean_key.map(|k| format!("Bearer {}", k));
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    if let Some(k) = clean_key {
+        if is_anthropic {
+            headers.push(("x-api-key", k));
+            headers.push(("anthropic-version", "2023-06-01"));
+        } else if let Some(ref bearer) = auth_header {
+            headers.push(("Authorization", bearer.as_str()));
+        }
+    }
+
+    let parse_models_body = |body: &str| -> Vec<String> {
+        let Ok(val) = serde_json::from_str::<Value>(body) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        if let Some(arr) = val.get("data").and_then(|d| d.as_array()) {
+            for item in arr {
+                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                    let clean_id = id.trim().strip_prefix("models/").unwrap_or(id.trim());
+                    if !clean_id.is_empty() && !out.iter().any(|x| x == clean_id) {
+                        out.push(clean_id.to_string());
+                    }
+                }
+            }
+        } else if let Some(arr) = val.get("models").and_then(|d| d.as_array()) {
+            for item in arr {
+                let id_opt = item
+                    .get("id")
+                    .or_else(|| item.get("name"))
+                    .and_then(|v| v.as_str());
+                if let Some(id) = id_opt {
+                    let clean_id = id.trim().strip_prefix("models/").unwrap_or(id.trim());
+                    if !clean_id.is_empty() && !out.iter().any(|x| x == clean_id) {
+                        out.push(clean_id.to_string());
+                    }
+                }
+            }
+        }
+        out
+    };
+
+    if let Ok((status, body)) = crate::http::get_text(&primary_url, &headers, timeout_secs) {
+        if (200..300).contains(&status) {
+            let parsed = parse_models_body(&body);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    if !trimmed.ends_with("/v1") && !trimmed.contains("/v1/") && !trimmed.ends_with("/models") {
+        let fallback_url = format!("{}/v1/models", trimmed);
+        if let Ok((status, body)) = crate::http::get_text(&fallback_url, &headers, timeout_secs) {
+            if (200..300).contains(&status) {
+                return parse_models_body(&body);
+            }
+        }
+    }
+    Vec::new()
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelEndpoint {
     pub key: String,
@@ -486,7 +653,42 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
     }
 
     // 3. Check built-in BYOK catalog providers (OpenAI, Anthropic, Gemini, DeepSeek, MiniMax, GLM, Groq, xAI, OpenRouter, Ollama)
-    for group in byok_catalog(&cfg) {
+    let catalog = byok_catalog(&cfg);
+    if let Some((prov_prefix, custom_model)) = clean.split_once(':') {
+        for group in &catalog {
+            if group.id.eq_ignore_ascii_case(prov_prefix) {
+                let api_key =
+                    resolve_api_key(&group.api_key_env).unwrap_or_else(|| "local".to_string());
+                for m in &group.models {
+                    if m.key.eq_ignore_ascii_case(custom_model)
+                        || m.model_id.eq_ignore_ascii_case(custom_model)
+                    {
+                        return ModelEndpoint {
+                            key: format!("{}:{}", group.id, m.key),
+                            model: m.model_id.clone(),
+                            base_url: group.base_url.clone(),
+                            api_key,
+                            label: m.label.clone(),
+                            is_local_flag: group.is_local,
+                            has_quota_pool: false,
+                            configured_context_window: m.context_window.or(group.context_window),
+                        };
+                    }
+                }
+                return ModelEndpoint {
+                    key: clean.to_string(),
+                    model: custom_model.to_string(),
+                    base_url: group.base_url.clone(),
+                    api_key,
+                    label: format!("{} ({})", custom_model, group.id),
+                    is_local_flag: group.is_local,
+                    has_quota_pool: false,
+                    configured_context_window: group.context_window,
+                };
+            }
+        }
+    }
+    for group in catalog {
         for m in &group.models {
             if m.key.eq_ignore_ascii_case(clean)
                 || m.model_id.eq_ignore_ascii_case(clean)
@@ -503,22 +705,6 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
                     is_local_flag: group.is_local,
                     has_quota_pool: false,
                     configured_context_window: m.context_window.or(group.context_window),
-                };
-            }
-        }
-        if let Some((prov_prefix, custom_model)) = clean.split_once(':') {
-            if group.id.eq_ignore_ascii_case(prov_prefix) {
-                let api_key =
-                    resolve_api_key(&group.api_key_env).unwrap_or_else(|| "local".to_string());
-                return ModelEndpoint {
-                    key: clean.to_string(),
-                    model: custom_model.to_string(),
-                    base_url: group.base_url.clone(),
-                    api_key,
-                    label: format!("{} ({})", custom_model, group.id),
-                    is_local_flag: group.is_local,
-                    has_quota_pool: false,
-                    configured_context_window: group.context_window,
                 };
             }
         }

@@ -11,7 +11,7 @@ No async runtime. No Electron. No plugin tree. Three direct dependencies, one `c
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/tugayoktayokay/spavn-cli?color=7c5cff)](https://github.com/tugayoktayokay/spavn-cli/releases)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-247%20passing-success.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-338%20passing-success.svg)](#development)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#install)
 [![Docs](https://img.shields.io/badge/docs-spavn.dev%2Fdocs-black.svg)](https://spavn.dev/docs/)
 
@@ -113,16 +113,18 @@ Four bets, each visible in the source rather than the marketing:
 
 ## 🧠 Autonomous harness intelligence
 
-New in **`v0.2.0`**: deterministic Rust harness layers that catch model mistakes before they hit your tree or waste turns:
+New in **`v0.2.10`**: deterministic Rust harness layers that catch model mistakes before they hit your tree or waste turns:
 
 | Layer | Module | How it works |
 | :--- | :--- | :--- |
-| **Zero-Stop Verification Gate** | `src/turn/mod.rs` | When a turn mutates source files (`write` / `edit`), SPAVN automatically runs project-native verification (`cargo check --quiet`, `tsc --noEmit`, `python3 -m py_compile`, `go vet`) before allowing the turn to finish. Compiler diagnostics are injected straight back into the loop so the model repairs its own breakage. |
+| **Zero-Stop Verification & Claim Gate** | `src/turn.rs`, `src/harness.rs` | When a turn mutates source files (`write` / `edit`), SPAVN automatically runs project-native verification (`cargo check --quiet`, `tsc --noEmit`, `python3 -m py_compile`, `go vet` across `go.work` modules). Each turn tracks the strongest check run after the last edit (`None < Compile < Test < Runtime`); claiming "fixed/done" below `Test` level triggers a verification gate or an explicit warning footer, and failing tests stay flagged until cleared by the same or a broader green run. |
 | **Signature & Arity-Aware Symbol Map** | `src/tools/search.rs` | Extracts exact function, method, struct, and type signatures with 1-based line numbers across modified files and neighboring project files, injecting `[SPAVN LIVE PROJECT SIGNATURES]` into the turn context so models never hallucinate parameter counts or return types. |
 | **Fuzzy Self-Heal `edit` Engine** | `src/tools/edit.rs` | Recovers automatically from intra-line whitespace and indentation drift when a block matches uniquely (`fuzzy_find_unique_line_block`), expands off-by-N line ranges (±25 lines) when `old_text` is anchored nearby, and supports multi-hunk in-memory `edits[]` plus cross-file atomic `files[]` transactions with full rollback. |
-| **Stale-File Guard (`FS_STALE_VERSION`)** | `src/tools/edit.rs` | Records per-file `SystemTime` modification snapshots on `read` and rejects `edit` / `write` calls if a file was modified externally since it was last read — preventing silent overwrites of concurrent user or formatter edits. |
-| **Canonical Repeat-Tool Breaker** | `src/turn/mod.rs` | Recursively canonicalizes JSON tool arguments (sorted object keys, normalized whitespace) and injects `[SPAVN REPEAT-TOOL BREAKER]` after 2 identical read-only calls to break infinite exploration loops, especially on smaller local models. |
-| **Turn-Aware Schema & Budget Compaction** | `src/tools/schema.rs`, `src/session/compactor.rs` | Trims redundant tool schema boilerplate after Turn 0 and scales context window pruning dynamically to the active model's `context_window`. |
+| **Stale-File Guard (`FS_STALE_VERSION`)** | `src/tools/edit.rs` | Records per-file `SystemTime` and 64-bit `FNV-1a` content digests on `read` and rejects `edit` / `write` calls if a file was modified externally since it was last read — preventing silent overwrites of concurrent user or formatter edits. |
+| **Canonical Loop Guard** | `src/harness.rs`, `src/turn.rs` | Recursively canonicalizes JSON tool arguments (sorted object keys, normalized whitespace); identical or identically failing calls warn at 3 repeats, block execution at 4, and stop the turn at 6 (resetting automatically when the target path is edited). |
+| **Verbatim User Message Compaction** | `src/session.rs`, `src/turn.rs` | Preserves every real user message verbatim in chronological order (`[User Messages — verbatim, chronological; later messages override earlier ones]`) across compactions so late constraints are never lost, while scaling tool-output pruning dynamically (`50%` window for local models, `25%` for cloud). |
+| **Real LSP Client & Parallel Worktree Sub-Agents** | `src/tools/lsp.rs`, `src/tools/subagent.rs` | Built-in std-only LSP client (`rust-analyzer`, `typescript-language-server`, `pyright`, `gopls`, `clangd`) plus up to 8 concurrent `scout` (read-only) and `worker` sub-agents running in isolated `git worktree` checkouts with atomic `git apply`. |
+| **Seamless `/provider` & `/model` Live Hub** | `src/hud/menus.rs`, `src/hud/pickers.rs` | Full UTF-8 live search across all menus, masked API key entry (`sk-p••••••••cdef`), automatic local port scanning (`11434`, `1234`, `8080`, `8000`), live `/v1/models` endpoint discovery, and inline key prompts when selecting locked models in `/model`. |
 | **Transactional `/undo` Stack** | `src/tools/edit.rs` | Captures pre-mutation snapshots before every `write` and `edit`, enabling instant single-step or multi-step rollback via `/undo [N]`. |
 
 ---
@@ -149,7 +151,7 @@ New in **`v0.2.0`**: deterministic Rust harness layers that catch model mistakes
 | **crates.io** | `cargo install spavn` (pending the first publish) | `cargo install --force spavn` |
 | **Archive / source** | release tarball, or `cargo build --release` | manual |
 
-`spavn --version` answers `spavn v0.2.0 (macos/aarch64)`. `/update` then tells you when a newer tag
+`spavn --version` answers `spavn v0.2.10 (macos/aarch64)`. `/update` then tells you when a newer tag
 exists and prints the upgrade command that matches **the channel you installed from** — `brew upgrade`
 for a Homebrew install, `cargo install --force` for a cargo one, the script otherwise.
 
@@ -233,7 +235,7 @@ Every flag: `-m/--model`, `-a/--access`, `-P/--phase`, `-H/--host`, `-s/--sessio
 
 ### Against a cloud provider (BYOK)
 
-Run `/byok` inside the TUI (aliases `/login`, `/keys`, `/provider`) or drop your own API keys in `~/.spavn/secrets.env` (`0600`). Keys are never written to `config.json`. Any OpenAI-compatible endpoint, custom gateway, or major cloud provider works out of the box with zero middleman markup.
+Run `/provider` inside the TUI (aliases `/login`, `/byok`, `/keys`, `/connect`) or select any locked provider directly in `/model` — SPAVN prompts for your API key with real-time masking (`sk-p••••••••cdef`), saves it to `~/.spavn/secrets.env` (`0600`), and auto-discovers live models via `/v1/models`. Keys are never written to `config.json`. Any OpenAI-compatible endpoint, Anthropic (`claude-opus-5-5`, `claude-sonnet-5-5`), Gemini, OpenRouter, custom gateway, or local GPU server (`11434`, `1234`, `8080`, `8000`) works out of the box with zero middleman markup.
 
 ---
 
@@ -260,9 +262,9 @@ Eleven builtins, each a hard-coded contract in `tool_definitions()`. Plus anythi
 | 🗂️ `glob` | File listing; skips `node_modules`/`target`/`.git` unless `hidden` | path policy |
 | 🧠 `memory` | Recall/record decisions; `~/.spavn` or an external binary | read-only tier |
 | 📚 `skill` | Load domain instructions from `~/.spavn/skills`, `~/.claude/skills` | read-only tier |
-| 🌐 `web` | Search or fetch as Markdown; redirects re-validated per hop | egress classifier |
-| 🐝 `subagent` | Delegate read-only investigations, own context window | cannot mutate |
-| 🧭 `lsp` | Definitions, references, symbols; MCP tool calls | read-only tier |
+| 🌐 `web` | Search (ordered keyless + API provider chain with fallback) or fetch as Markdown; redirects re-validated per hop | egress classifier |
+| 🐝 `subagent` | Up to 8 concurrent `scout` (read-only) or `worker` (isolated `git worktree` + atomic `git apply`) sub-agents | phase & access gate |
+| 🧭 `lsp` | Real LSP client (`definition`, `references`, `hover`, `symbols`, `diagnostics`, `implementation`, `type_definition`, `workspace_symbol`) + generic MCP client | read-only / MCP gate |
 
 <details>
 <summary><b>🔌 MCP servers — the extension path</b></summary>

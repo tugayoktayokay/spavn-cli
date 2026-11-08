@@ -334,24 +334,21 @@ pub fn select_interactive_menu(
                 }
             }
             3 => break,
-            b'q' | b'Q' if query.is_empty() => break,
-            b'k' | b'K' if query.is_empty() => {
-                if let Some(cur) = matched.get(sel_pos).copied() {
-                    if let Some(prev) = step_in_visible(&matched, cur, false) {
-                        sel_pos = matched.iter().position(|&i| i == prev).unwrap_or(0);
-                    }
-                }
-            }
-            b'j' | b'J' | b'\t' if query.is_empty() => {
+            b'\t' => {
                 if let Some(cur) = matched.get(sel_pos).copied() {
                     if let Some(next) = step_in_visible(&matched, cur, true) {
                         sel_pos = matched.iter().position(|&i| i == next).unwrap_or(0);
                     }
                 }
             }
-            c if (32..=126).contains(&c) => {
-                query.push(c as char);
-                sel_pos = 0;
+            b if b >= 32 => {
+                if let Ok(text) = std::str::from_utf8(&kbuf[..n]) {
+                    let typed: String = text.chars().filter(|c| !c.is_control()).collect();
+                    if !typed.is_empty() {
+                        query.push_str(&typed);
+                        sel_pos = 0;
+                    }
+                }
             }
             _ => {}
         }
@@ -378,6 +375,20 @@ pub fn interactive_select_slash_command() -> Option<String> {
             desc: tr_en(
                 "Sağlayıcı (←/→) ve AI modelini (↑/↓) iki sütunda seç",
                 "Select provider (←/→) and AI model (↑/↓) in dual columns",
+            )
+            .to_string(),
+        },
+        MenuItem {
+            key: "/provider".to_string(),
+            badge: format!(
+                "{}{}{}",
+                GREEN,
+                tr_en("🔐 Sağlayıcı & Giriş", "🔐 Provider & Login"),
+                RESET
+            ),
+            desc: tr_en(
+                "Sağlayıcı bağla, API anahtarı gir, yerel sunucu tara veya özel URL ekle (/login · /byok)",
+                "Connect provider, enter API key, scan local server, or add custom URL (/login · /byok)",
             )
             .to_string(),
         },
@@ -699,16 +710,26 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
         }
     }
 
-    // 2. Dynamic Local Model Discovery (if `local_discovery_url` is configured)
+    // 2. Dynamic Local Model Discovery (configured URL + automatic standard local ports scan)
     let mut local_idx_in_providers = None;
-    if let Some(ref disc_url) = cfg.local_discovery_url {
+    let probed_local = if cfg.local_discovery_url.is_some() || local_first {
         let mut spin = LiveSpinner::start(tr_en(
             "Yerel model sunucusu taranıyor",
             "Scanning local model server",
         ));
-        let discovered = crate::router::discover_local_models(disc_url, true);
+        let found = crate::router::probe_local_endpoints(cfg.local_discovery_url.as_deref());
         spin.stop();
-
+        found
+    } else {
+        crate::router::probe_local_endpoints(None)
+    };
+    if let Some((base_url, disc_url, discovered)) = probed_local {
+        if cfg.local_discovery_url.is_none() {
+            let mut updated_cfg = cfg.clone();
+            updated_cfg.local_base_url = Some(base_url);
+            updated_cfg.local_discovery_url = Some(disc_url);
+            let _ = save_user_config(&updated_cfg);
+        }
         let mut local_models: Vec<MenuItem> = Vec::new();
         for m in discovered {
             let badge = if m.loaded {
@@ -771,7 +792,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
             format!(
                 "{}🔒 {}{}",
                 YELLOW,
-                crate::config::tr_en("/byok ile anahtar gir", "/byok to enter key"),
+                crate::config::tr_en("Seçince anahtar sorar", "Prompts key on select"),
                 RESET
             )
         };
@@ -779,7 +800,11 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
             .models
             .iter()
             .map(|m| MenuItem {
-                key: m.key.clone(),
+                key: if m.key.contains(':') {
+                    m.key.clone()
+                } else {
+                    format!("{}:{}", byok_group.id, m.key)
+                },
                 badge: format!("{} · {}", m.badge, key_status),
                 desc: m.desc.clone(),
             })
@@ -1191,8 +1216,23 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
 
     print!("\x1b[{}A\r\x1b[J\x1b[?7h\x1b[?25h", total_lines);
     let _ = io::stdout().flush();
+    drop(_term_guard);
     unsafe {
         tcsetattr(0, TCSANOW, &orig_termios);
     }
+
+    if result.is_some() {
+        if let Some(Some(pid)) = prov_ids.get(prov_idx) {
+            if let Some(group) = byok_catalog(&cfg)
+                .into_iter()
+                .find(|g| g.id.eq_ignore_ascii_case(pid))
+            {
+                if !group.is_local && resolve_api_key(&group.api_key_env).is_none() {
+                    let _ = super::pickers::prompt_and_save_provider_key(&group, false);
+                }
+            }
+        }
+    }
+
     result
 }

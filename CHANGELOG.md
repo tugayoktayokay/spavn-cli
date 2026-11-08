@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-08 — `v0.2.10`: Seamless `/provider` & `/model` Hub, Masked Key Entry, Live `/v1/models` Discovery & Local Port Scanner
+
+### Interactive Menu Live Search & `/provider` Hub (`src/hud/menus.rs`, `src/hud/pickers.rs`, `src/router/mod.rs`, `src/main.rs`)
+- **Uninterrupted Live Typing in `select_interactive_menu`**: Removed the single-byte `q`, `k`, and `j` shortcuts when `query` was empty so typing queries starting with `q` (e.g. `qwen`), `k` (`kimi`), or `j` never exits the menu or hijacks navigation. Upgraded input decoding to full UTF-8 (`std::str::from_utf8`) so multi-byte Turkish characters and pasted strings filter immediately.
+- **Masked API Key Entry (`prompt_secret_line`)**: Entering or pasting API keys in `/provider`, `/login`, `/byok`, or `/model` now masks characters in real time (`sk-p••••••••••••cdef`) while keeping `'o'` / `'open'` visible for one-keystroke browser portal launch and supporting `Backspace`, `Ctrl+U`, and `Esc`.
+- **Inline Key Prompt from `/model`**: Selecting a locked BYOK provider model directly inside `/model` now prompts for and saves its API key on the spot instead of requiring a separate `/byok` run.
+- **Automatic Local Server Port Scanning (`probe_local_endpoints`)**: Automatically probes standard local LLM ports (`11434` Ollama, `1234` LM Studio, `8080` llama.cpp / llama-swap / MLX, `8000` vLLM / SGLang) with a sub-millisecond localhost TCP pre-check (`120ms` timeout) and persists discovered endpoints. If no local server is running on standard ports, `/provider` → `Local Server` prompts for a custom local/LAN URL.
+- **Live `/v1/models` Discovery (`fetch_remote_models`)**: Custom and built-in providers query `/v1/models` (OpenAIBearer and Anthropic `x-api-key` headers) to auto-discover live server models alongside the curated catalog.
+- **Provider-Prefixed Endpoint Routing & First-Run Persistence**: Selecting a model from a built-in BYOK group now emits `<provider_id>:<model_key>` so `resolve_endpoint` routes unambiguously to that provider even when a custom proxy defines a model with the same name. First-run onboarding in `main.rs` now persists `cfg.default_model` to `~/.spavn/config.json`.
+
 ## 2026-11-08 — `v0.2.9`: Claim Gate & Loop Guard, Keyless Web Search Chain, Verbatim Compaction, Real LSP Client & Isolated Worktree Sub-Agents
 
 ### Built-in Web Search With Provider Fallback (`src/tools/web_search.rs`, `src/tools/web.rs`, `src/http.rs`, `src/config.rs`)
