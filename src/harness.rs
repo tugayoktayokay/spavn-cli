@@ -455,7 +455,22 @@ fn test_invocations(cmd: &str, modified_files: &[String]) -> Vec<Vec<String>> {
         .filter(|part| classify_single_subcommand(part, modified_files) == VerificationLevel::Test)
         .map(|part| {
             part.split_whitespace()
-                .filter(|t| !t.contains('>') && !t.contains('<'))
+                .filter(|t| {
+                    !t.contains('>')
+                        && !t.contains('<')
+                        && !matches!(
+                            *t,
+                            "--" | "--lib"
+                                | "--bins"
+                                | "--tests"
+                                | "--all-targets"
+                                | "--workspace"
+                                | "--quiet"
+                                | "-q"
+                                | "--nocapture"
+                                | "--show-output"
+                        )
+                })
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         })
@@ -1263,6 +1278,27 @@ let x = 1;
 
         // Non-test failures never open the ledger.
         runs.observe(&call("ls missing"), false, &mods);
+        assert!(!runs.is_open());
+
+        // Runner display/target flags (--lib, --nocapture, --) normalize so full suite clears filtered runs.
+        runs.observe(
+            &call("cargo test --manifest-path Cargo.toml -- --nocapture mask_secret_preview"),
+            false,
+            &mods,
+        );
+        runs.observe(
+            &call("cargo test --manifest-path Cargo.toml hud::pickers::menu_tests"),
+            false,
+            &mods,
+        );
+        assert_eq!(
+            runs.observe(
+                &call("cargo test --manifest-path Cargo.toml --lib"),
+                true,
+                &mods
+            ),
+            VerificationLevel::Test
+        );
         assert!(!runs.is_open());
     }
 
