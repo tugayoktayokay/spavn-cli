@@ -757,8 +757,8 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             RESET
         );
         let prov_name = prompt_inline_line(tr_en(
-            "│ Sağlayıcı Kısa Adı (ör. my-vllm, apinex, commandcode)",
-            "│ Provider Short ID (e.g. my-vllm, apinex, commandcode)",
+            "│ Sağlayıcı Kısa Adı (ör. my-vllm, custom-proxy, company-gateway)",
+            "│ Provider Short ID (e.g. my-vllm, custom-proxy, company-gateway)",
         ))?;
         let raw_base_url = prompt_inline_line(tr_en(
             "│ Base URL (ör. http://127.0.0.1:8000/v1 veya https://api.example.com/v1)",

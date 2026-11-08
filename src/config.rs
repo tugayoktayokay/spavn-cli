@@ -1563,7 +1563,7 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
         },
         ProviderGroupConfig {
             id: "vllm".to_string(),
-            title: "🚀 vLLM / MLX Router (Yerel · :8000)".to_string(),
+            title: "🚀 vLLM (Yerel · :8000)".to_string(),
             base_url: "http://127.0.0.1:8000/v1".to_string(),
             api_key_env: "VLLM_API_KEY".to_string(),
             is_local: true,
@@ -1572,9 +1572,9 @@ pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
             models: vec![ModelConfigEntry {
                 key: "default".to_string(),
                 model_id: "default".to_string(),
-                label: "vLLM / MLX Active Model".to_string(),
-                badge: "🟢 vLLM/MLX".to_string(),
-                desc: "Local vLLM / MLX OpenAI Server (127.0.0.1:8000)".to_string(),
+                label: "vLLM Active Model".to_string(),
+                badge: "🟢 vLLM".to_string(),
+                desc: "Local vLLM OpenAI Server (127.0.0.1:8000)".to_string(),
                 context_window: Some(65_536),
             }],
         },

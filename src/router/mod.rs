@@ -246,7 +246,6 @@ pub fn probe_local_endpoints(
         "http://127.0.0.1:8080/v1/models",
         "http://127.0.0.1:8000/v1/models",
         "http://127.0.0.1:4000/v1/models",
-        "http://127.0.0.1:9931/v1/models",
     ] {
         if !candidates.iter().any(|c| c.eq_ignore_ascii_case(std_url)) {
             candidates.push(std_url.to_string());
