@@ -245,13 +245,13 @@ pub(crate) fn prompt_and_save_provider_key(
     );
     if let Some(ref cur_key) = existing {
         println!(
-            "{}│{} {}: {}{}{}{}",
+            "{}│{} {}: {}{} ({}){}",
             CYAN,
             RESET,
             tr_en("Mevcut Anahtar", "Current Key"),
             GREEN,
             group.api_key_env,
-            format!(" ({})", mask_secret_preview(cur_key)),
+            mask_secret_preview(cur_key),
             RESET
         );
     } else {
@@ -268,11 +268,10 @@ pub(crate) fn prompt_and_save_provider_key(
     }
     if let Some(url) = portal {
         println!(
-            "{}│{} 🌐 {}: {}{}{}  {}('o' + Enter = {}){}",
+            "{}│{} 🌐 {}: \x1b[4m{}{}  {}('o' + Enter = {}){}",
             CYAN,
             RESET,
             tr_en("Anahtar Portalı", "Key Portal"),
-            "\x1b[4m",
             url,
             RESET,
             DIM,
@@ -605,7 +604,7 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 )
                 .to_string(),
             });
-            if let Some(pick) = select_interactive_menu(
+            let pick = select_interactive_menu(
                 &format!(
                     "🟢 {} ({})",
                     tr_en("YEREL SUNUCU MODELLERİ", "LOCAL SERVER MODELS"),
@@ -613,12 +612,9 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 ),
                 &local_items,
                 0,
-            ) {
-                if pick != "__custom_local_url__" {
-                    return Some(pick);
-                }
-            } else {
-                return None;
+            )?;
+            if pick != "__custom_local_url__" {
+                return Some(pick);
             }
         }
 

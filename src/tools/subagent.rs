@@ -1,7 +1,6 @@
 use super::*;
 use crate::ansi::GREEN;
 use std::collections::HashMap;
-use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -212,18 +211,14 @@ impl WorktreeGuard {
             .map_err(|e| format!("Failed to get git diff HEAD: {}", e))?;
 
         if diff_out.status.success() && !diff_out.stdout.is_empty() {
-            if let Ok(mut apply_child) = Command::new("git")
-                .args(["apply", "--whitespace=nowarn"])
-                .current_dir(&wt_path)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = apply_child.stdin.take() {
-                    let _ = stdin.write_all(&diff_out.stdout);
-                }
-                let _ = apply_child.wait_with_output();
+            let dirty_patch = wt_path.join(".spavn-dirty.patch");
+            if std::fs::write(&dirty_patch, &diff_out.stdout).is_ok() {
+                let _ = Command::new("git")
+                    .args(["apply", "--whitespace=nowarn", ".spavn-dirty.patch"])
+                    .current_dir(&wt_path)
+                    .stdin(std::process::Stdio::null())
+                    .output();
+                let _ = std::fs::remove_file(&dirty_patch);
             }
         }
 

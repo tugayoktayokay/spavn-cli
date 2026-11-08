@@ -1237,10 +1237,9 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 if !group.is_local
                     && !group.api_key_env.trim().is_empty()
                     && resolve_api_key(&group.api_key_env).is_none()
+                    && !super::pickers::prompt_and_save_provider_key(&group, false)
                 {
-                    if !super::pickers::prompt_and_save_provider_key(&group, false) {
-                        return None;
-                    }
+                    return None;
                 }
             }
         }

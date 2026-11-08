@@ -1744,10 +1744,8 @@ pub fn load_external_models_yml_providers() -> Vec<ProviderGroupConfig> {
                                     p.api_key_env = env_name;
                                 }
                             }
-                            "api" => {
-                                if val.contains("anthropic") {
-                                    p.protocol = Some("anthropic".to_string());
-                                }
+                            "api" if val.contains("anthropic") => {
+                                p.protocol = Some("anthropic".to_string());
                             }
                             _ => {}
                         }

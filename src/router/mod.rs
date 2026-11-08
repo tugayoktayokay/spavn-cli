@@ -303,13 +303,12 @@ pub fn fetch_remote_models(
         .or_else(|| raw_trimmed.strip_suffix("/messages"))
         .unwrap_or(raw_trimmed)
         .trim_end_matches('/');
-    if trimmed.starts_with("http://127.0.0.1")
+    if (trimmed.starts_with("http://127.0.0.1")
         || trimmed.starts_with("http://localhost")
-        || trimmed.starts_with("http://[::1]")
+        || trimmed.starts_with("http://[::1]"))
+        && !local_tcp_port_reachable(trimmed, 150)
     {
-        if !local_tcp_port_reachable(trimmed, 150) {
-            return Vec::new();
-        }
+        return Vec::new();
     }
     let primary_url = if trimmed.ends_with("/models") {
         trimmed.to_string()
