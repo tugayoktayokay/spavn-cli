@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             archive: spavn-aarch64-apple-darwin.tar.gz
           - os: macos-15-intel
@@ -47,9 +47,9 @@ jobs:
         if: matrix.apt != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
       - name: Build release binary
-        run: >-
-          cargo build --release --target ${{ matrix.target }}
-          ${{ matrix.linker && format('--config target.{0}.linker="{1}"', matrix.target, matrix.linker) || '' }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Package Unix archive
         if: runner.os != 'Windows'
         run: |
