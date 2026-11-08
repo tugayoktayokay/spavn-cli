@@ -412,9 +412,12 @@ impl ModelEndpoint {
                 || k.contains("opus")
                 || k.contains("sonnet")
                 || k.contains("haiku")
+                || k.contains("fable")
                 || k.contains("gpt-4")
                 || k.contains("gpt-5")
+                || k.contains("gpt-6")
                 || k.contains("grok-")
+                || k.contains("glm-5")
             {
                 return false;
             }
@@ -496,9 +499,15 @@ impl ModelEndpoint {
             return 131_072;
         }
         let k = self.model.to_lowercase();
-        if k.contains("gemini")
+        if k.contains("gpt-6") || k.contains("gpt-5.6") || k.contains("gpt-5.5") {
+            1_050_000
+        } else if k.contains("gemini")
             || k.contains("argon")
             || k.contains("gpt-4.1")
+            || k.contains("deepseek-v4")
+            || k.contains("deepseek-flash")
+            || k.contains("glm-5.3")
+            || k.contains("haiku-5")
             || ((k.contains("claude")
                 || k.contains("opus")
                 || k.contains("sonnet")
@@ -506,11 +515,14 @@ impl ModelEndpoint {
                 && !k.contains("haiku"))
         {
             1_000_000
+        } else if k.contains("gpt-5.4") {
+            272_000
         } else if k.contains("grok-4") {
             256_000
         } else if k.contains("haiku")
             || k.contains("minimax")
             || k.contains("gpt-5")
+            || k.contains("glm-5.1")
             || k.starts_with("o3")
             || k.starts_with("o4")
         {

@@ -264,7 +264,10 @@ static SYSTEM_PROMPT_CACHE: std::sync::Mutex<Option<(String, bool, bool, String)
     std::sync::Mutex::new(None);
 
 pub fn cached_system_prompt(cwd: &str, compact: bool) -> String {
-    let en = crate::config::is_en();
+    cached_system_prompt_for_lang(cwd, compact, crate::config::is_en())
+}
+
+pub(crate) fn cached_system_prompt_for_lang(cwd: &str, compact: bool, en: bool) -> String {
     let mut slot = match SYSTEM_PROMPT_CACHE.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -341,11 +344,11 @@ mod tests {
     #[test]
     fn cached_prompt_is_byte_identical_until_invalidated() {
         super::invalidate_system_prompt_cache();
-        let a = super::cached_system_prompt(".", true);
-        let b = super::cached_system_prompt(".", true);
+        let a = super::cached_system_prompt_for_lang(".", true, true);
+        let b = super::cached_system_prompt_for_lang(".", true, true);
         assert_eq!(a, b, "repeat call must not rebuild");
         // A different mode is a different key, not a stale hit.
-        let c = super::cached_system_prompt(".", false);
+        let c = super::cached_system_prompt_for_lang(".", false, true);
         assert_ne!(a, c);
         super::invalidate_system_prompt_cache();
         // Determinism belongs to the inputs. `is_en()` is process-global and other tests flip it
