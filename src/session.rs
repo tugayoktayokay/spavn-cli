@@ -349,8 +349,24 @@ pub fn summarize_tool_args(name: &str, args_json: &str, default_host: &str) -> S
                     explicit_host
                 };
                 let command = get_str_alias(&val, &["command", "cmd", "script", "shell"]);
-                let first_line = command.lines().next().unwrap_or("");
-                format!("[{}] {}", host, first_line)
+                let mut lines = command.lines();
+                let first_line = lines.next().unwrap_or("");
+                let trimmed_first = first_line.trim_end();
+                let summary_cmd = if trimmed_first.ends_with(" -c '")
+                    || trimmed_first.ends_with(" -c \"")
+                    || trimmed_first.ends_with(" -e '")
+                    || trimmed_first.ends_with(" -e \"")
+                {
+                    if let Some(next_non_empty) = lines.map(str::trim).find(|l| !l.is_empty()) {
+                        let quote = trimmed_first.chars().last().unwrap_or('\'');
+                        format!("{}{} …{}", trimmed_first, next_non_empty, quote)
+                    } else {
+                        first_line.to_string()
+                    }
+                } else {
+                    first_line.to_string()
+                };
+                format!("[{}] {}", host, summary_cmd)
             }
         }
         "search" => get_str_alias(&val, &["pattern", "query", "regex", "search"]).to_string(),

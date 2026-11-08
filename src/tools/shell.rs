@@ -682,8 +682,8 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
                     ctx.last_cwd = ctx.policy.cwd.clone();
                 }
             }
-            let mut combined = out_str;
-            let err = String::from_utf8_lossy(&stderr);
+            let mut combined = collapse_binary_noise_lines(&out_str);
+            let err = collapse_binary_noise_lines(&String::from_utf8_lossy(&stderr));
             if !err.is_empty() {
                 if !combined.is_empty() && !combined.ends_with('\n') {
                     combined.push('\n');
@@ -759,4 +759,42 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
         }
         Err(e) => format!("Execution error: {}", e),
     }
+}
+
+/// Replaces lines corrupted by raw binary decoding (`\u{FFFD}`, NUL or C1 control bursts)
+/// with a compact `[... N binary line(s) omitted ...]` summary so binary dumps never
+/// garble the HUD rail or pollute model context.
+fn collapse_binary_noise_lines(text: &str) -> String {
+    if !text.contains('\u{fffd}') && !text.contains('\0') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut omitted = 0usize;
+    for line in text.lines() {
+        if crate::hud::toolcard::is_binary_noise_line(line) {
+            omitted += 1;
+            continue;
+        }
+        if omitted > 0 {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("[... {} binary line(s) omitted ...]", omitted));
+            omitted = 0;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    if omitted > 0 {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("[... {} binary line(s) omitted ...]", omitted));
+    }
+    if text.ends_with('\n') && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }

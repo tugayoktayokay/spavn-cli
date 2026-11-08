@@ -31,8 +31,9 @@ pub const CHANGE_MAX_HUNKS: usize = 3;
 
 /// Strips ANSI escapes and control characters, expands tabs and normalizes CRLF.
 ///
-/// Tool output routinely carries SGR colors, `\r` progress redraws and NUL bytes from process
-/// output; any of those would desync a row that is drawn after the `│ ` rail.
+/// Tool output routinely carries SGR colors, `\r` progress redraws, C1 control codes,
+/// UTF-8 replacement characters (`\u{FFFD}`) and NUL bytes from binary/process output;
+/// any of those would desync or garble a row that is drawn after the `│ ` rail.
 pub fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -47,8 +48,8 @@ pub fn sanitize(text: &str) -> String {
                         }
                     }
                 }
-                Some(']') => {
-                    // OSC (window title, hyperlink): terminated by BEL or ESC \.
+                Some(']' | 'P' | 'X' | '^' | '_') => {
+                    // OSC / DCS / SOS / PM / APC: terminated by BEL or ESC \.
                     chars.next();
                     while let Some(c) = chars.next() {
                         if c == '\x07' {
@@ -68,11 +69,41 @@ pub fn sanitize(text: &str) -> String {
             '\r' => {}
             '\n' => out.push('\n'),
             '\t' => out.push_str("    "),
-            '\x00'..='\x1f' => {}
+            '\x00'..='\x1f'
+            | '\x7f'..='\u{009f}'
+            | '\u{fffd}'
+            | '\u{feff}'
+            | '\u{fffe}'..='\u{ffff}'
+            | '\u{e000}'..='\u{f8ff}' => {}
             _ => out.push(ch),
         }
     }
     out
+}
+
+/// Detects whether a raw output line is corrupted binary data (e.g. Mach-O / SQLite /
+/// compressed stream bytes decoded via `from_utf8_lossy` or Python `errors='replace'`).
+pub fn is_binary_noise_line(raw_line: &str) -> bool {
+    if raw_line.contains('\u{fffd}') || raw_line.contains('\0') {
+        return true;
+    }
+    let mut bad_ctrl = 0usize;
+    for ch in raw_line.chars() {
+        if matches!(
+            ch,
+            '\x01'..='\x08'
+                | '\x0e'..='\x1a'
+                | '\x1c'..='\x1f'
+                | '\x7f'..='\u{009f}'
+                | '\u{e000}'..='\u{f8ff}'
+        ) {
+            bad_ctrl += 1;
+            if bad_ctrl >= 2 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// `… (N satır gizlendi)` marker for rows a card could not fit.
@@ -110,15 +141,36 @@ pub fn elide(rows: &[String], max_rows: usize) -> Vec<String> {
     out
 }
 
-/// Splits tool output into `│ `-ready rows, dropping leading/trailing blank lines.
+/// Splits tool output into `│ `-ready rows, dropping leading/trailing blank lines
+/// and filtering out binary/garbled noise rows (`\u{FFFD}`, raw control bytes).
 pub fn body_rows(output: &str, max_rows: usize) -> Vec<String> {
-    let clean = sanitize(output);
-    let mut rows: Vec<String> = clean.lines().map(|l| l.trim_end().to_string()).collect();
+    let mut rows: Vec<String> = Vec::new();
+    let mut dropped_binary = 0usize;
+    for raw_line in output.lines() {
+        if is_binary_noise_line(raw_line) {
+            dropped_binary += 1;
+            continue;
+        }
+        rows.push(sanitize(raw_line).trim_end().to_string());
+    }
     while rows.first().is_some_and(|r| r.is_empty()) {
         rows.remove(0);
     }
     while rows.last().is_some_and(|r| r.is_empty()) {
         rows.pop();
+    }
+    if rows.is_empty() && dropped_binary > 0 {
+        return vec![format!(
+            "… ({})",
+            crate::config::tr_en(
+                &format!("{} satır ikili/bozuk veri gizlendi", dropped_binary),
+                &format!(
+                    "{} binary line{} hidden",
+                    dropped_binary,
+                    if dropped_binary == 1 { "" } else { "s" }
+                )
+            )
+        )];
     }
     elide(&rows, max_rows)
 }
@@ -766,6 +818,16 @@ mod tests {
     fn body_rows_strips_blank_edges_and_never_returns_a_trailing_blank() {
         let out = body_rows("\n\nfirst\nsecond\n\n\n", 8);
         assert_eq!(out, rows(&["first", "second"]));
+    }
+
+    #[test]
+    fn body_rows_filters_binary_replacement_noise_from_tail() {
+        let input = "=== model-hub.ts ===\nif (a > 0) {\n  o.push(n);\n}\n\u{fffd}\u{fffd}\u{fffd} files in \u{fffd}\"ҵ sessions\n\u{fffd}\u{fffd}M\u{fffd}referenced\u{fffd}\u{fffd}\u{fffd}Xarchive\n";
+        let out = body_rows(input, 8);
+        assert_eq!(
+            out,
+            rows(&["=== model-hub.ts ===", "if (a > 0) {", "  o.push(n);", "}"])
+        );
     }
 
     #[test]
