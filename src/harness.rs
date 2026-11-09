@@ -742,7 +742,157 @@ fn compound_test_subcommand_passed(
         && !tool_output.contains(" failed")
         && !tool_output.contains("FAIL ");
     let has_go_pass = tool_output.contains("\nok  \t") && !tool_output.contains("--- FAIL:");
-    has_rust_pass || has_pytest_or_jest_pass || has_go_pass
+    let has_node_tap_pass = tool_output.contains("# pass ")
+        && tool_output.contains("# fail 0")
+        && !tool_output.contains("\nnot ok ");
+    has_rust_pass || has_pytest_or_jest_pass || has_go_pass || has_node_tap_pass
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestEcosystem {
+    Rust,
+    Python,
+    JsTs,
+    Go,
+}
+
+fn classify_test_ecosystem(tokens: &[String]) -> Option<TestEcosystem> {
+    let first = tokens
+        .first()
+        .map(|s| s.rsplit('/').next().unwrap_or(s.as_str()))?;
+    match first {
+        "cargo" => Some(TestEcosystem::Rust),
+        "pytest" | "py.test" => Some(TestEcosystem::Python),
+        "python" | "python3" => {
+            if tokens.iter().any(|t| t == "pytest" || t == "unittest") {
+                Some(TestEcosystem::Python)
+            } else {
+                None
+            }
+        }
+        "npm" | "pnpm" | "yarn" | "bun" | "node" | "tsx" | "vitest" | "jest" | "deno" => {
+            Some(TestEcosystem::JsTs)
+        }
+        "npx" => {
+            if tokens
+                .iter()
+                .any(|t| matches!(t.as_str(), "vitest" | "jest" | "tsx" | "mocha"))
+            {
+                Some(TestEcosystem::JsTs)
+            } else {
+                None
+            }
+        }
+        "go" => Some(TestEcosystem::Go),
+        _ => None,
+    }
+}
+
+/// Returns true if `tokens` represents an unfiltered full-suite test invocation for its ecosystem
+/// (e.g., `npm test`, `node --import tsx --test src/**/*.test.ts`, `cargo test`, `pytest`, `go test ./...`).
+fn is_unfiltered_full_suite_run(tokens: &[String]) -> bool {
+    let s: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let is_glob_all = |arg: &str| arg.contains('*');
+    match s.as_slice() {
+        ["cargo", "test"] | ["cargo", "nextest", "run"] => true,
+        ["pytest"]
+        | ["py.test"]
+        | ["python", "-m", "pytest"]
+        | ["python3", "-m", "pytest"]
+        | ["python", "-m", "unittest"]
+        | ["python3", "-m", "unittest"] => true,
+        ["go", "test"] | ["go", "test", "./..."] => true,
+        ["npm", "test"]
+        | ["npm", "run", "test"]
+        | ["npm", "t"]
+        | ["pnpm", "test"]
+        | ["pnpm", "run", "test"]
+        | ["pnpm", "t"]
+        | ["yarn", "test"]
+        | ["yarn", "run", "test"]
+        | ["bun", "test"]
+        | ["deno", "test"]
+        | ["vitest"]
+        | ["vitest", "run"]
+        | ["npx", "vitest"]
+        | ["npx", "vitest", "run"]
+        | ["jest"]
+        | ["npx", "jest"]
+        | ["node", "--test"]
+        | ["tsx", "--test"]
+        | ["npx", "tsx", "--test"]
+        | ["node", "--import", "tsx", "--test"] => true,
+        ["node", "--test", pat]
+        | ["tsx", "--test", pat]
+        | ["npx", "tsx", "--test", pat]
+        | ["node", "--import", "tsx", "--test", pat]
+            if is_glob_all(pat) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn looks_like_test_file_arg(token: &str) -> bool {
+    !token.starts_with('-')
+        && (token.contains('/')
+            || token.ends_with(".ts")
+            || token.ends_with(".tsx")
+            || token.ends_with(".js")
+            || token.ends_with(".jsx")
+            || token.ends_with(".mjs")
+            || token.ends_with(".cjs")
+            || token.ends_with(".py")
+            || token.ends_with(".rs")
+            || token.ends_with(".go"))
+}
+
+/// Determines whether a passing test invocation `run` covers and clears a previously failed
+/// invocation `failed`.
+fn test_run_clears_failed(run: &[String], failed: &[String]) -> bool {
+    if run == failed {
+        return true;
+    }
+    if failed.starts_with(run) {
+        if is_unfiltered_full_suite_run(run) {
+            return true;
+        }
+        // If `run` already specifies file target(s), only clear `failed` if the trailing tokens
+        // in `failed` are narrowing flags (e.g. `-k slow`), NOT additional test files omitted by `run`.
+        let extra = &failed[run.len()..];
+        if !extra.iter().any(|tok| looks_like_test_file_arg(tok)) {
+            return true;
+        }
+    }
+    // Wildcard/glob suffix on the same runner prefix (e.g. `node --import tsx --test src/**/*.test.ts`
+    // clears `node --import tsx --test src/emaTts.test.ts src/managerClosing.test.ts`).
+    if let Some((last, prefix)) = run.split_last() {
+        if !prefix.is_empty() && last.contains('*') && failed.starts_with(prefix) {
+            let glob_dir_prefix = last.split('*').next().unwrap_or("");
+            let remaining = &failed[prefix.len()..];
+            if !remaining.is_empty()
+                && remaining
+                    .iter()
+                    .all(|arg| arg.starts_with(glob_dir_prefix))
+            {
+                return true;
+            }
+        }
+    }
+    // An unfiltered full-suite run (`npm test`, `pytest`, `cargo test`, `go test ./...`)
+    // clears any narrower or equivalent failed test command in the same ecosystem.
+    if is_unfiltered_full_suite_run(run) {
+        if let (Some(run_eco), Some(failed_eco)) = (
+            classify_test_ecosystem(run),
+            classify_test_ecosystem(failed),
+        ) {
+            if run_eco == failed_eco {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Test runs that failed during a turn and have not been re-run green since.
@@ -810,7 +960,8 @@ impl FailedTestRuns {
             return VerificationLevel::None;
         }
         for run in &runs {
-            self.open.retain(|failed| !failed.starts_with(run));
+            self.open
+                .retain(|failed| !test_run_clears_failed(run, failed));
         }
         let level = classify_shell_tool_call(raw_args, modified_files);
         if self.is_open() {
@@ -1653,6 +1804,79 @@ let x = 1;
                 compound_out,
                 &mods,
             ),
+            VerificationLevel::Test
+        );
+        assert!(!runs.is_open());
+
+        // 4. Exact Telya scenario: `node --import tsx --test src/emaTts.test.ts src/managerClosing.test.ts src/voxlockClient.test.ts`
+        // fails, and later either `node --import tsx --test src/**/*.test.ts` (glob) or `npm test` (full suite) passes.
+        // Meanwhile, a narrower single-file run (`node --import tsx --test src/emaTts.test.ts`) or a different ecosystem
+        // (`cargo test`) must NOT clear the open multi-file JS/TS failure.
+        runs.observe(
+            &call("node --import tsx --test src/emaTts.test.ts src/managerClosing.test.ts src/voxlockClient.test.ts"),
+            false,
+            &mods,
+        );
+        assert!(runs.is_open());
+        // Narrower single-file run does NOT clear multi-file failure
+        assert_eq!(
+            runs.observe(
+                &call("node --import tsx --test src/emaTts.test.ts"),
+                true,
+                &mods
+            ),
+            VerificationLevel::Compile
+        );
+        assert!(runs.is_open());
+        // Cross-ecosystem full suite (`cargo test`) does NOT clear JS/TS failure
+        assert_eq!(
+            runs.observe(&call("cargo test"), true, &mods),
+            VerificationLevel::Compile
+        );
+        assert!(runs.is_open());
+        // Glob-based full suite (`node --import tsx --test src/**/*.test.ts`) DOES clear it
+        assert_eq!(
+            runs.observe(
+                &call("node --import tsx --test src/**/*.test.ts"),
+                true,
+                &mods
+            ),
+            VerificationLevel::Test
+        );
+        assert!(!runs.is_open());
+
+        // Re-open and verify `npm run build && node --test dist/src/voxlockClient.test.js && npm test` clears it
+        runs.observe(
+            &call("node --import tsx --test src/emaTts.test.ts src/managerClosing.test.ts src/voxlockClient.test.ts"),
+            false,
+            &mods,
+        );
+        assert!(runs.is_open());
+        assert_eq!(
+            runs.observe(
+                &call("npm run build && node --test dist/src/voxlockClient.test.js && npm test"),
+                true,
+                &mods
+            ),
+            VerificationLevel::Test
+        );
+        assert!(!runs.is_open());
+
+        // Boundary: if full `npm test` fails, a narrower single-file `node --import tsx --test src/emaTts.test.ts`
+        // must NOT clear `npm test`.
+        runs.observe(&call("npm test"), false, &mods);
+        assert!(runs.is_open());
+        assert_eq!(
+            runs.observe(
+                &call("node --import tsx --test src/emaTts.test.ts"),
+                true,
+                &mods
+            ),
+            VerificationLevel::Compile
+        );
+        assert!(runs.is_open());
+        assert_eq!(
+            runs.observe(&call("npm test"), true, &mods),
             VerificationLevel::Test
         );
         assert!(!runs.is_open());
