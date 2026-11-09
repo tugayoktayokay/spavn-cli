@@ -204,23 +204,67 @@ impl VerificationLevel {
     }
 }
 
-/// Splits a shell command line on compound operators (`&&`, `||`, `;`, `|`).
+/// Splits a shell command line on top-level compound operators (`&&`, `||`, `;`, `|`),
+/// respecting single/double quotes and stopping before any heredoc body (`<<EOF`).
 fn split_compound_command(cmd: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let bytes = cmd.as_bytes();
     let len = bytes.len();
     let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
     while i < len {
-        if bytes[i] == b';' {
+        let b = bytes[i];
+        if in_single {
+            if b == b'\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if b == b'\\' && i + 1 < len {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\\' && i + 1 < len {
+            i += 2;
+            continue;
+        }
+        if b == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_double = true;
+            i += 1;
+            continue;
+        }
+        // Heredoc (`<<EOF`, `<<'EOF'`, `<<-EOF`, excluding `<<<` here-string):
+        // Everything after the current line's newline is heredoc payload, not shell subcommands.
+        if b == b'<' && i + 1 < len && bytes[i + 1] == b'<' && (i + 2 >= len || bytes[i + 2] != b'<')
+        {
+            let line_end = cmd[i..].find('\n').map(|off| i + off).unwrap_or(len);
+            parts.push(&cmd[start..line_end]);
+            return parts;
+        }
+        if b == b';' || b == b'\n' {
             parts.push(&cmd[start..i]);
             start = i + 1;
             i += 1;
-        } else if matches!(bytes[i], b'&' | b'|') && i + 1 < len && bytes[i + 1] == bytes[i] {
+        } else if matches!(b, b'&' | b'|') && i + 1 < len && bytes[i + 1] == b {
             parts.push(&cmd[start..i]);
             start = i + 2;
             i += 2;
-        } else if bytes[i] == b'|' {
+        } else if b == b'|' {
             parts.push(&cmd[start..i]);
             start = i + 1;
             i += 1;
@@ -234,22 +278,136 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
     parts
 }
 
-/// Strips leading environment variable assignments (`KEY=val`) and `sudo`/`env` wrappers.
+/// Strips quoted string literals (`'...'` and `"..."`) so arguments like
+/// `git commit -m "fix cargo test"` do not false-match runner keywords.
+fn strip_quoted_literals(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < len {
+        let b = bytes[i];
+        if in_single {
+            if b == b'\'' {
+                in_single = false;
+                out.push(' ');
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if b == b'\\' && i + 1 < len {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_double = false;
+                out.push(' ');
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\\' && i + 1 < len {
+            i += 2;
+            continue;
+        }
+        if b == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_double = true;
+            i += 1;
+            continue;
+        }
+        out.push(b as char);
+        i += 1;
+    }
+    out
+}
+
+fn has_word_token(haystack: &str, token: &str) -> bool {
+    haystack.split_whitespace().any(|w| {
+        w == token
+            || w.strip_prefix("./").unwrap_or(w) == token
+            || w.rsplit('/').next().unwrap_or(w) == token
+    })
+}
+
+/// Strips leading environment variable assignments (`KEY=val`) and execution wrappers
+/// (`sudo`, `env`, `nohup`, `time`, `nice`, `stdbuf`, `timeout <duration>`).
 fn strip_env_vars_and_wrappers(mut s: &str) -> &str {
     loop {
         s = s.trim();
-        if let Some(rest) = s.strip_prefix("sudo ") {
-            s = rest;
+        for prefix in ["sudo ", "env ", "nohup ", "time "] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                s = rest.trim_start();
+                continue;
+            }
+        }
+        if let Some(rest) = s.strip_prefix("nice ") {
+            let mut r = rest.trim_start();
+            if let Some(after_n) = r.strip_prefix("-n ") {
+                if let Some((_, after_val)) = after_n.trim_start().split_once(char::is_whitespace) {
+                    r = after_val;
+                }
+            } else if r.starts_with('-') {
+                if let Some((_, after_flag)) = r.split_once(char::is_whitespace) {
+                    r = after_flag;
+                }
+            }
+            s = r;
             continue;
         }
-        if let Some(rest) = s.strip_prefix("env ") {
-            s = rest;
+        if let Some(rest) = s.strip_prefix("stdbuf ") {
+            let mut r = rest.trim_start();
+            while r.starts_with('-') {
+                if let Some((_, after_flag)) = r.split_once(char::is_whitespace) {
+                    r = after_flag.trim_start();
+                } else {
+                    break;
+                }
+            }
+            s = r;
             continue;
+        }
+        if let Some(rest) = s.strip_prefix("timeout ") {
+            let mut r = rest.trim_start();
+            while r.starts_with('-') {
+                if let Some((flag, after_flag)) = r.split_once(char::is_whitespace) {
+                    r = after_flag.trim_start();
+                    if matches!(flag, "-k" | "-s" | "--kill-after" | "--signal") {
+                        if let Some((_, after_val)) = r.split_once(char::is_whitespace) {
+                            r = after_val.trim_start();
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            // Strip the duration token (e.g., `240`, `240s`, `5m`)
+            if let Some((dur, after_dur)) = r.split_once(char::is_whitespace) {
+                if dur.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    s = after_dur.trim_start();
+                    continue;
+                }
+            }
         }
         if let Some((first_word, rest)) = s.split_once(char::is_whitespace) {
+            if matches!(
+                first_word,
+                "sudo" | "env" | "nohup" | "time"
+            ) {
+                s = rest;
+                continue;
+            }
             if first_word.contains('=')
                 && !first_word.starts_with("./")
                 && !first_word.starts_with('/')
+                && !first_word.starts_with('-')
             {
                 s = rest;
                 continue;
@@ -266,16 +424,63 @@ fn classify_single_subcommand(subcmd: &str, modified_files: &[String]) -> Verifi
     if raw_clean.is_empty() {
         return VerificationLevel::None;
     }
-    let lower = raw_clean.to_ascii_lowercase();
+    let unquoted = strip_quoted_literals(raw_clean);
+    let lower = unquoted.to_ascii_lowercase();
+    let first_word = lower
+        .split_whitespace()
+        .next()
+        .map(|w| w.rsplit('/').next().unwrap_or(w))
+        .unwrap_or("");
+
+    // Non-verification shell/VCS/file utilities never count as Test or Compile even if their
+    // arguments mention test runner names (e.g. `git commit -m "fix cargo test"`).
+    if matches!(
+        first_word,
+        "git"
+            | "echo"
+            | "printf"
+            | "grep"
+            | "rg"
+            | "sed"
+            | "awk"
+            | "cat"
+            | "head"
+            | "tail"
+            | "ls"
+            | "cp"
+            | "mv"
+            | "rm"
+            | "mkdir"
+            | "touch"
+            | "chmod"
+            | "chown"
+            | "install"
+            | "gh"
+            | "brew"
+            | "tar"
+            | "find"
+            | "cd"
+            | "pwd"
+            | "export"
+            | "alias"
+            | "true"
+            | "false"
+    ) {
+        return VerificationLevel::None;
+    }
 
     // 1. Automated test suites (VerificationLevel::Test)
     // Rust test
-    let is_rust_test = lower.contains("cargo test") || lower.contains("cargo nextest");
+    let is_rust_test = lower.contains("cargo test")
+        || lower.contains("cargo nextest")
+        || (first_word == "cargo" && has_word_token(&lower, "test"));
     // Python test
-    let is_py_test = lower.contains("pytest")
+    let is_py_test = has_word_token(&lower, "pytest")
+        || has_word_token(&lower, "py.test")
         || lower.contains("python -m unittest")
         || lower.contains("python3 -m unittest")
-        || lower.contains("py.test");
+        || lower.contains("python -m pytest")
+        || lower.contains("python3 -m pytest");
     // Go test
     let is_go_test = lower.contains("go test");
     // JS/TS test
@@ -290,18 +495,18 @@ fn classify_single_subcommand(subcmd: &str, modified_files: &[String]) -> Verifi
         || lower.contains("yarn test")
         || lower.contains("yarn run test")
         || lower.contains("bun test")
-        || lower.contains("vitest")
-        || lower.contains("jest")
+        || has_word_token(&lower, "vitest")
+        || has_word_token(&lower, "jest")
         || lower.contains("node --test")
         || lower.contains("tsx --test")
         || lower.contains("deno test");
     // Swift / Other tests
     let is_other_test = lower.contains("swift test")
-        || lower.contains("ctest")
+        || has_word_token(&lower, "ctest")
         || lower.contains("mix test")
         || lower.contains("mvn test")
         || lower.contains("gradle test")
-        || lower.contains("rspec");
+        || has_word_token(&lower, "rspec");
 
     if is_rust_test || is_py_test || is_go_test || is_js_test || is_other_test {
         return VerificationLevel::Test;
@@ -431,6 +636,17 @@ fn shell_command_text(raw_args: &str) -> (String, Option<serde_json::Value>) {
 /// elevates the verification level to [`VerificationLevel::Runtime`].
 pub fn classify_shell_tool_call(raw_args: &str, modified_files: &[String]) -> VerificationLevel {
     let (cmd, parsed) = shell_command_text(raw_args);
+    if let Some(ref v) = parsed {
+        if let Some(lang) = v.get("lang").and_then(|x| x.as_str()) {
+            if matches!(
+                lang.trim().to_ascii_lowercase().as_str(),
+                "py" | "python" | "js" | "node" | "ts"
+            ) && !cmd.trim().is_empty()
+            {
+                return VerificationLevel::Runtime;
+            }
+        }
+    }
     let mut level = classify_verification_command(&cmd, modified_files);
     if let Some(v) = parsed {
         let is_smoke_flag = v.get("smoke").and_then(|x| x.as_bool()).unwrap_or(false)
@@ -447,14 +663,16 @@ pub fn classify_shell_tool_call(raw_args: &str, modified_files: &[String]) -> Ve
     level
 }
 
-/// Test commands inside one shell call, as whitespace tokens with redirections dropped
-/// (`cargo test foo 2>&1` → `["cargo", "test", "foo"]`).
+/// Test commands inside one shell call, as whitespace tokens with wrappers, redirections,
+/// and non-scope display/profile flags dropped (`nohup timeout 240 cargo test --release 2>&1` → `["cargo", "test"]`).
 fn test_invocations(cmd: &str, modified_files: &[String]) -> Vec<Vec<String>> {
     split_compound_command(cmd)
         .into_iter()
         .filter(|part| classify_single_subcommand(part, modified_files) == VerificationLevel::Test)
         .map(|part| {
-            part.split_whitespace()
+            let cleaned = strip_env_vars_and_wrappers(part);
+            cleaned
+                .split_whitespace()
                 .filter(|t| {
                     !t.contains('>')
                         && !t.contains('<')
@@ -469,6 +687,15 @@ fn test_invocations(cmd: &str, modified_files: &[String]) -> Vec<Vec<String>> {
                                 | "-q"
                                 | "--nocapture"
                                 | "--show-output"
+                                | "--release"
+                                | "-r"
+                                | "--locked"
+                                | "--offline"
+                                | "--frozen"
+                                | "--no-fail-fast"
+                                | "--color=always"
+                                | "--color=never"
+                                | "--color=auto"
                         )
                 })
                 .map(str::to_string)
@@ -476,6 +703,46 @@ fn test_invocations(cmd: &str, modified_files: &[String]) -> Vec<Vec<String>> {
         })
         .filter(|tokens| !tokens.is_empty())
         .collect()
+}
+
+/// Detects whether a compound command (`cargo test && git push ...`) that exited non-zero
+/// actually passed its test subcommand(s) and only failed in a subsequent non-test subcommand.
+fn compound_test_subcommand_passed(
+    cmd: &str,
+    tool_output: &str,
+    modified_files: &[String],
+) -> bool {
+    if tool_output.is_empty()
+        || tool_output.contains("[SPAVN Timeout:")
+        || crate::tools::has_compiler_or_test_error_signature(tool_output)
+    {
+        return false;
+    }
+    let parts = split_compound_command(cmd);
+    if parts.len() < 2 {
+        return false;
+    }
+    // Check that there is at least one non-test subcommand after a test subcommand
+    let mut saw_test = false;
+    let mut saw_non_test_after_test = false;
+    for part in parts {
+        let lvl = classify_single_subcommand(part, modified_files);
+        if lvl == VerificationLevel::Test {
+            saw_test = true;
+        } else if saw_test && !part.trim().is_empty() {
+            saw_non_test_after_test = true;
+        }
+    }
+    if !saw_non_test_after_test {
+        return false;
+    }
+    // Verify the output contains an explicit test suite pass marker and zero failures
+    let has_rust_pass = tool_output.contains("test result: ok.") && !tool_output.contains("FAILED");
+    let has_pytest_or_jest_pass = (tool_output.contains(" passed") || tool_output.contains("PASS "))
+        && !tool_output.contains(" failed")
+        && !tool_output.contains("FAIL ");
+    let has_go_pass = tool_output.contains("\nok  \t") && !tool_output.contains("--- FAIL:");
+    has_rust_pass || has_pytest_or_jest_pass || has_go_pass
 }
 
 /// Test runs that failed during a turn and have not been re-run green since.
@@ -498,9 +765,43 @@ impl FailedTestRuns {
         succeeded: bool,
         modified_files: &[String],
     ) -> VerificationLevel {
-        let (cmd, _) = shell_command_text(raw_args);
+        self.observe_with_output(raw_args, succeeded, "", modified_files)
+    }
+
+    /// Feeds one finished shell call along with its captured output and returns the
+    /// verification level it earns. Inspects `tool_output` so that compound commands like
+    /// `cargo test && git push` where `cargo test` passed (`test result: ok.`) and `git push`
+    /// failed do not falsely poison `FailedTestRuns`.
+    pub fn observe_with_output(
+        &mut self,
+        raw_args: &str,
+        succeeded: bool,
+        tool_output: &str,
+        modified_files: &[String],
+    ) -> VerificationLevel {
+        let (cmd, parsed) = shell_command_text(raw_args);
+        if let Some(ref v) = parsed {
+            if let Some(lang) = v.get("lang").and_then(|x| x.as_str()) {
+                if matches!(
+                    lang.trim().to_ascii_lowercase().as_str(),
+                    "py" | "python" | "js" | "node" | "ts"
+                ) {
+                    if !succeeded {
+                        return VerificationLevel::None;
+                    }
+                    let level = VerificationLevel::Runtime;
+                    return if self.is_open() {
+                        level.min(VerificationLevel::Compile)
+                    } else {
+                        level
+                    };
+                }
+            }
+        }
         let runs = test_invocations(&cmd, modified_files);
-        if !succeeded {
+        let tests_effectively_succeeded =
+            succeeded || (!runs.is_empty() && compound_test_subcommand_passed(&cmd, tool_output, modified_files));
+        if !tests_effectively_succeeded {
             for run in runs {
                 if !self.open.contains(&run) {
                     self.open.push(run);
@@ -1296,6 +1597,61 @@ let x = 1;
                 &call("cargo test --manifest-path Cargo.toml --lib"),
                 true,
                 &mods
+            ),
+            VerificationLevel::Test
+        );
+        assert!(!runs.is_open());
+
+        // 1. Wrappers (`nohup`, `timeout 240`, `--release`) normalize so a plain `cargo test` clears them.
+        runs.observe(
+            &call("nohup timeout 240 cargo test --release"),
+            false,
+            &mods,
+        );
+        assert!(runs.is_open());
+        assert_eq!(runs.describe(), "cargo test");
+        assert_eq!(
+            runs.observe(&call("cargo test"), true, &mods),
+            VerificationLevel::Test
+        );
+        assert!(!runs.is_open());
+
+        // 2. Quoted strings, heredocs, git commit messages, and inline Python/Rust snippets
+        // containing `#[cfg(test)]` or `cargo test` never poison FailedTestRuns.
+        runs.observe(
+            &call("python3 -c 's = \"} } #[cfg(test)] mod en { cargo test }\"; raise SystemExit(1)'"),
+            false,
+            &mods,
+        );
+        assert!(!runs.is_open());
+        runs.observe(
+            &call("git commit -m \"fix cargo test && pytest\" && git push origin main --tags"),
+            false,
+            &mods,
+        );
+        assert!(!runs.is_open());
+        runs.observe(
+            &serde_json::json!({
+                "lang": "py",
+                "command": "# } } #[cfg(test)] mod en\n# cargo test\nraise RuntimeError('boom')"
+            })
+            .to_string(),
+            false,
+            &mods,
+        );
+        assert!(!runs.is_open());
+
+        // 3. Compound command where `cargo test` passes (`test result: ok.`) and a subsequent
+        // non-test command (`git push`) fails clears open `cargo test` and earns VerificationLevel::Test.
+        runs.observe(&call("cargo test --quiet"), false, &mods);
+        assert!(runs.is_open());
+        let compound_out = "running 342 tests\ntest result: ok. 339 passed; 0 failed; 3 ignored\n! [rejected] v0.1.0 -> v0.1.0 (already exists)\n(exit code 1)";
+        assert_eq!(
+            runs.observe_with_output(
+                &call("cargo test --quiet && cargo build --release && git push origin main --tags"),
+                false,
+                compound_out,
+                &mods,
             ),
             VerificationLevel::Test
         );

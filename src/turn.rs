@@ -1175,9 +1175,10 @@ pub(crate) fn run_agent_turn(
                     let succeeded = !tool_output.contains("(exit code ")
                         && !tool_output.contains("<auto_error_context>")
                         && !tools::has_compiler_or_test_error_signature(&tool_output);
-                    let cmd_level = failed_tests.observe(
+                    let cmd_level = failed_tests.observe_with_output(
                         &tc.function.arguments,
                         succeeded,
+                        &tool_output,
                         &modified_files_in_turn,
                     );
                     if cmd_level > highest_verification_level {
