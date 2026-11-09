@@ -416,7 +416,7 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
     let timeout_sec = args
         .get("timeout_sec")
         .and_then(|v| v.as_u64())
-        .unwrap_or(45);
+        .unwrap_or(300);
     let background = args
         .get("background")
         .and_then(|v| v.as_bool())

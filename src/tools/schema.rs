@@ -109,7 +109,7 @@ pub fn tool_definitions() -> Value {
                         "lang": { "type": "string", "enum": ["sh", "py", "js"], "description": "Optional runtime (`py` pipes `command` to `python3 -` via stdin with zero quote escaping; `js` pipes to `node -`)" },
                         "host": { "type": "string", "description": "Host alias (default: local)" },
                         "cwd": { "type": "string", "description": "Working directory" },
-                        "timeout_sec": { "type": "integer", "description": "Timeout seconds (default 45)" },
+                        "timeout_sec": { "type": "integer", "description": "Timeout seconds (default 300)" },
                         "background": { "type": "boolean", "description": "Run detached; returns `bg_N` job ID, PID, and log path" },
                         "op": { "type": "string", "enum": ["run", "status", "list", "kill"], "description": "Background job control (`status`, `list`, `kill`); omit for normal execution" },
                         "job_id": { "type": "string", "description": "Target `bg_N` or PID for `status`/`kill`" }
