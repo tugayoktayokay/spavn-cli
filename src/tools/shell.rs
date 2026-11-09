@@ -308,14 +308,35 @@ pub(crate) fn intercept_shell_anti_pattern(cmd: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    let first_seg = segments
+    let raw_first = segments
         .first()
         .copied()
-        .unwrap_or(clean_for_check.trim())
-        .split([';', '&'])
-        .next()
-        .unwrap_or("")
-        .trim();
+        .unwrap_or(clean_for_check.trim());
+    let first_seg = if raw_first.split_whitespace().next() == Some("cd") {
+        let mut s = raw_first.trim().to_string();
+        loop {
+            let toks: Vec<&str> = s.split_whitespace().collect();
+            if toks.first() == Some(&"cd") {
+                if let Some(pos) = s.find("&&") {
+                    s = s[pos + 2..].trim().to_string();
+                    continue;
+                }
+                if let Some(pos) = s.find(';') {
+                    s = s[pos + 1..].trim().to_string();
+                    continue;
+                }
+            }
+            break;
+        }
+        s
+    } else {
+        raw_first
+            .split([';', '&'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let tokens: Vec<&str> = first_seg.split_whitespace().collect();
     let &bin = tokens.first()?;
     let only_pager_pipe = segments.len() == 1
@@ -350,16 +371,15 @@ pub(crate) fn intercept_shell_anti_pattern(cmd: &str) -> Option<String> {
             }
         }
         "cat" | "head" | "tail" | "sed" => {
-            let has_shell_ops = trimmed.contains('|')
-                || trimmed.contains('>')
-                || trimmed.contains('<')
-                || trimmed.contains("&&")
-                || trimmed.contains("||")
-                || trimmed.contains(';')
-                || trimmed.contains("$(");
+            let has_complex_ops = first_seg.contains('>')
+                || first_seg.contains('<')
+                || first_seg.contains("&&")
+                || first_seg.contains("||")
+                || first_seg.contains(';')
+                || first_seg.contains("$(");
             let is_sed_in_place =
                 bin == "sed" && tokens.iter().skip(1).any(|t| t.starts_with("-i"));
-            if !has_shell_ops && !is_sed_in_place && tokens.len() >= 2 {
+            if !has_complex_ops && !is_sed_in_place && tokens.len() >= 2 {
                 return Some(format!(
                     "[SPAVN Bash Interceptor]: Blocked standalone `{}` in `bash`. Use the built-in `read` tool with line ranges (`read({{\"path\": \"file:start-end\"}})`) instead of shelling out.",
                     bin
@@ -410,10 +430,8 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
     if let Err(blocked) = check_bash_gate(ctx, command, &host, cwd) {
         return blocked;
     }
-    if host == "local" || host.is_empty() {
-        if let Some(intercept_msg) = intercept_shell_anti_pattern(command) {
-            return intercept_msg;
-        }
+    if let Some(intercept_msg) = intercept_shell_anti_pattern(command) {
+        return intercept_msg;
     }
 
     if !ctx.last_cwd.is_dir() {

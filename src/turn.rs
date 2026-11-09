@@ -140,7 +140,7 @@ pub(crate) fn compact_messages_for_model(
                     .content
                     .as_deref()
                     .unwrap_or("")
-                    .starts_with("[SPAVN VERIFICATION GATE]")
+                    .starts_with("[SPAVN ")
         })
         .unwrap_or_else(|| {
             messages
@@ -416,7 +416,6 @@ pub(crate) fn run_agent_turn(
     let mut highest_verification_level = VerificationLevel::None;
     let mut failed_tests = FailedTestRuns::default();
     let mut claim_gate_rounds = 0usize;
-    let mut compiler_verified_in_edit = false;
     let mut verification_nudged = false;
     let mut modified_files_in_turn: Vec<String> = Vec::new();
     let mut auto_verify_rounds = 0usize;
@@ -522,13 +521,13 @@ pub(crate) fn run_agent_turn(
                     continue;
                 }
                 if let Some(c) = &m.content {
-                    if c.len() > 1200
+                    if c.len() > 3200
                         && !c.contains("[SPAVN Shaken")
                         && !c.contains("...[Compacted")
                     {
                         let est_tok = c.len() / 4 + 1;
-                        let head = safe_utf8_prefix(c, 240);
-                        let tail = safe_utf8_suffix(c, 140);
+                        let head = safe_utf8_prefix(c, 900);
+                        let tail = safe_utf8_suffix(c, 500);
                         let spill_note = spavn::spill::spill_output("shaken-turn", c)
                             .map(|p| format!(" — recover: {}", p.display()))
                             .unwrap_or_default();
@@ -1100,12 +1099,6 @@ pub(crate) fn run_agent_turn(
                         turn_had_mutations = true;
                         highest_verification_level = VerificationLevel::None;
                         claim_gate_rounds = 0;
-                        compiler_verified_in_edit = tool_output
-                            .contains("[Compiler Check: cargo check OK]")
-                            || tool_output.contains("[Compiler Check: tsc OK]");
-                        if compiler_verified_in_edit {
-                            highest_verification_level = VerificationLevel::Compile;
-                        }
                         if let Ok(v) =
                             serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                         {
@@ -1263,13 +1256,13 @@ pub(crate) fn run_agent_turn(
             if loop_guard_stopped {
                 break;
             }
-            let inv_budget = if step_endpoint.is_local() { 6 } else { 10 };
+            let inv_budget = if step_endpoint.is_local() { 10 } else { 14 };
             if consecutive_investigation_steps >= inv_budget && !focus_gate_nudged {
                 focus_gate_nudged = true;
                 if let Some(last_tool_msg) = messages.last_mut() {
                     if last_tool_msg.role == "tool" {
                         let nudge_note = format!(
-                            "\n\n[SPAVN FOCUS GATE ({} consecutive read/search steps without an edit)]: Stop broad exploration (do NOT read `node_modules`, compiled bundles, or unrelated repositories). Synthesize your root-cause hypothesis from the evidence already gathered and either apply the surgical edit now or present your findings to the user.",
+                            "\n\n[SPAVN FOCUS GATE ({} consecutive read/search steps without an edit)]: Avoid redundant exploration (do NOT read `node_modules`, compiled bundles, or unrelated repositories). If you have enough evidence, apply the surgical edit or present your verified findings to the user.",
                             consecutive_investigation_steps
                         );
                         if let Some(c) = &mut last_tool_msg.content {
@@ -1426,14 +1419,9 @@ pub(crate) fn run_agent_turn(
                 &ctx.policy.cwd
             };
             let cwd_str = eff_cwd.to_string_lossy();
-            let gate_res = if compiler_verified_in_edit {
-                tools::check_unfinished_placeholders(&modified_files_in_turn)
-            } else {
-                tools::run_project_verification_gate(&cwd_str, &modified_files_in_turn)
-            };
+            let gate_res = tools::run_project_verification_gate(&cwd_str, &modified_files_in_turn);
             if let Some(gate_err) = gate_res {
                 auto_verify_rounds += 1;
-                compiler_verified_in_edit = false;
                 if last_gate_err.as_deref() == Some(gate_err.as_str()) {
                     // Byte-identical diagnostic: the last round produced no relevant change, so
                     // another nudge would be a wasted API turn with the same outcome.
@@ -1452,12 +1440,21 @@ pub(crate) fn run_agent_turn(
                     messages.push(gate_msg);
                     continue;
                 }
-            } else if (compiler_verified_in_edit
-                || ctx.policy.cwd.join("Cargo.toml").is_file()
-                || ctx.policy.cwd.join("tsconfig.json").is_file())
-                && highest_verification_level < VerificationLevel::Compile
-            {
-                highest_verification_level = VerificationLevel::Compile;
+            } else if highest_verification_level < VerificationLevel::Compile {
+                let applicable = tools::find_manifest_dir_for_gate(eff_cwd, &modified_files_in_turn, "Cargo.toml").is_some()
+                    || tools::find_manifest_dir_for_gate(eff_cwd, &modified_files_in_turn, "tsconfig.json").is_some()
+                    || tools::find_manifest_dir_for_gate(eff_cwd, &modified_files_in_turn, "go.work").is_some()
+                    || tools::find_manifest_dir_for_gate(eff_cwd, &modified_files_in_turn, "go.mod").is_some()
+                    || modified_files_in_turn.iter().any(|f| {
+                        std::path::Path::new(f)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| e.eq_ignore_ascii_case("py"))
+                            .unwrap_or(false)
+                    });
+                if applicable {
+                    highest_verification_level = VerificationLevel::Compile;
+                }
             }
         }
 

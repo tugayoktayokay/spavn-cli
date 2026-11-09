@@ -676,12 +676,35 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
     };
     let explicit_host = get_str_alias(args, &["host", "target"]);
 
+    let file_glob = get_str_alias(args, &["glob", "file_pattern", "include"]);
+    let case_sensitive = args
+        .get("case_sensitive")
+        .or_else(|| args.get("case"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let context_lines = args
+        .get("context")
+        .or_else(|| args.get("context_lines"))
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).min(8))
+        .unwrap_or(0);
+    let mut rg_flags = String::new();
+    if !case_sensitive {
+        rg_flags.push_str(" -i");
+    }
+    if context_lines > 0 {
+        rg_flags.push_str(&format!(" -C {}", context_lines));
+    }
+    if !file_glob.is_empty() {
+        rg_flags.push_str(&format!(" -g {}", shell_quote_remote_path(file_glob)));
+    }
+
     if let Some((ssh_host, remote_path)) = split_remote_prefix(raw_path) {
         let q_pat = shell_quote_remote_path(pattern);
         let q_path = shell_quote_remote_path(remote_path);
         let remote_cmd = format!(
-            "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; if command -v rg >/dev/null 2>&1; then rg -n --max-count 10 -- {} {}; else grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=target --exclude-dir=dist -- {} {} | head -n 80; fi",
-            q_pat, q_path, q_pat, q_path
+            "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; if command -v rg >/dev/null 2>&1; then rg -n --max-count 10{} -- {} {}; else grep -rn{} --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=target --exclude-dir=dist -- {} {} | head -n 80; fi",
+            rg_flags, q_pat, q_path, if case_sensitive { "" } else { "i" }, q_pat, q_path
         );
         let out = Command::new("ssh")
             .args(["-o", "ConnectTimeout=6", &ssh_host, &remote_cmd])
@@ -712,8 +735,8 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
         let q_pat = shell_quote_remote_path(pattern);
         let q_path = shell_quote_remote_path(raw_path);
         let remote_cmd = format!(
-            "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; if command -v rg >/dev/null 2>&1; then rg -n --max-count 10 -- {} {}; else grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=target --exclude-dir=dist -- {} {} | head -n 80; fi",
-            q_pat, q_path, q_pat, q_path
+            "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; if command -v rg >/dev/null 2>&1; then rg -n --max-count 10{} -- {} {}; else grep -rn{} --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=target --exclude-dir=dist -- {} {} | head -n 80; fi",
+            rg_flags, q_pat, q_path, if case_sensitive { "" } else { "i" }, q_pat, q_path
         );
         let out = Command::new("ssh")
             .args(["-o", "ConnectTimeout=6", &ssh_host, &remote_cmd])
@@ -747,18 +770,6 @@ pub(crate) fn exec_search(ctx: &mut ToolContext, args: &Value) -> String {
         .first()
         .cloned()
         .unwrap_or_else(|| ctx.resolve_local_path("."));
-    let file_glob = get_str_alias(args, &["glob", "file_pattern", "include"]);
-    let case_sensitive = args
-        .get("case_sensitive")
-        .or_else(|| args.get("case"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let context_lines = args
-        .get("context")
-        .or_else(|| args.get("context_lines"))
-        .and_then(|v| v.as_u64())
-        .map(|v| (v as usize).min(8))
-        .unwrap_or(0);
     let mut cmd = Command::new(rg_binary());
     cmd.args([
         "-n",
@@ -888,10 +899,41 @@ pub(crate) fn exec_glob(ctx: &mut ToolContext, args: &Value) -> String {
         ctx.default_host.as_str()
     };
     if target_host != "local" && !target_host.is_empty() {
-        return format!(
-            "glob: remote host '{}' configured but path has no '<host>:' prefix",
-            target_host
+        if let Err(blocked) = validate_host_arg(target_host) {
+            return blocked;
+        }
+        let ssh_host = resolve_ssh_target(target_host);
+        let q_pat = shell_quote_remote_path(pattern);
+        let q_path = shell_quote_remote_path(raw_path);
+        let remote_cmd = format!(
+            "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; \
+             if command -v rg >/dev/null 2>&1; then \
+                 rg --files --color never {} -g {} -- {} | head -n {}; \
+             else \
+                 find {} -type f -name {} | head -n {}; \
+             fi",
+            if hidden { "--hidden" } else { "" },
+            q_pat,
+            q_path,
+            limit,
+            q_path,
+            q_pat,
+            limit
         );
+        let out = Command::new("ssh")
+            .args(["-o", "ConnectTimeout=6", &ssh_host, &remote_cmd])
+            .output();
+        return match out {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout).to_string();
+                if s.trim().is_empty() {
+                    format!("(no files match `{}` in {}:{})", pattern, ssh_host, raw_path)
+                } else {
+                    s
+                }
+            }
+            Err(e) => format!("Remote glob error: {}", e),
+        };
     }
 
     if let Err(blocked) = ctx.enforce_path(raw_path, false, "glob") {

@@ -549,9 +549,6 @@ impl ModelEndpoint {
     /// trimming and cache hints would then treat a remote host as a local engine. The host
     /// is parsed out and compared exactly instead.
     pub fn is_local(&self) -> bool {
-        if self.is_local_flag {
-            return true;
-        }
         if self.has_quota_pool {
             return false;
         }
@@ -573,6 +570,14 @@ impl ModelEndpoint {
                 return false;
             }
         }
+        if self.is_local_flag {
+            return true;
+        }
+        // When resolved from a configured provider (`key` is non-empty), respect its
+        // explicit `is_local: false` setting in `config.json` even if it runs a local proxy.
+        if !self.key.is_empty() {
+            return false;
+        }
         let host = url_host(&self.base_url);
         host == "localhost"
             || host == "::1"
@@ -590,11 +595,15 @@ impl ModelEndpoint {
         if self.is_local() {
             return true;
         }
+        let cw = self.context_window_tokens();
+        if cw >= 500_000 {
+            return false;
+        }
         let key = self.model.to_lowercase();
-        key.contains("flash")
-            || key.contains("mini")
+        key.contains("mini")
             || key.contains("haiku")
             || key.contains("small")
+            || (key.contains("flash") && cw < 200_000)
     }
 
     /// True for the cheap/free tiers where long round-trips (LLM context compaction, rich
@@ -882,6 +891,28 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
                     has_quota_pool: false,
                     configured_context_window: m.context_window.or(group.context_window),
                 };
+            }
+        }
+    }
+    if let Some((_, rhs)) = clean.split_once(':') {
+        for group in &cfg.providers {
+            let group_has_pool =
+                !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
+            for m in &group.models {
+                if m.key.eq_ignore_ascii_case(rhs) || m.model_id.eq_ignore_ascii_case(rhs) {
+                    let api_key =
+                        resolve_api_key(&group.api_key_env).unwrap_or_else(|| "local".to_string());
+                    return ModelEndpoint {
+                        key: m.key.clone(),
+                        model: m.model_id.clone(),
+                        base_url: group.base_url.clone(),
+                        api_key,
+                        label: m.label.clone(),
+                        is_local_flag: group.is_local,
+                        has_quota_pool: group_has_pool,
+                        configured_context_window: m.context_window.or(group.context_window),
+                    };
+                }
             }
         }
     }

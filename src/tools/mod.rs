@@ -14,7 +14,7 @@ pub mod web_search;
 pub(crate) use edit::*;
 pub use edit::{
     build_live_project_signatures, check_unfinished_placeholders,
-    has_compiler_or_test_error_signature, is_verification_shell_command,
+    find_manifest_dir_for_gate, has_compiler_or_test_error_signature, is_verification_shell_command,
     run_project_verification_gate,
 };
 pub(crate) use mcp_subagent::*;
@@ -169,11 +169,23 @@ impl ToolContext {
     pub fn resolve_target_arg(&self, raw_path: &str) -> String {
         if split_remote_prefix(raw_path).is_some() {
             raw_path.to_string()
+        } else if self.default_host != "local" && !self.default_host.is_empty() {
+            format!("{}:{}", self.default_host, raw_path)
         } else {
             self.resolve_local_path(raw_path)
                 .to_string_lossy()
                 .to_string()
         }
+    }
+
+    pub fn apply_default_host(&self, raw_path: &str) -> String {
+        if split_remote_prefix(raw_path).is_some() {
+            return raw_path.to_string();
+        }
+        if self.default_host == "local" || self.default_host.is_empty() {
+            return raw_path.to_string();
+        }
+        format!("{}:{}", self.default_host, raw_path)
     }
 
     fn enforce_path(&mut self, raw_path: &str, write: bool, verb: &str) -> Result<(), String> {

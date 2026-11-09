@@ -38,14 +38,14 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn today_ymd() -> String {
+pub fn today_ymd() -> String {
     if let Ok(out) = Command::new("/bin/date").arg("+%Y-%m-%d").output() {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !s.is_empty() {
             return s;
         }
     }
-    "2026-11-03".to_string()
+    "2026-11-09".to_string()
 }
 
 fn now_iso_local() -> String {
@@ -162,7 +162,7 @@ impl AgentRoleKey {
     pub fn preamble(&self) -> &'static str {
         match self {
             AgentRoleKey::Auto | AgentRoleKey::Coder => {
-                "[SPAVN ROLE: CODER] Implement the requested change cleanly with minimal blast radius, adhering to existing code style. Do not break unrelated behavior."
+                "[SPAVN ROLE: CODER] For code changes, implement cleanly with minimal blast radius adhering to existing code style. For research, system inspection, or questions, verify live facts using tools (web, bash, read, search) before answering."
             }
             AgentRoleKey::Reviewer => {
                 "[SPAVN ROLE: REVIEWER] Find concrete bugs, edge cases, race conditions, and regressions. Cite exact file:line locations and provide surgical fixes. Zero fluff."

@@ -354,7 +354,7 @@ pub fn check_unfinished_placeholders(modified_files: &[String]) -> Option<String
     None
 }
 
-pub(crate) fn find_manifest_dir_for_gate(
+pub fn find_manifest_dir_for_gate(
     cwd_root: &Path,
     modified_files: &[String],
     manifest_name: &str,
@@ -1167,7 +1167,7 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
             let mut applied_outputs: Vec<String> = Vec::new();
             let mut touched_paths: Vec<String> = Vec::new();
             for (idx, item) in files_arr.iter().enumerate() {
-                let f_path = get_str_alias(item, &["path", "file_path", "file", "filepath"]);
+                let f_path = ctx.apply_default_host(get_str_alias(item, &["path", "file_path", "file", "filepath"]));
                 if f_path.is_empty() {
                     for (p, orig) in snapshots.iter().rev() {
                         let _ = write_target_file(p, orig);
@@ -1177,13 +1177,13 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                         idx + 1
                     );
                 }
-                if let Err(blocked) = ctx.enforce_path(f_path, true, "edit") {
+                if let Err(blocked) = ctx.enforce_path(&f_path, true, "edit") {
                     for (p, orig) in snapshots.iter().rev() {
                         let _ = write_target_file(p, orig);
                     }
                     return blocked;
                 }
-                let resolved_f = ctx.resolve_target_arg(f_path);
+                let resolved_f = ctx.resolve_target_arg(&f_path);
                 if !snapshots.iter().any(|(p, _)| p == &resolved_f) {
                     if let Ok(orig) = read_target_file(&resolved_f) {
                         snapshots.push((resolved_f.clone(), orig));
@@ -1206,7 +1206,7 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                         out
                     );
                 }
-                if !touched_paths.iter().any(|p| p == f_path) {
+                if !touched_paths.iter().any(|p| p == &f_path) {
                     touched_paths.push(f_path.to_string());
                 }
                 applied_outputs.push(format!("- {}", out));
@@ -1219,8 +1219,8 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
             );
         }
     }
-    let raw_input_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
-    let (raw_path, inline_range) = split_inline_line_range(raw_input_path);
+    let raw_input_path = ctx.apply_default_host(get_str_alias(args, &["path", "file_path", "file", "filepath"]));
+    let (raw_path, inline_range) = split_inline_line_range(&raw_input_path);
     if let Err(blocked) = ctx.enforce_path(raw_path, true, "edit") {
         return blocked;
     }
@@ -2125,8 +2125,8 @@ fn find_closest_mismatch_window(
 }
 
 pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
-    let raw_path = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
-    if let Err(blocked) = ctx.enforce_path(raw_path, true, "write") {
+    let raw_path = ctx.apply_default_host(get_str_alias(args, &["path", "file_path", "file", "filepath"]));
+    if let Err(blocked) = ctx.enforce_path(&raw_path, true, "write") {
         return blocked;
     }
     let content = get_str_alias(args, &["content", "text", "body", "code"]);
@@ -2137,7 +2137,7 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
             "🛡️  [SPAVN Secret Guard]: {0} içinde hassas anahtar ({1}) tespit edildi — onaylıyor musunuz?",
             "🛡️  [SPAVN Secret Guard]: Sensitive key ({1}) detected in {0} — approve?"
         )
-        .replace("{0}", raw_path)
+        .replace("{0}", &raw_path)
         .replace("{1}", &leaked_secrets.join(", "));
         if !prompt_user_approval(ctx, &secret_msg, content) {
             return format!(
@@ -2154,14 +2154,14 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
         return "User rejected write in SAFE mode.".to_string();
     }
 
-    if ctx.is_external_stale_version(raw_path) {
+    if ctx.is_external_stale_version(&raw_path) {
         return format!(
             "Write error [FS_STALE_VERSION]: {} was modified externally since your last read/edit. Re-read the file before overwriting so external changes are not lost.",
             raw_path
         );
     }
 
-    let resolved_target = ctx.resolve_target_arg(raw_path);
+    let resolved_target = ctx.resolve_target_arg(&raw_path);
     let prev = read_target_file(&resolved_target).ok();
     let prev_lines = prev.as_ref().map(|p| p.lines().count()).unwrap_or(0);
     ctx.undo_stack.push(UndoSnapshot {
@@ -2172,12 +2172,12 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
 
     match write_target_file(&resolved_target, content) {
         Ok(()) => {
-            ctx.record_file_mtime(raw_path);
+            ctx.record_file_mtime(&raw_path);
             crate::spavn_engine::record_audit_action(
                 "file_write",
                 &ctx.current_model,
                 &ctx.default_host,
-                raw_path,
+                &raw_path,
                 content.lines().count(),
                 prev_lines,
                 &ctx.current_prompt,

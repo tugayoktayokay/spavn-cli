@@ -1102,6 +1102,7 @@ mod harness_intelligence_tests {
         assert!(intercept_shell_anti_pattern("ps aux | grep spavn").is_none());
     }
 
+
     #[test]
     fn read_edit_search_resolve_relative_paths_against_last_cwd_and_sqlite_query_stays_intact() {
         let root_a = std::env::temp_dir().join(format!("spavn-cwd-a-{}", std::process::id()));
@@ -1163,7 +1164,7 @@ mod harness_intelligence_tests {
             .collect();
         assert_eq!(
             names,
-            vec!["read", "edit", "write", "bash", "search", "glob"]
+            vec!["read", "edit", "write", "bash", "search", "glob", "memory", "web"]
         );
 
         let with_mem_and_web = tool_definitions_for_turn(

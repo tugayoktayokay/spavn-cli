@@ -114,14 +114,17 @@ pub struct RemoteHostConfig {
     pub ssh_target: String,
     pub badge: String,
     pub desc: String,
-    #[serde(default)]
+    #[serde(default = "default_host_sensitive")]
     pub sensitive: bool,
 }
 
+fn default_host_sensitive() -> bool {
+    true
+}
+
 /// A host is sensitive when commands run on it deserve an explicit approval in
-/// AUTO mode: either the config marks it `sensitive`, or it executes remotely
-/// (`ssh_target != "local"`). Unknown non-local aliases are treated as
-/// sensitive by default; `local` never is.
+/// AUTO mode. Remote hosts default to `sensitive: true` unless explicitly configured
+/// with `"sensitive": false` in `~/.spavn/config.json`; `local` is never sensitive.
 pub fn host_is_sensitive(host: &str) -> bool {
     let cfg = load_user_config();
     host_is_sensitive_in(host, &cfg.hosts)
@@ -132,7 +135,7 @@ pub fn host_is_sensitive_in(host: &str, hosts: &[RemoteHostConfig]) -> bool {
         return false;
     }
     match hosts.iter().find(|h| h.key.eq_ignore_ascii_case(host)) {
-        Some(h) => h.sensitive || h.ssh_target != "local",
+        Some(h) => h.sensitive,
         None => true,
     }
 }
@@ -160,8 +163,15 @@ mod host_tests {
 
     #[test]
     fn remote_host_is_sensitive_by_default() {
-        let hosts = vec![h("prod", "user@1.2.3.4", false)];
-        assert!(host_is_sensitive_in("prod", &hosts));
+        let parsed: RemoteHostConfig = serde_json::from_str(
+            r#"{"key":"prod","ssh_target":"user@1.2.3.4","badge":"","desc":""}"#,
+        )
+        .unwrap();
+        assert!(host_is_sensitive_in("prod", &[parsed]));
+        assert!(!host_is_sensitive_in(
+            "lan-m3",
+            &[h("lan-m3", "m3.local", false)]
+        ));
     }
 
     #[test]
@@ -1608,18 +1618,52 @@ fn default_hosts() -> Vec<RemoteHostConfig> {
     }]
 }
 
+/// Returns true only when `(provider_id, base_url)` matches a standard on-device local
+/// inference engine (`ollama`, `lm-studio`, `llama.cpp`, `vllm`, `mlx`, `local`) rather
+/// than a loopback proxy or cloud gateway. Custom local ports are configured via
+/// `"is_local": true` in `~/.spavn/config.json` or `isLocal: true` in `models.yml`.
+pub fn is_likely_local_engine(provider_id: &str, base_url: &str) -> bool {
+    let pid = provider_id.trim().to_ascii_lowercase();
+    let url = base_url.trim().to_ascii_lowercase();
+    if pid.contains("proxy") || pid.contains("cloud") || pid.contains("gateway") {
+        return false;
+    }
+    if pid.contains("local")
+        || pid.contains("ollama")
+        || pid.contains("lm-studio")
+        || pid.contains("lmstudio")
+        || pid.contains("llama")
+        || pid.contains("vllm")
+        || pid.contains("mlx")
+    {
+        return true;
+    }
+    url.contains(":11434")
+        || url.contains(":1234")
+        || url.contains(":8080")
+        || url.contains(":8000")
+        || url.contains(".local:")
+        || url.ends_with(".local")
+}
+
 /// Parses OMP-compatible `models.yml` files (`~/.spavn/models.yml` and `~/.omp/agent/models.yml`)
 /// so custom providers defined in OMP (`providers.<id>.baseUrl`, `apiKey`, `api`, `models`)
 /// work seamlessly in SPAVN without duplicate manual setup.
 pub fn load_external_models_yml_providers() -> Vec<ProviderGroupConfig> {
+    load_external_models_yml_providers_opts(true)
+}
+
+pub fn load_external_models_yml_providers_opts(include_omp: bool) -> Vec<ProviderGroupConfig> {
     let mut paths = vec![spavn_dir().join("models.yml")];
-    if let Ok(home) = std::env::var("HOME") {
-        paths.push(
-            PathBuf::from(home)
-                .join(".omp")
-                .join("agent")
-                .join("models.yml"),
-        );
+    if include_omp {
+        if let Ok(home) = std::env::var("HOME") {
+            paths.push(
+                PathBuf::from(home)
+                    .join(".omp")
+                    .join("agent")
+                    .join("models.yml"),
+            );
+        }
     }
     let mut out: Vec<ProviderGroupConfig> = Vec::new();
     for path in paths {
@@ -1656,10 +1700,10 @@ pub fn load_external_models_yml_providers() -> Vec<ProviderGroupConfig> {
                         });
                     }
                 }
-                m_id.clear();
-                m_name.clear();
-                *m_ctx = None;
             }
+            m_id.clear();
+            m_name.clear();
+            *m_ctx = None;
         };
 
         for line in raw.lines() {
@@ -1720,11 +1764,7 @@ pub fn load_external_models_yml_providers() -> Vec<ProviderGroupConfig> {
                         match key {
                             "baseUrl" => {
                                 p.base_url = val.to_string();
-                                if val.starts_with("http://127.0.0.1")
-                                    || val.starts_with("http://localhost")
-                                {
-                                    p.is_local = true;
-                                }
+                                p.is_local = is_likely_local_engine(&p.id, val);
                             }
                             "apiKey" => {
                                 if !val.is_empty() {
@@ -1747,6 +1787,9 @@ pub fn load_external_models_yml_providers() -> Vec<ProviderGroupConfig> {
                             "api" if val.contains("anthropic") => {
                                 p.protocol = Some("anthropic".to_string());
                             }
+                            "isLocal" | "is_local" => {
+                                p.is_local = matches!(val, "true" | "1" | "yes");
+                            }
                             _ => {}
                         }
                     }
@@ -1754,23 +1797,27 @@ pub fn load_external_models_yml_providers() -> Vec<ProviderGroupConfig> {
             }
             if in_models && indent >= 4 {
                 if let Some(rest) = trimmed.strip_prefix("- ") {
-                    flush_model(
-                        &mut cur_prov,
-                        &mut cur_model_id,
-                        &mut cur_model_name,
-                        &mut cur_model_ctx,
-                    );
-                    if let Some((k, v)) = rest.split_once(':') {
-                        let key = k.trim();
-                        let val = v.trim().trim_matches('"').trim_matches('\'');
-                        match key {
-                            "id" => cur_model_id = val.to_string(),
-                            "name" => cur_model_name = val.to_string(),
-                            "contextWindow" => cur_model_ctx = val.parse::<usize>().ok(),
-                            _ => {}
+                    // Only start a new model item on `- key: value` (e.g. `- id:` or `- contextWindow:`),
+                    // never on scalar list elements like `- text` or `- image` under `input:`.
+                    if indent == 4 || rest.contains(':') {
+                        flush_model(
+                            &mut cur_prov,
+                            &mut cur_model_id,
+                            &mut cur_model_name,
+                            &mut cur_model_ctx,
+                        );
+                        if let Some((k, v)) = rest.split_once(':') {
+                            let key = k.trim();
+                            let val = v.trim().trim_matches('"').trim_matches('\'');
+                            match key {
+                                "id" => cur_model_id = val.to_string(),
+                                "name" => cur_model_name = val.to_string(),
+                                "contextWindow" => cur_model_ctx = val.parse::<usize>().ok(),
+                                _ => {}
+                            }
                         }
                     }
-                } else if indent >= 6 {
+                } else if indent == 6 {
                     if let Some((k, v)) = trimmed.split_once(':') {
                         let key = k.trim();
                         let val = v.trim().trim_matches('"').trim_matches('\'');
@@ -1815,12 +1862,35 @@ pub fn load_user_config() -> SpavnUserConfig {
     } else {
         default_user_config()
     };
-    for ext in load_external_models_yml_providers() {
-        if !cfg
-            .providers
-            .iter()
-            .any(|p| p.id.eq_ignore_ascii_case(&ext.id))
+    for p in &mut cfg.providers {
+        if p.is_local
+            && p.title.contains("(models.yml)")
+            && !is_likely_local_engine(&p.id, &p.base_url)
         {
+            p.is_local = false;
+        }
+    }
+    for ext in load_external_models_yml_providers_opts(cfg.providers.is_empty()) {
+        let ext_url = ext
+            .base_url
+            .trim()
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        if let Some(existing) = cfg.providers.iter_mut().find(|p| {
+            p.id.eq_ignore_ascii_case(&ext.id)
+                || (!ext_url.is_empty()
+                    && p.base_url.trim().trim_end_matches('/').to_ascii_lowercase() == ext_url)
+        }) {
+            for m in ext.models {
+                if !existing
+                    .models
+                    .iter()
+                    .any(|x| x.model_id.eq_ignore_ascii_case(&m.model_id))
+                {
+                    existing.models.push(m);
+                }
+            }
+        } else {
             cfg.providers.push(ext);
         }
     }

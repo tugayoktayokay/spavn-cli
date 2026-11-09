@@ -292,10 +292,10 @@ pub fn tool_definitions_for_phase(phase: crate::spavn_engine::AgentPhase) -> Val
 
 /// Local-LLM-aware tool schema selector.
 ///
-/// Cloud frontier models get the full tool inventory. Local models (`is_local == true`) suffer
-/// prefill latency and schema confusion when handed 11 tools on every turn, so they get the 6
-/// core file/shell tools by default plus domain tools (`memory`, `web`, `skill`, `subagent`, `lsp`)
-/// only when the prompt or active syntax (`@skill`, URLs, MCP/LSP keywords) calls for them.
+/// Cloud frontier models get the full tool inventory. Local models (`is_local == true`) get the
+/// 8 core tools (`read`, `edit`, `write`, `bash`, `search`, `glob`, `web`, `memory`) by default
+/// so they can always search the web and query Second Brain memory without breaking KV-cache
+/// prefix across turns, plus domain tools (`skill`, `subagent`, `lsp`) when requested.
 pub fn tool_definitions_for_turn(
     phase: crate::spavn_engine::AgentPhase,
     is_local: bool,
@@ -306,17 +306,6 @@ pub fn tool_definitions_for_turn(
         return base;
     }
     let lower = user_prompt.to_lowercase();
-    let want_memory = lower.contains("hatırla")
-        || lower.contains("hafıza")
-        || lower.contains("memory")
-        || lower.contains("remember")
-        || lower.contains("recall")
-        || lower.contains("unutma");
-    let want_web = lower.contains("http://")
-        || lower.contains("https://")
-        || lower.contains("web")
-        || lower.contains("fetch")
-        || lower.contains("internette");
     let want_skill = lower.contains('@') || lower.contains("skill") || lower.contains("yetenek");
     let want_subagent = lower.contains("subagent")
         || lower.contains("alt ajan")
@@ -342,9 +331,9 @@ pub fn tool_definitions_for_turn(
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
                 match name {
-                    "read" | "edit" | "write" | "bash" | "search" | "glob" => true,
-                    "memory" => want_memory,
-                    "web" => want_web,
+                    "read" | "edit" | "write" | "bash" | "search" | "glob" | "web" | "memory" => {
+                        true
+                    }
                     "skill" => want_skill,
                     "subagent" => want_subagent,
                     "lsp" => want_lsp,

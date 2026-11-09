@@ -260,7 +260,9 @@ const PROFILE_BUDGET_COMPACT: usize = 500;
 ///
 /// The language is part of the key, not ambient state: `/lang` changes it process-wide, and
 /// without it in the key a switch would keep serving the previous language's prompt.
-static SYSTEM_PROMPT_CACHE: std::sync::Mutex<Option<(String, bool, bool, String)>> =
+type PromptCacheEntry = (String, bool, bool, String, String);
+
+static SYSTEM_PROMPT_CACHE: std::sync::Mutex<Option<PromptCacheEntry>> =
     std::sync::Mutex::new(None);
 
 pub fn cached_system_prompt(cwd: &str, compact: bool) -> String {
@@ -272,13 +274,14 @@ pub(crate) fn cached_system_prompt_for_lang(cwd: &str, compact: bool, en: bool) 
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if let Some((cached_cwd, cached_compact, cached_en, text)) = slot.as_ref() {
-        if cached_cwd == cwd && *cached_compact == compact && *cached_en == en {
+    let today = crate::spavn_engine::today_ymd();
+    if let Some((cached_cwd, cached_compact, cached_en, cached_today, text)) = slot.as_ref() {
+        if cached_cwd == cwd && *cached_compact == compact && *cached_en == en && cached_today == &today {
             return text.clone();
         }
     }
     let built = build_prompt(cwd, compact, en);
-    *slot = Some((cwd.to_string(), compact, en, built.clone()));
+    *slot = Some((cwd.to_string(), compact, en, today, built.clone()));
     built
 }
 
@@ -314,6 +317,7 @@ fn build_prompt(cwd: &str, compact: bool, en: bool) -> String {
     } else {
         "- Language: Turkish, direct, evidence-focused and clear answers; avoid unnecessary preamble/summary sentences."
     };
+    let today = crate::spavn_engine::today_ymd();
 
     let constitution = if compact {
         COMPACT_CONSTITUTION
@@ -325,6 +329,7 @@ fn build_prompt(cwd: &str, compact: bool, en: bool) -> String {
 You are **SPAVN** (`spavn.dev`), an elite autonomous software engineering agent.
 {lang_rule}
 - Presentation: Use clean Markdown (`### Heading`, `- **Key**: detail`), fenced code blocks, and tables for comparisons.
+- Current Date: `{today}`
 - Working Directory: `{cwd}`
 {user_profile_block}{repo_map}
 {constitution}"#

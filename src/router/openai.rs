@@ -381,16 +381,13 @@ where
                 crate::hud::notify_tool_call_streaming_args(&cur_name, &cur_args, cur_args.len());
 
                 if idx > 0 && cur_args.len() >= 12 {
-                    let prefix_len = cur_args.len().min(18);
-                    let cur_prefix = cur_args.get(..prefix_len).unwrap_or("");
+                    // Only treat as a duplicate when the full argument JSON is byte-identical.
+                    // Prefix/path heuristics produced false positives during streaming (partial
+                    // args) and for parallel reads of the same file with different line ranges.
                     let is_dup = tool_calls_map.iter().any(|(&other_idx, other_tc)| {
                         other_idx < idx
                             && other_tc.function.name == cur_name
-                            && (other_tc.function.arguments == cur_args
-                                || (cur_name == "read"
-                                    && prefix_len >= 14
-                                    && !cur_prefix.is_empty()
-                                    && other_tc.function.arguments.starts_with(cur_prefix)))
+                            && other_tc.function.arguments == cur_args
                     });
                     if is_dup {
                         tool_calls_map.remove(&idx);

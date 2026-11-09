@@ -347,6 +347,31 @@ fn main() {
         let raw_text = prompt_parts.join(" ");
         hud::set_window_topic(&raw_text);
         let (mut expanded_text, activated_skills) = expand_inline_skills(&raw_text);
+        let dispatched_role = dispatch_role_from_prompt(&raw_text);
+        ctx.current_model = endpoint.key.clone();
+        ctx.current_prompt = raw_text.clone();
+        if !endpoint.is_local() {
+            let relevant_artifacts = retrieve_relevant_artifacts(&cwd, &raw_text, 2);
+            if !relevant_artifacts.is_empty() {
+                let mut art_block = String::from("<spavn_knowledge_artifacts>\n");
+                for a in &relevant_artifacts {
+                    let mut unique_files = Vec::new();
+                    for f in &a.files {
+                        if !unique_files.contains(f) {
+                            unique_files.push(f.clone());
+                        }
+                    }
+                    art_block.push_str(&format!(
+                        "- [{}] ({}): {}\n",
+                        a.ts,
+                        unique_files.join(", "),
+                        a.summary
+                    ));
+                }
+                art_block.push_str("</spavn_knowledge_artifacts>\n\n");
+                expanded_text = format!("{}{}", art_block, expanded_text);
+            }
+        }
         if !activated_skills.is_empty() && !quiet {
             println!(
                 "{}🧩 {} @{}{}",
@@ -357,12 +382,21 @@ fn main() {
             );
         }
         if let Some(phase_preamble) = ctx.phase.preamble() {
+            if matches!(
+                dispatched_role,
+                AgentRoleKey::Reviewer | AgentRoleKey::Security | AgentRoleKey::Docs
+            ) {
+                expanded_text = format!("{}\n\n{}", dispatched_role.preamble(), expanded_text);
+            }
             expanded_text = format!("{}\n\n{}", phase_preamble, expanded_text);
+        } else {
+            expanded_text = format!("{}\n\n{}", dispatched_role.preamble(), expanded_text);
         }
         let user_msg = ChatMessage::user(expanded_text);
         append_message(&session_file, &user_msg);
         messages.push(user_msg);
 
+        let undo_before = ctx.undo_stack.len();
         if let Err(err) = run_agent_turn(
             &endpoint,
             &mut ctx,
@@ -388,6 +422,13 @@ fn main() {
                 eprintln!("{}✗ {}: {}{}", RED, tr_en("Hata", "Error"), err, RESET);
             }
             std::process::exit(1);
+        }
+        if ctx.undo_stack.len() > undo_before {
+            let touched: Vec<String> = ctx.undo_stack[undo_before..]
+                .iter()
+                .map(|u| u.target.clone())
+                .collect();
+            spavn::spavn_engine::record_knowledge_artifact(&cwd, &touched, &raw_text);
         }
         if json_output {
             let reply = messages
