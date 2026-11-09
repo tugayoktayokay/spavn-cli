@@ -313,6 +313,76 @@ mod timeout_tests {
             "kill output: {kill_out}"
         );
     }
+
+    #[test]
+    fn omp_timeout_policy_clamping_and_auto_bg_math() {
+        let (default_sec, notice) = clamp_tool_timeout("bash", None, None);
+        assert_eq!(default_sec, Some(300));
+        assert!(notice.is_none());
+
+        let (disabled, notice_zero) = clamp_tool_timeout("bash", Some(0), None);
+        assert_eq!(disabled, None);
+        assert!(notice_zero.is_none());
+
+        let (clamped_max, notice_max) = clamp_tool_timeout("bash", Some(9999), None);
+        assert_eq!(clamped_max, Some(3600));
+        assert!(notice_max
+            .as_deref()
+            .unwrap_or("")
+            .contains("Timeout clamped to 3600s"));
+
+        let (clamped_ceil, notice_ceil) = clamp_tool_timeout("bash", Some(600), Some(180));
+        assert_eq!(clamped_ceil, Some(180));
+        assert!(notice_ceil
+            .as_deref()
+            .unwrap_or("")
+            .contains("toolsMaxTimeoutSec ceiling 180s"));
+
+        assert_eq!(compute_auto_background_ms(60_000, Some(300_000)), 60_000);
+        assert_eq!(compute_auto_background_ms(60_000, Some(10_000)), 9_000);
+        assert_eq!(compute_auto_background_ms(60_000, None), 60_000);
+    }
+
+    #[test]
+    fn omp_auto_background_promotes_and_wait_completes() {
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            std::env::temp_dir(),
+            crate::spavn_engine::AgentPhase::Code,
+        );
+        let promo_out = exec_bash(
+            &mut c,
+            &json!({
+                "command": "echo 'phase-1'; sleep 2; echo 'phase-2'",
+                "auto_background_sec": 1,
+                "timeout_sec": 15
+            }),
+        );
+        assert!(
+            promo_out.contains("SPAVN Auto-Background") && promo_out.contains("bg_"),
+            "expected auto-background promotion, got: {promo_out}"
+        );
+        let job_id = promo_out
+            .split('`')
+            .find(|s| s.starts_with("bg_"))
+            .unwrap_or("")
+            .to_string();
+        assert!(!job_id.is_empty(), "missing bg_N job id in: {promo_out}");
+
+        let wait_out = exec_bash(
+            &mut c,
+            &json!({
+                "op": "wait",
+                "job_id": job_id,
+                "timeout_sec": 10
+            }),
+        );
+        assert!(
+            wait_out.contains("exited (0)") && wait_out.contains("phase-2"),
+            "expected completed output from wait, got: {wait_out}"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

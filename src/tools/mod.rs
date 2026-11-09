@@ -22,6 +22,10 @@ pub(crate) use read::*;
 pub use schema::{tool_definitions, tool_definitions_for_phase, tool_definitions_for_turn};
 pub(crate) use search::*;
 pub(crate) use shell::*;
+pub use shell::{
+    handle_bg_job_slash, list_bg_jobs, pop_completed_bg_notifications, BgJobCompletionNotice,
+    BgJobEntry,
+};
 pub(crate) use subagent::*;
 pub(crate) use web::*;
 
@@ -567,6 +571,11 @@ extern "C" {
 }
 
 #[cfg(unix)]
+pub(crate) unsafe fn setsid_and_cloexec() {
+    let _ = setsid();
+}
+
+#[cfg(unix)]
 pub fn reclaim_foreground_tty() {
     unsafe {
         let my_pgrp = getpgrp();
@@ -629,6 +638,89 @@ pub(crate) fn spawn_error_message(cmd: &Command, err: &std::io::Error) -> String
     err.to_string()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolTimeoutPolicy {
+    pub default_sec: u64,
+    pub min_sec: u64,
+    pub max_sec: u64,
+}
+
+/// Centralized OMP-style tool timeout registry (`packages/coding-agent/src/tools/tool-timeouts.ts`).
+pub fn tool_timeout_policy(tool: &str) -> ToolTimeoutPolicy {
+    match tool {
+        "bash" => ToolTimeoutPolicy {
+            default_sec: 300,
+            min_sec: 1,
+            max_sec: 3600,
+        },
+        "web" => ToolTimeoutPolicy {
+            default_sec: 30,
+            min_sec: 1,
+            max_sec: 300,
+        },
+        "lsp" => ToolTimeoutPolicy {
+            default_sec: 60,
+            min_sec: 5,
+            max_sec: 600,
+        },
+        "search" | "glob" => ToolTimeoutPolicy {
+            default_sec: 15,
+            min_sec: 1,
+            max_sec: 60,
+        },
+        _ => ToolTimeoutPolicy {
+            default_sec: 60,
+            min_sec: 1,
+            max_sec: 600,
+        },
+    }
+}
+
+/// Clamps `requested_sec` against `tool_timeout_policy(tool)` and optional `max_ceiling_sec`
+/// (`toolsMaxTimeoutSec` in `~/.spavn/config.json`).
+/// Passing `Some(0)` disables the hard kill timeout (`None`), matching OMP (`timeout: 0`).
+pub fn clamp_tool_timeout(
+    tool: &str,
+    requested_sec: Option<u64>,
+    max_ceiling_sec: Option<u64>,
+) -> (Option<u64>, Option<String>) {
+    if requested_sec == Some(0) {
+        return (None, None);
+    }
+    let policy = tool_timeout_policy(tool);
+    let effective_max = match max_ceiling_sec.filter(|&c| c > 0) {
+        Some(c) => policy.max_sec.min(c).max(policy.min_sec),
+        None => policy.max_sec,
+    };
+    let raw = requested_sec.unwrap_or(policy.default_sec);
+    let clamped = raw.clamp(policy.min_sec, effective_max);
+    let notice = if requested_sec.is_some() && clamped != raw {
+        let ceiling_note = max_ceiling_sec
+            .filter(|&c| c > 0 && c < policy.max_sec)
+            .map(|c| format!("; global toolsMaxTimeoutSec ceiling {}s", c))
+            .unwrap_or_default();
+        Some(format!(
+            "Timeout clamped to {}s (requested {}s; allowed range {}–{}s{})",
+            clamped, raw, policy.min_sec, effective_max, ceiling_note
+        ))
+    } else {
+        None
+    };
+    (Some(clamped), notice)
+}
+
+/// OMP `computeAutoBackgroundMs(thresholdMs, hardTimeoutMs)`:
+/// keeps the foreground wait threshold at least 1s below the hard kill timeout.
+pub fn compute_auto_background_ms(threshold_ms: u64, hard_timeout_ms: Option<u64>) -> u64 {
+    if threshold_ms == 0 {
+        return 0;
+    }
+    match hard_timeout_ms {
+        None => threshold_ms,
+        Some(t) => threshold_ms.min(t.saturating_sub(1000)),
+    }
+}
+
 pub(crate) fn run_command_with_timeout(
     cmd: Command,
     timeout_sec: u64,
@@ -653,7 +745,7 @@ pub(crate) fn run_command_with_timeout_and_stdin(
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
-                let _ = setsid();
+                setsid_and_cloexec();
                 Ok(())
             });
         }

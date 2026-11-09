@@ -378,6 +378,28 @@ pub struct SpavnUserConfig {
     pub quota_full_script: Option<String>,
     pub memory_recall_bin: Option<String>,
     pub memory_remember_bin: Option<String>,
+    /// Global ceiling (seconds) across tool timeouts (`tools.maxTimeout` in OMP).
+    #[serde(
+        default,
+        rename = "toolsMaxTimeoutSec",
+        alias = "tools_max_timeout_sec",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tools_max_timeout_sec: Option<u64>,
+    /// Enable OMP-style two-tier auto-background promotion for long-running foreground bash commands.
+    #[serde(
+        default = "default_true",
+        rename = "bashAutoBackground",
+        alias = "bash_auto_background"
+    )]
+    pub bash_auto_background: bool,
+    /// Foreground wait threshold (seconds) before promoting a running bash command to `bg_N` (default 60s).
+    #[serde(
+        default = "default_bash_auto_bg_sec",
+        rename = "bashAutoBackgroundSec",
+        alias = "bash_auto_background_sec"
+    )]
+    pub bash_auto_background_sec: u64,
     #[serde(default)]
     pub protected_paths: Vec<String>,
     #[serde(default)]
@@ -402,6 +424,10 @@ fn default_update_interval() -> u64 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_bash_auto_bg_sec() -> u64 {
+    60
 }
 
 fn default_busy_mode() -> String {
@@ -1925,6 +1951,9 @@ fn default_user_config() -> SpavnUserConfig {
         quota_full_script: None,
         memory_recall_bin: None,
         memory_remember_bin: None,
+        tools_max_timeout_sec: None,
+        bash_auto_background: true,
+        bash_auto_background_sec: default_bash_auto_bg_sec(),
         protected_paths: Vec::new(),
         allowed_paths: Vec::new(),
         providers: Vec::new(),

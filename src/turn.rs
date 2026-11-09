@@ -477,6 +477,36 @@ pub(crate) fn run_agent_turn(
             }
         }
 
+        // Deliver any background jobs (`bg_N`) that settled since the last step (OMP AsyncJobManager delivery).
+        if total_turn_steps > 0 {
+            let settled_bg = tools::shell::pop_completed_bg_notifications();
+            for n in settled_bg {
+                let status_str = if n.timed_out {
+                    format!("TIMED OUT (exit {})", n.exit_code)
+                } else {
+                    format!("completed (exit {})", n.exit_code)
+                };
+                if !quiet {
+                    println!(
+                        "\n{}⚡ [Background Job `{}` (PID {}) {} in {}s]{}",
+                        CYAN, n.job_id, n.pid, status_str, n.elapsed_sec, RESET
+                    );
+                }
+                let bg_msg = ChatMessage::user(format!(
+                    "[SPAVN ASYNC JOB COMPLETED — `{}` (PID {}, {}, {}s, log: `{}`)]:\nCommand: `{}`\n--- tail output ---\n{}",
+                    n.job_id,
+                    n.pid,
+                    status_str,
+                    n.elapsed_sec,
+                    n.log_path.display(),
+                    n.command,
+                    n.tail_preview
+                ));
+                append_message(session_file, &bg_msg);
+                messages.push(bg_msg);
+            }
+        }
+
         let escalated_cloud = endpoint.is_local() && repeat_count >= 2;
         let step_endpoint = if escalated_cloud {
             if !quiet {
@@ -1288,6 +1318,35 @@ pub(crate) fn run_agent_turn(
                 ));
                 append_message(session_file, &steer_msg);
                 messages.push(steer_msg);
+            }
+            continue;
+        }
+        let post_bg = tools::shell::pop_completed_bg_notifications();
+        if !post_bg.is_empty() {
+            for n in post_bg {
+                let status_str = if n.timed_out {
+                    format!("TIMED OUT (exit {})", n.exit_code)
+                } else {
+                    format!("completed (exit {})", n.exit_code)
+                };
+                if !quiet {
+                    println!(
+                        "\n{}⚡ [Background Job `{}` (PID {}) {} in {}s]{}",
+                        CYAN, n.job_id, n.pid, status_str, n.elapsed_sec, RESET
+                    );
+                }
+                let bg_msg = ChatMessage::user(format!(
+                    "[SPAVN ASYNC JOB COMPLETED — `{}` (PID {}, {}, {}s, log: `{}`)]:\nCommand: `{}`\n--- tail output ---\n{}",
+                    n.job_id,
+                    n.pid,
+                    status_str,
+                    n.elapsed_sec,
+                    n.log_path.display(),
+                    n.command,
+                    n.tail_preview
+                ));
+                append_message(session_file, &bg_msg);
+                messages.push(bg_msg);
             }
             continue;
         }

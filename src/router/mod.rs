@@ -116,6 +116,9 @@ pub(crate) fn infer_local_model_spec_badge(id: &str) -> String {
     if lower.contains("mtp") || lower.contains("cyber-tiel") || lower.contains("sage") {
         tags.push("MTP");
     }
+    if lower.contains("clover") {
+        tags.push("BF16");
+    }
     if lower.contains("sage") || lower.contains("vl") || lower.contains("vision") {
         tags.push("Vision");
     }

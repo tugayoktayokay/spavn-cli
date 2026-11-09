@@ -143,9 +143,15 @@ pub fn one_line_task(task: &str) -> String {
     cut
 }
 
+fn git_cmd() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "core.fsmonitor=false"]);
+    cmd
+}
+
 /// Checks whether `path` is inside an initialized git working tree.
 pub fn is_git_repo(path: &Path) -> bool {
-    let output = Command::new("git")
+    let output = git_cmd()
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(path)
         .output();
@@ -188,7 +194,7 @@ impl WorktreeGuard {
         }
 
         // 1. git worktree add --detach <wt_path> HEAD
-        let out = Command::new("git")
+        let out = git_cmd()
             .args(["worktree", "add", "--detach"])
             .arg(&wt_path)
             .arg("HEAD")
@@ -204,7 +210,7 @@ impl WorktreeGuard {
         }
 
         // 2. Snapshot parent's current uncommitted tracked changes: git diff HEAD --binary
-        let diff_out = Command::new("git")
+        let diff_out = git_cmd()
             .args(["diff", "HEAD", "--binary"])
             .current_dir(main_repo)
             .output()
@@ -213,7 +219,7 @@ impl WorktreeGuard {
         if diff_out.status.success() && !diff_out.stdout.is_empty() {
             let dirty_patch = wt_path.join(".spavn-dirty.patch");
             if std::fs::write(&dirty_patch, &diff_out.stdout).is_ok() {
-                let _ = Command::new("git")
+                let _ = git_cmd()
                     .args(["apply", "--whitespace=nowarn", ".spavn-dirty.patch"])
                     .current_dir(&wt_path)
                     .stdin(std::process::Stdio::null())
@@ -223,7 +229,7 @@ impl WorktreeGuard {
         }
 
         // 3. Snapshot parent's untracked files
-        let untracked_out = Command::new("git")
+        let untracked_out = git_cmd()
             .args(["ls-files", "--others", "--exclude-standard", "-z"])
             .current_dir(main_repo)
             .output();
@@ -249,12 +255,12 @@ impl WorktreeGuard {
         }
 
         // 4. Commit baseline snapshot in worktree so diff against base isolates worker changes
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["add", "-A"])
             .current_dir(&wt_path)
             .output();
 
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args([
                 "-c",
                 "user.name=spavn",
@@ -270,7 +276,7 @@ impl WorktreeGuard {
             .output();
 
         // 5. Get base commit hash
-        let rev_out = Command::new("git")
+        let rev_out = git_cmd()
             .args(["rev-parse", "HEAD"])
             .current_dir(&wt_path)
             .output()
@@ -292,20 +298,19 @@ impl WorktreeGuard {
             return Ok(String::new());
         }
         // git -C wt add -A && git -C wt diff --cached --binary <base>
-        let add_out = Command::new("git")
+        let add_out = git_cmd()
             .args(["add", "-A"])
             .current_dir(&self.worktree_path)
             .output()
             .map_err(|e| format!("Failed to stage worktree changes: {}", e))?;
-
         if !add_out.status.success() {
             return Err(format!(
-                "git add -A in worktree failed: {}",
+                "git add -A failed in worktree: {}",
                 String::from_utf8_lossy(&add_out.stderr).trim()
             ));
         }
 
-        let diff_out = Command::new("git")
+        let diff_out = git_cmd()
             .args(["diff", "--cached", "--binary", &self.base_commit])
             .current_dir(&self.worktree_path)
             .output()
@@ -326,7 +331,7 @@ impl WorktreeGuard {
             return;
         }
         self.active = false;
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["worktree", "remove", "--force"])
             .arg(&self.worktree_path)
             .current_dir(&self.main_repo_path)
@@ -336,7 +341,7 @@ impl WorktreeGuard {
             let _ = std::fs::remove_dir_all(&self.worktree_path);
         }
 
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["worktree", "prune"])
             .current_dir(&self.main_repo_path)
             .output();
@@ -397,7 +402,7 @@ pub fn apply_patch_sequentially_with_patches_dir(
     }
 
     let git_apply = |extra: &[&str]| {
-        Command::new("git")
+        git_cmd()
             .arg("apply")
             .args(extra)
             .arg(&temp_patch_file)
@@ -1383,15 +1388,19 @@ mod tests {
         let _ = std::fs::create_dir_all(&patches_dir);
 
         // Initialize git repo
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["init", "-b", "main"])
             .current_dir(&repo_dir)
             .output();
-        let _ = Command::new("git")
+        let _ = git_cmd()
+            .args(["config", "core.fsmonitor", "false"])
+            .current_dir(&repo_dir)
+            .output();
+        let _ = git_cmd()
             .args(["config", "user.name", "spavn-test"])
             .current_dir(&repo_dir)
             .output();
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["config", "user.email", "test@spavn.local"])
             .current_dir(&repo_dir)
             .output();
@@ -1401,11 +1410,11 @@ mod tests {
         let _ = std::fs::write(&f1, "initial file1\n");
         let _ = std::fs::write(&f2, "initial file2\n");
 
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["add", "."])
             .current_dir(&repo_dir)
             .output();
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["commit", "-m", "init", "--no-gpg-sign"])
             .current_dir(&repo_dir)
             .output();
@@ -1440,7 +1449,7 @@ mod tests {
         wt2.cleanup();
 
         // Commit those changes in main
-        let _ = Command::new("git")
+        let _ = git_cmd()
             .args(["commit", "-am", "applied wt1 and wt2", "--no-gpg-sign"])
             .current_dir(&repo_dir)
             .output();
