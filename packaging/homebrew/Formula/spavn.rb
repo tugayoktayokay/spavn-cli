@@ -1,31 +1,31 @@
 class Spavn < Formula
   desc "Terminal-native coding agent that ships as one Rust binary"
   homepage "https://spavn.dev"
-  version "0.2.11"
+  version "0.2.12"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/tugayoktayokay/spavn-cli/releases/download/v#{version}/spavn-aarch64-apple-darwin.tar.gz"
-      sha256 "e803907473d30f13d0e78b20ec288e0dc4850582432e430a9eec37c3b9923526"
+      sha256 "7c7777f0fe168eefeef95cdc411fdcb8243ba61b08529990a2a76b32ec471471"
     end
     on_intel do
       url "https://github.com/tugayoktayokay/spavn-cli/releases/download/v#{version}/spavn-x86_64-apple-darwin.tar.gz"
-      sha256 "8ed91034c25d0a9b8bd6054212171e040768638a9ea78b1aefeab87c02ff7bd3"
+      sha256 "85682bc470b55544adcb8f5ea4b1491836f00277777345210e6fb83e6acf3218"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/tugayoktayokay/spavn-cli/releases/download/v#{version}/spavn-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "34eae2aaf966af22c305c27207db166296234b9672de6f5072883985e85d75e5"
+      sha256 "a8f19e3c75aee24c9dfa0ecbc5e33cf13b3dacedab2dffe0879b963be81bc52b"
     end
     # linux-arm region: owned by sync-tap.sh. It emits the block below only when the tag actually
     # published an aarch64-unknown-linux-gnu archive, so no version ever points at a missing file.
     # BEGIN linux-arm
     on_arm do
       url "https://github.com/tugayoktayokay/spavn-cli/releases/download/v#{version}/spavn-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "35e0245e6b7a2c597041413360717c4df50c4625672d37fafbcb8756898bff6a"
+      sha256 "69f20fb5986522d34343dc15c281266ee58f169979dbcdaaa15f1dd3c1037b16"
     end
     # END linux-arm
   end
