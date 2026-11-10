@@ -101,6 +101,48 @@ pub struct DiscoveredLocalModel {
     pub spec_badge: String,
 }
 
+pub(crate) fn is_moe_model_id(lower: &str) -> bool {
+    if lower.contains("moe")
+        || lower.contains("mixtral")
+        || lower.contains("deepseek-v2")
+        || lower.contains("deepseek-v3")
+        || lower.contains("glm-4.5-air")
+        || lower.contains("glm-4.7-flash")
+        || lower.contains("minimax")
+        || lower.contains("kimi-k2")
+        || lower.contains("qwen3-coder-next")
+        || lower.contains("logics-swe")
+        || lower.contains("tiel")
+        || lower.contains("kat-coder")
+        || lower.contains("xing")
+        || lower.contains("apex")
+        || lower.contains("lfm")
+    {
+        return true;
+    }
+    // Generic active-parameter MoE pattern: `-a<digits>b` or `-a<digits>.<digits>b` (e.g., `-a3b`, `-a22b`, `-a3.7b`)
+    // or `<digits>x<digits>b` (e.g., `8x7b`, `8x22b`, `16x14b`)
+    for token in lower.split(|c: char| !c.is_ascii_alphanumeric() && c != '.') {
+        if let Some(rest) = token.strip_prefix('a').and_then(|s| s.strip_suffix('b')) {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.') && rest.chars().any(|c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
+        if let Some((lhs, rhs)) = token.split_once('x') {
+            if let Some(rhs_num) = rhs.strip_suffix('b') {
+                if !lhs.is_empty()
+                    && !rhs_num.is_empty()
+                    && lhs.chars().all(|c| c.is_ascii_digit())
+                    && rhs_num.chars().all(|c| c.is_ascii_digit() || c == '.')
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn infer_local_model_spec_badge(id: &str) -> String {
     let lower = id.to_ascii_lowercase();
     let quant = if lower.contains("q8") {
@@ -116,19 +158,10 @@ pub(crate) fn infer_local_model_spec_badge(id: &str) -> String {
     if lower.contains("mtp") || lower.contains("cyber-tiel") || lower.contains("sage") {
         tags.push("MTP");
     }
-    if lower.contains("logics-swe")
-        || lower.contains("tiel")
-        || lower.contains("kat-coder")
-        || lower.contains("xing")
-        || lower.contains("apex")
-        || lower.contains("lfm")
-        || lower.contains("a3b")
-        || lower.contains("a2b")
-        || lower.contains("a4b")
-    {
+    if is_moe_model_id(&lower) {
         tags.push("MoE");
     }
-    if lower.contains("lfm") {
+    if lower.contains("lfm") && quant != "Q6" {
         tags.push("Q6");
     }
     if lower.contains("qwopus") {
@@ -998,4 +1031,40 @@ pub struct CompletionResult {
     pub elapsed_ms: u128,
     pub ttft_ms: u128,
     pub finish_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_local_model_spec_badge_detects_all_moe_families_and_patterns() {
+        for id in [
+            "apex-35b-v1.0",
+            "kat-coder-v2.5-dev",
+            "lfm2.5-24b-a2b",
+            "logics-swe-35b-a3b",
+            "qwen3.8-35b-a3b",
+            "tiel-coder-35b-a3b",
+            "qwen3-235b-a22b-q4_k_m",
+            "deepseek-r1-671b-a37b",
+            "mixtral-8x22b-instruct",
+            "glm-4.5-air-q4",
+            "minimax-m2.5",
+        ] {
+            let badge = infer_local_model_spec_badge(id);
+            assert!(
+                badge.contains("MoE"),
+                "expected MoE badge for `{id}`, got `{badge}`"
+            );
+        }
+
+        for dense_id in ["arete-27b", "qwopus3.8-27b-coder-flash", "qwen2.5-coder-32b"] {
+            let badge = infer_local_model_spec_badge(dense_id);
+            assert!(
+                !badge.contains("MoE"),
+                "dense model `{dense_id}` should not get MoE badge, got `{badge}`"
+            );
+        }
+    }
 }
