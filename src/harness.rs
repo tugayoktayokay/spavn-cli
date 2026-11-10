@@ -1404,47 +1404,32 @@ pub fn is_phantom_code_block_stop(
     }
     let mut in_fence = false;
     let mut code_lines = 0usize;
-    let mut has_code_signature = false;
+    let mut has_func_or_type_def = false;
     for line in trimmed.lines() {
         let t = line.trim();
-        if let Some(lang) = t.strip_prefix("```") {
-            if !in_fence {
-                in_fence = true;
-                let l = lang.trim().to_ascii_lowercase();
-                if matches!(
-                    l.as_str(),
-                    "rust"
-                        | "rs"
-                        | "go"
-                        | "python"
-                        | "py"
-                        | "ts"
-                        | "tsx"
-                        | "js"
-                        | "jsx"
-                        | "c"
-                        | "cpp"
-                ) {
-                    has_code_signature = true;
-                }
-            } else {
-                in_fence = false;
-            }
+        if t.starts_with("```") {
+            in_fence = !in_fence;
             continue;
         }
         if in_fence {
             code_lines += 1;
             if t.starts_with("fn ")
                 || t.starts_with("pub fn ")
+                || t.starts_with("pub(crate) fn ")
+                || t.starts_with("async fn ")
                 || t.starts_with("func ")
                 || t.starts_with("def ")
+                || t.starts_with("async def ")
+                || t.starts_with("class ")
+                || t.starts_with("struct ")
+                || t.starts_with("impl ")
                 || t.starts_with("export ")
             {
-                has_code_signature = true;
+                has_func_or_type_def = true;
             }
         }
     }
-    has_code_signature && code_lines >= 6
+    has_func_or_type_def && code_lines >= 6
 }
 
 /// Whether the user's latest genuine instruction asked for findings only ("sadece söyle bana",
@@ -1465,6 +1450,10 @@ pub fn user_asked_report_only(user_text: &str) -> bool {
         "işlem yapma",
         "değişiklik yapma",
         "sadece cevapla",
+        "eksikler ne",
+        "farklar ne",
+        "nasıl gidiyor",
+        "ne seviyede",
     ];
     const EN: &[&str] = &[
         "just tell",
@@ -1476,6 +1465,8 @@ pub fn user_asked_report_only(user_text: &str) -> bool {
         "do not modify",
         "don't edit",
         "no edits",
+        "what is missing",
+        "what are the gaps",
     ];
     TR.iter().chain(EN.iter()).any(|m| t.contains(m))
 }
@@ -1671,6 +1662,24 @@ let x = 1;
             open,
             AgentPhase::Code,
             2,
+            false
+        ));
+
+        // A closed illustrative snippet without fn/def/class/struct definitions is NOT a phantom dump.
+        let snippet = r#"Here is how the table cell is written:
+```python
+for k, text in enumerate(value.get('lines') or [value['text']]):
+    paragraph = cell.paragraphs[0] if k == 0 else cell.add_paragraph()
+    run = paragraph.add_run(text)
+    if value.get('bold'):
+        run.bold = True
+    set_size(run, size)
+```
+"#;
+        assert!(!is_phantom_code_block_stop(
+            snippet,
+            AgentPhase::Code,
+            4,
             false
         ));
     }

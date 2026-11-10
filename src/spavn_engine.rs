@@ -257,6 +257,20 @@ pub fn dispatch_role_from_prompt(prompt: &str) -> AgentRoleKey {
         .join(" ");
     let rules: &[(AgentRoleKey, &[&str])] = &[
         (
+            AgentRoleKey::Coder,
+            &[
+                "düzelt",
+                "kodla",
+                "uygula",
+                "çöz",
+                "geliştir",
+                "implement",
+                "fix",
+                "patch",
+                "build",
+            ],
+        ),
+        (
             AgentRoleKey::Reviewer,
             &[
                 "review",
@@ -1231,6 +1245,11 @@ mod engine_tests {
         assert_eq!(
             dispatch_role_from_prompt("testleri yaz"),
             AgentRoleKey::Test
+        );
+        // Combined fix + test directive ("düzeltip testini yaz") routes to Coder, not Test.
+        assert_eq!(
+            dispatch_role_from_prompt("en kritik olan 1 tanesini cerrahi olarak düzeltip testini yaz"),
+            AgentRoleKey::Coder
         );
     }
 
