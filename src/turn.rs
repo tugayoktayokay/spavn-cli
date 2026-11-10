@@ -102,8 +102,22 @@ pub(crate) fn extract_file_op_key(tool_name: &str, raw_args: &str) -> Option<(St
     if kind == "mutate" {
         return Some((base_path.to_string(), "*".to_string()));
     }
-    let start = val.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
-    let end = val.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
+    let start = val
+        .get("start_line")
+        .or_else(|| val.get("offset"))
+        .or_else(|| val.get("start"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let limit = val
+        .get("limit")
+        .or_else(|| val.get("num_lines"))
+        .and_then(|v| v.as_u64());
+    let end = val
+        .get("end_line")
+        .or_else(|| val.get("end"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| limit.map(|l| start.max(1) + l.saturating_sub(1)))
+        .unwrap_or(0);
     let span_key = if !inline_span.is_empty() {
         inline_span.to_string()
     } else if start == 0 && end == 0 {
@@ -429,8 +443,9 @@ pub(crate) fn run_agent_turn(
     let mut consecutive_investigation_steps = 0usize;
     let mut total_turn_steps = 0usize;
     let mut focus_gate_nudged = false;
-    let mut file_read_counts: std::collections::HashMap<String, usize> =
+    let mut file_read_spans: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
+    let mut last_read_cap_anchor = 0usize;
     let cfg = load_user_config();
     // Unpaired Tool-Call Recovery: if the last message in history is an assistant
     // message with tool_calls (e.g. from an interrupted session), resolve them before calling LLM.
@@ -521,6 +536,29 @@ pub(crate) fn run_agent_turn(
         };
 
         let max_ctx_tokens = step_endpoint.context_window_tokens();
+        let last_user_idx_for_anchor = messages
+            .iter()
+            .rposition(|m| {
+                m.role == "user"
+                    && !m
+                        .content
+                        .as_deref()
+                        .unwrap_or("")
+                        .starts_with("[SPAVN ")
+            })
+            .unwrap_or_else(|| {
+                messages
+                    .iter()
+                    .rposition(|m| m.role == "user")
+                    .unwrap_or(messages.len())
+            });
+        let current_read_cap_anchor = last_user_idx_for_anchor
+            + ((messages.len().saturating_sub(last_user_idx_for_anchor)) / 16) * 12;
+        if current_read_cap_anchor > last_read_cap_anchor {
+            file_read_spans.clear();
+            ctx.read_ranges.clear();
+            last_read_cap_anchor = current_read_cap_anchor;
+        }
         let mut view_messages =
             compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
         let mut view_tok = hud::estimate_messages_tokens(&view_messages);
@@ -586,6 +624,8 @@ pub(crate) fn run_agent_turn(
             perform_manual_compact(&step_endpoint, messages, None);
             rewrite_session(session_file, messages);
             last_observed_total_tokens = 0;
+            file_read_spans.clear();
+            ctx.read_ranges.clear();
             view_messages =
                 compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
             view_tok = hud::estimate_messages_tokens(&view_messages);
@@ -926,7 +966,22 @@ pub(crate) fn run_agent_turn(
                     *entry
                 };
                 let prior_failure_count = tool_failure_counts.get(&sig_key).copied().unwrap_or(0);
-                let effective_count = call_count.max(prior_failure_count);
+                let target_hint = serde_json::from_str::<serde_json::Value>(raw_args)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("path")
+                            .or_else(|| v.get("file_path"))
+                            .or_else(|| v.get("command"))
+                            .or_else(|| v.get("cmd"))
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                let prior_err_sig_count = tool_failure_counts
+                    .get(&format!("err_target:{}:{}", tool_name, target_hint))
+                    .copied()
+                    .unwrap_or(0);
+                let effective_count = call_count.max(prior_failure_count).max(prior_err_sig_count);
                 let guard_decision = evaluate_loop_guard(effective_count);
 
                 if guard_decision == LoopGuardDecision::StopTurn {
@@ -973,18 +1028,45 @@ pub(crate) fn run_agent_turn(
                     continue;
                 }
                 if is_read_tool_name(&tool_name) {
-                    if let Some((base_path, _)) =
+                    if let Some((base_path, span_key)) =
                         extract_file_op_key(&tool_name, &tc.function.arguments)
                     {
-                        let count = file_read_counts.entry(base_path.clone()).or_insert(0);
-                        *count += 1;
-                        if *count > 3 {
+                        let resolved_base = ctx.resolve_target_arg(&base_path);
+                        let norm_key = if resolved_base.is_empty() {
+                            base_path.clone()
+                        } else {
+                            resolved_base
+                        };
+                        let spans = file_read_spans.entry(norm_key).or_default();
+                        let same_span_count =
+                            spans.iter().filter(|s| s.as_str() == span_key).count() + 1;
+                        let distinct_spans = {
+                            let mut uniq: Vec<&str> = spans.iter().map(|s| s.as_str()).collect();
+                            if !uniq.contains(&span_key.as_str()) {
+                                uniq.push(span_key.as_str());
+                            }
+                            uniq.len()
+                        };
+                        spans.push(span_key.clone());
+                        if same_span_count > 2 || distinct_spans > 8 {
+                            prefetched.remove(&idx);
+                            let reason = if same_span_count > 2 {
+                                format!(
+                                    "region `{}:{}` {} times",
+                                    base_path, span_key, same_span_count
+                                )
+                            } else {
+                                format!(
+                                    "`{}` across {} distinct regions",
+                                    base_path, distinct_spans
+                                )
+                            };
                             let tool_msg = ChatMessage::tool_result(
                                 tc.id,
                                 tool_name,
                                 format!(
-                                    "[SPAVN FILE-READ CAP]: You have already read `{}` 3 times in this turn and its Structural Outline is in your context. Stop paging through this file; use `search` with `context: 3` or proceed to your edit/answer.",
-                                    base_path
+                                    "[SPAVN FILE-READ CAP]: You have already read {} in this turn and its Structural Outline is in your context. Stop paging through this file; use `search` with `context: 3` or proceed to your edit/answer.",
+                                    reason
                                 ),
                             );
                             append_message(session_file, &tool_msg);
@@ -1116,7 +1198,16 @@ pub(crate) fn run_agent_turn(
                     let fc = tool_failure_counts.entry(sig_key.clone()).or_insert(0);
                     *fc += 1;
                     let err_entry = tool_failure_counts.entry(err_sig).or_insert(0);
-                    *err_entry += 1;
+                    let err_c = *err_entry + 1;
+                    *err_entry = err_c;
+                    if !target_hint.is_empty() {
+                        let target_entry = tool_failure_counts
+                            .entry(format!("err_target:{}:{}", tool_name, target_hint))
+                            .or_insert(0);
+                        *target_entry = (*target_entry).max(err_c);
+                    }
+                } else if !target_hint.is_empty() {
+                    tool_failure_counts.remove(&format!("err_target:{}:{}", tool_name, target_hint));
                 }
 
                 if matches!(
@@ -1153,9 +1244,9 @@ pub(crate) fn run_agent_turn(
                                 }
                             }
                             for p_str in touched {
-                                file_read_counts.remove(&p_str);
+                                file_read_spans.remove(&p_str);
                                 let resolved_p = ctx.resolve_target_arg(&p_str);
-                                file_read_counts.remove(&resolved_p);
+                                file_read_spans.remove(&resolved_p);
                                 if !resolved_p.is_empty()
                                     && !modified_files_in_turn.contains(&resolved_p)
                                 {
@@ -1206,6 +1297,21 @@ pub(crate) fn run_agent_turn(
                     || tool_output.starts_with("Write error")
                     || tool_output.starts_with("BLOCKED")
                     || tool_output.starts_with("Execution error:");
+                if is_err_tool && is_read_tool_name(&tool_name) {
+                    if let Some((base_path, _)) =
+                        extract_file_op_key(&tool_name, &tc.function.arguments)
+                    {
+                        let resolved_base = ctx.resolve_target_arg(&base_path);
+                        let norm_key = if resolved_base.is_empty() {
+                            base_path
+                        } else {
+                            resolved_base
+                        };
+                        if let Some(spans) = file_read_spans.get_mut(&norm_key) {
+                            spans.pop();
+                        }
+                    }
+                }
                 if !is_err_tool {
                     advance_live_tasks_on_tool(&tool_name, &progress_target);
                 }
@@ -2082,5 +2188,39 @@ mod premature_stop_tests {
         let honest_answer = "Efendim, calc.py dosyasındaki average fonksiyonundan + 1 ifadesi kaldırıldı ve Python sözdizimi doğrulaması yapıldı.\n\nTalimatınız doğrultusunda hiçbir komut veya test çalıştırılmadığı için davranışsal testler yürütülmemiş olarak bırakıldı; yalnızca statik dosya düzenlemesi yapıldı.";
         assert!(discloses_untested_status(honest_answer));
         assert!(detect_success_claim(honest_answer).is_none());
+    }
+
+    #[test]
+    fn extract_file_op_key_distinguishes_disjoint_spans_and_aliases() {
+        let k1 = super::extract_file_op_key(
+            "read",
+            r#"{"path":"backend/semantic_read.py","start_line":1,"end_line":60}"#,
+        );
+        let k2 = super::extract_file_op_key(
+            "read",
+            r#"{"path":"backend/semantic_read.py:128-149"}"#,
+        );
+        let k3 = super::extract_file_op_key(
+            "read",
+            r#"{"path":"backend/semantic_read.py","offset":200,"limit":50}"#,
+        );
+        assert_eq!(
+            k1,
+            Some(("backend/semantic_read.py".to_string(), "1-60".to_string()))
+        );
+        assert_eq!(
+            k2,
+            Some((
+                "backend/semantic_read.py".to_string(),
+                "128-149".to_string()
+            ))
+        );
+        assert_eq!(
+            k3,
+            Some((
+                "backend/semantic_read.py".to_string(),
+                "200-249".to_string()
+            ))
+        );
     }
 }
