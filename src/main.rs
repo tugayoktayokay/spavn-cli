@@ -358,6 +358,27 @@ fn main() {
     }
 
     if !prompt_parts.is_empty() {
+        // Same condition as the TUI first-run wizard: without a key the request would go out with
+        // the "local" placeholder and come back as an opaque provider 401.
+        if !endpoint.is_local()
+            && !endpoint.has_quota_pool
+            && (endpoint.api_key.is_empty() || endpoint.api_key == "local")
+        {
+            eprintln!(
+                "{}",
+                tr_en(
+                    &format!(
+                        "Hata: '{}' modeli için API anahtarı yok. `spavn` ile açıp /login (veya /byok) çalıştırın, sağlayıcının API anahtarı ortam değişkenini ayarlayın ya da config.json içinde local_base_url tanımlayıp yerel bir model seçin.",
+                        endpoint.key
+                    ),
+                    &format!(
+                        "Error: no API key for model '{}'. Run `spavn` and use /login (or /byok), set the provider's API key environment variable, or set local_base_url in config.json and pick a local model.",
+                        endpoint.key
+                    )
+                )
+            );
+            std::process::exit(2);
+        }
         if quiet {
             show_thinking = false;
         }

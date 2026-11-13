@@ -3,3 +3,9 @@
 .DS_Store
 *.log
 
+# Personal state never belongs in the repo
+.spavn/
+config.json
+secrets.env
+last_model
+*.bak-*
