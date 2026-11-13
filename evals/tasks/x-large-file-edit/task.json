@@ -1,0 +1,8 @@
+{
+  "prompt": "In handlers.py, the `handle_refund` function rejects refunds of exactly the original amount. A full refund must be allowed. Fix only that. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "bugfix",
+    "large-file"
+  ]
+}

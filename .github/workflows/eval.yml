@@ -1,0 +1,46 @@
+name: Eval
+
+# Manual only: every task runs the real agent against a real model, so it costs API credits.
+# Needs the repository secret ANTHROPIC_API_KEY (add others to `env` for other providers).
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Model key passed to spavn (empty = spavn's default)
+        required: false
+        default: ""
+      filter:
+        description: Only tasks whose name or tags contain this text (empty = all)
+        required: false
+        default: ""
+      repeat:
+        description: Runs per task
+        required: false
+        default: "1"
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Require an API key
+        run: test -n "$ANTHROPIC_API_KEY" || { echo "secret ANTHROPIC_API_KEY is not set"; exit 1; }
+      - run: cargo build --release --bins
+      - name: Run evals
+        run: |
+          args=(-n "${{ inputs.repeat }}" -o eval-results.jsonl)
+          [ -n "${{ inputs.model }}" ] && args+=(-m "${{ inputs.model }}")
+          [ -n "${{ inputs.filter }}" ] && args+=(-f "${{ inputs.filter }}")
+          ./target/release/spavn-eval "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: eval-results.jsonl

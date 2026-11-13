@@ -1,0 +1,7 @@
+{
+  "prompt": "Run the tests, find why they fail, and fix the source code.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "bugfix"
+  ]
+}

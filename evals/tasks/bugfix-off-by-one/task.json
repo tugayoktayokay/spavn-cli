@@ -1,0 +1,7 @@
+{
+  "prompt": "The test suite fails. Find the bug in the code and fix it. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "bugfix"
+  ]
+}

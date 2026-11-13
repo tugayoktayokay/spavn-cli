@@ -1,0 +1,7 @@
+{
+  "prompt": "The parser fails on some inputs. Make all tests pass by fixing parse_kv in kv.py. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "bugfix"
+  ]
+}

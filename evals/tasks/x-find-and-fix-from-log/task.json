@@ -1,0 +1,8 @@
+{
+  "prompt": "The nightly job failed. The traceback is in failure.log. Fix the underlying problem so `python3 job.py` succeeds. Do not edit failure.log or the tests.",
+  "verify": "python3 job.py >/dev/null && python3 -m unittest -q",
+  "tags": [
+    "bugfix",
+    "log"
+  ]
+}

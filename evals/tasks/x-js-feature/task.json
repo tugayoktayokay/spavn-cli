@@ -1,0 +1,8 @@
+{
+  "prompt": "Implement `debounce(fn, ms)` in debounce.js so the tests pass. Do not edit the tests. Run them with `node --test`.",
+  "verify": "node --test",
+  "tags": [
+    "feature",
+    "javascript"
+  ]
+}

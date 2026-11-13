@@ -1,0 +1,8 @@
+{
+  "prompt": "Implement `compare(a, b)` in semver.py exactly as SPEC.md describes. Returns -1, 0 or 1. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "feature",
+    "spec"
+  ]
+}

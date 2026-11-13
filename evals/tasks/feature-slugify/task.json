@@ -1,0 +1,7 @@
+{
+  "prompt": "Implement `slugify` in slug.py so the tests pass. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "feature"
+  ]
+}

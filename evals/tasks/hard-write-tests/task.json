@@ -1,0 +1,7 @@
+{
+  "prompt": "test_stack.py has no tests. Write tests for the Stack class in stack.py so that the suite passes on the real implementation but fails on any buggy variant of it. Do not edit stack.py or anything in mutants/.",
+  "verify": "python3 check_mutants.py",
+  "tags": [
+    "tests"
+  ]
+}

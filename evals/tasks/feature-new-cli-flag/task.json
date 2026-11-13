@@ -1,0 +1,8 @@
+{
+  "prompt": "Add a `--upper` flag to greet.py that upper-cases the greeting. Existing behaviour must not change. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "feature",
+    "multi-file"
+  ]
+}

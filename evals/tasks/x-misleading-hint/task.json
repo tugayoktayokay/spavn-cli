@@ -1,0 +1,8 @@
+{
+  "prompt": "Users report that `total()` in cart.py returns the wrong amount when a coupon is applied. Fix it. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "bugfix",
+    "misleading"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "prompt": "The test suite passes when run file by file but fails when run together. Fix the code so every test passes in a single run. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "bugfix",
+    "state"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "prompt": "Tests fail intermittently depending on order. Fix the root cause in the source, not the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "bugfix"
+  ]
+}

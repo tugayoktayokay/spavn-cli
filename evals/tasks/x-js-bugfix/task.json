@@ -1,0 +1,8 @@
+{
+  "prompt": "The test suite fails. Fix the bug in the source, not the tests. Run it with `node --test`.",
+  "verify": "node --test",
+  "tags": [
+    "bugfix",
+    "javascript"
+  ]
+}

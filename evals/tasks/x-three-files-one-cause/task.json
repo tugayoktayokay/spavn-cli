@@ -1,0 +1,8 @@
+{
+  "prompt": "Exporting a report with a non-ASCII customer name crashes. Make `python3 main.py` print the report and exit 0. Do not edit test files.",
+  "verify": "python3 main.py >/dev/null && python3 -m unittest -q",
+  "tags": [
+    "bugfix",
+    "multi-file"
+  ]
+}

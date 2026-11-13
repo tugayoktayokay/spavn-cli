@@ -1,0 +1,8 @@
+{
+  "prompt": "There is no spec. Implement `wrap(text, width)` in wrap.py so that all the tests pass. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "feature",
+    "no-spec"
+  ]
+}

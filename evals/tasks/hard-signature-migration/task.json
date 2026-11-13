@@ -1,0 +1,8 @@
+{
+  "prompt": "Change `notify.send(to, text)` to `notify.send(text, *, to)` (`to` becomes keyword-only) and update every caller in the project. Behaviour must not change. Do not edit the tests.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "refactor",
+    "multi-file"
+  ]
+}

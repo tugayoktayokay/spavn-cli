@@ -1,0 +1,7 @@
+{
+  "prompt": "Remove the duplication between `area_square` and `area_rect` in shapes.py without changing behaviour. The tests must keep passing and the file must define a single shared helper.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "refactor"
+  ]
+}

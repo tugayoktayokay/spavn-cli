@@ -1,0 +1,8 @@
+{
+  "prompt": "The tests fail. The cause is not in the file the failing test imports. Find it and fix it.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "bugfix",
+    "multi-file"
+  ]
+}

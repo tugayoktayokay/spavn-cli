@@ -1,0 +1,8 @@
+{
+  "prompt": "Rename the function `calc_total` to `compute_total` everywhere it is defined or used, including the tests. No reference to the old name may remain.",
+  "verify": "python3 -m unittest -q",
+  "tags": [
+    "refactor",
+    "multi-file"
+  ]
+}

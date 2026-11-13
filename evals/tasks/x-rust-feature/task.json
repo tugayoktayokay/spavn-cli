@@ -1,0 +1,8 @@
+{
+  "prompt": "Implement `parse_duration` in src/lib.rs as the doc comment describes, so `cargo test` passes. Do not change the tests.",
+  "verify": "cargo test --offline --quiet",
+  "tags": [
+    "feature",
+    "rust"
+  ]
+}
