@@ -725,10 +725,10 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
     };
     if let Some((base_url, disc_url, discovered)) = probed_local {
         if cfg.local_discovery_url.is_none() {
-            let mut updated_cfg = cfg.clone();
-            updated_cfg.local_base_url = Some(base_url);
-            updated_cfg.local_discovery_url = Some(disc_url);
-            let _ = save_user_config(&updated_cfg);
+            let _ = crate::config::update_user_config(|c| {
+                c.local_base_url = Some(base_url);
+                c.local_discovery_url = Some(disc_url);
+            });
         }
         let mut local_models: Vec<MenuItem> = Vec::new();
         for m in discovered {

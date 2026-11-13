@@ -14,11 +14,15 @@ categories = ["command-line-utilities", "development-tools"]
 authors = ["Tugay Oktay Okay"]
 # The screenshots and CI config stay on GitHub. The README links them by absolute URL, so
 # crates.io and docs.rs render the same page from a ~90 KiB crate.
-exclude = ["assets/", ".github/", "packaging/"]
+exclude = ["assets/", ".github/", "packaging/", "evals/"]
 
 [[bin]]
 name = "spavn"
 path = "src/main.rs"
+
+[[bin]]
+name = "spavn-eval"
+path = "src/bin/spavn_eval.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

@@ -927,7 +927,10 @@ pub(crate) fn exec_glob(ctx: &mut ToolContext, args: &Value) -> String {
             Ok(o) => {
                 let s = String::from_utf8_lossy(&o.stdout).to_string();
                 if s.trim().is_empty() {
-                    format!("(no files match `{}` in {}:{})", pattern, ssh_host, raw_path)
+                    format!(
+                        "(no files match `{}` in {}:{})",
+                        pattern, ssh_host, raw_path
+                    )
                 } else {
                     s
                 }

@@ -461,7 +461,10 @@ pub(crate) fn eval_json_pointer_view(content: &str, pointer: &str) -> Result<Str
 }
 
 pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
-    let raw_input_path = ctx.apply_default_host(get_str_alias(args, &["path", "file_path", "file", "filepath"]));
+    let raw_input_path = ctx.apply_default_host(get_str_alias(
+        args,
+        &["path", "file_path", "file", "filepath"],
+    ));
     let (path_no_query, inline_raw_q) = split_inline_raw_query(&raw_input_path);
     let explicit_raw_q = get_str_alias(args, &["q", "json_pointer", "pointer"]);
     let raw_query = if !explicit_raw_q.is_empty() {

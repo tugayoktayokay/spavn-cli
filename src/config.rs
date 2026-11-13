@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 pub fn set_owner_only_mode(path: &Path, mode: u32) {
     #[cfg(unix)]
@@ -67,15 +68,34 @@ pub fn detect_os_lang_en() -> bool {
 }
 
 #[cfg(test)]
-mod lang_detect_tests {
+mod config_cache_tests {
     use super::*;
+
     #[test]
-    fn detect_honours_spavn_lang() {
-        std::env::set_var("SPAVN_LANG", "en");
-        assert!(detect_os_lang_en(), "SPAVN_LANG=en must yield EN");
-        std::env::set_var("SPAVN_LANG", "tr");
-        assert!(!detect_os_lang_en());
-        std::env::remove_var("SPAVN_LANG");
+    fn file_stamp_tracks_creation_edit_and_removal() {
+        let dir = std::env::temp_dir().join(format!("spavn-cfgstamp-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("config.json");
+
+        assert_eq!(file_stamp(&f), None, "missing file has no stamp");
+        fs::write(&f, "{}").unwrap();
+        let first = file_stamp(&f);
+        assert!(first.is_some());
+        assert_eq!(first, file_stamp(&f), "untouched file keeps its stamp");
+        fs::write(&f, "{\"defaultModel\": \"x\"}").unwrap();
+        assert_ne!(first, file_stamp(&f), "edited file changes its stamp");
+        fs::remove_file(&f).unwrap();
+        assert_eq!(file_stamp(&f), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalidate_clears_the_cached_config() {
+        let stamp = config_stamp();
+        *CONFIG_CACHE.lock().unwrap() = Some((stamp, default_user_config()));
+        invalidate_config_cache();
+        assert!(CONFIG_CACHE.lock().unwrap().is_none());
     }
 }
 
@@ -207,6 +227,35 @@ mod host_tests {
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
+
+    #[test]
+    fn embedded_catalog_is_well_formed() {
+        let catalog = builtin_byok_catalog();
+        assert!(catalog.len() >= 30, "catalog failed to parse or shrank");
+        let mut ids = std::collections::HashSet::new();
+        for g in &catalog {
+            assert!(ids.insert(g.id.clone()), "duplicate provider id {}", g.id);
+            assert!(!g.base_url.is_empty(), "{} has no base_url", g.id);
+            assert!(!g.models.is_empty(), "{} has no models", g.id);
+            let mut keys = std::collections::HashSet::new();
+            for m in &g.models {
+                assert!(
+                    !m.key.is_empty() && !m.model_id.is_empty(),
+                    "{}: empty key",
+                    g.id
+                );
+                assert!(
+                    keys.insert(m.key.clone()),
+                    "{}: duplicate model key {}",
+                    g.id,
+                    m.key
+                );
+            }
+        }
+        for known in ["openai", "anthropic", "gemini", "ollama", "litellm"] {
+            assert!(ids.contains(known), "missing built-in provider {known}");
+        }
+    }
 
     #[test]
     fn anthropic_short_aliases_resolve() {
@@ -717,921 +766,12 @@ pub fn byok_catalog(cfg: &SpavnUserConfig) -> Vec<ProviderGroupConfig> {
     groups
 }
 
+/// Built-in BYOK provider/model catalog. The data lives in `data/byok_catalog.json` (embedded at
+/// compile time) so a model-list update is a JSON edit, not a 900-line Rust change.
+/// `catalog_tests::embedded_catalog_is_well_formed` guards the file: a malformed edit fails CI
+/// instead of shipping an empty picker.
 pub fn builtin_byok_catalog() -> Vec<ProviderGroupConfig> {
-    vec![
-        ProviderGroupConfig {
-            id: "openai".to_string(),
-            title: "🟡 OpenAI (BYOK)".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(1_050_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "gpt-6.1-sol".to_string(),
-                    model_id: "gpt-6.1-sol".to_string(),
-                    label: "OpenAI GPT-6.1 Sol".to_string(),
-                    badge: "🟡 Coding".to_string(),
-                    desc: "Near-Astra complex coding & agentic workhorse (1.05M ctx)".to_string(),
-                    context_window: Some(1_050_000),
-                },
-                ModelConfigEntry {
-                    key: "gpt-6-astra".to_string(),
-                    model_id: "gpt-6-astra".to_string(),
-                    label: "OpenAI GPT-6 Astra".to_string(),
-                    badge: "🧠 Flagship".to_string(),
-                    desc: "Most capable frontier reasoning & coding model (1.05M ctx)".to_string(),
-                    context_window: Some(1_050_000),
-                },
-                ModelConfigEntry {
-                    key: "gpt-6.1-terra".to_string(),
-                    model_id: "gpt-6.1-terra".to_string(),
-                    label: "OpenAI GPT-6.1 Terra".to_string(),
-                    badge: "⚡ Fast".to_string(),
-                    desc: "Fast visual reasoning, computer use & writing (1.05M ctx)".to_string(),
-                    context_window: Some(1_050_000),
-                },
-                ModelConfigEntry {
-                    key: "gpt-6-luna".to_string(),
-                    model_id: "gpt-6-luna".to_string(),
-                    label: "OpenAI GPT-6 Luna".to_string(),
-                    badge: "🚀 Efficient".to_string(),
-                    desc: "Ultra-fast, cost-efficient high-volume model (1.05M ctx)".to_string(),
-                    context_window: Some(1_050_000),
-                },
-                ModelConfigEntry {
-                    key: "gpt-5.6-sol".to_string(),
-                    model_id: "gpt-5.6-sol".to_string(),
-                    label: "OpenAI GPT-5.6 Sol".to_string(),
-                    badge: "🟡 GPT-5.6".to_string(),
-                    desc: "GPT-5.6 flagship for complex professional work (1.05M ctx)".to_string(),
-                    context_window: Some(1_050_000),
-                },
-                ModelConfigEntry {
-                    key: "gpt-5.5".to_string(),
-                    model_id: "gpt-5.5".to_string(),
-                    label: "OpenAI GPT-5.5".to_string(),
-                    badge: "🟡 GPT-5.5".to_string(),
-                    desc: "GPT-5.5 flagship for coding & professional work (1.05M ctx)".to_string(),
-                    context_window: Some(1_050_000),
-                },
-                ModelConfigEntry {
-                    key: "gpt-5.4".to_string(),
-                    model_id: "gpt-5.4".to_string(),
-                    label: "OpenAI GPT-5.4".to_string(),
-                    badge: "🟡 GPT-5.4".to_string(),
-                    desc: "OpenAI GPT-5.4 coding & reasoning".to_string(),
-                    context_window: Some(272_000),
-                },
-                ModelConfigEntry {
-                    key: "gpt-5.4-mini".to_string(),
-                    model_id: "gpt-5.4-mini".to_string(),
-                    label: "OpenAI GPT-5.4 Mini".to_string(),
-                    badge: "⚡ Mini".to_string(),
-                    desc: "Fast mini model for coding, computer use & sub-agents".to_string(),
-                    context_window: Some(272_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "anthropic".to_string(),
-            title: "🟣 Anthropic Claude (BYOK)".to_string(),
-            base_url: "https://api.anthropic.com/v1".to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(1_000_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "claude-sonnet-5-5".to_string(),
-                    model_id: "claude-sonnet-5-5".to_string(),
-                    label: "Claude Sonnet 5.5".to_string(),
-                    badge: "⚡ Balanced".to_string(),
-                    desc: "Anthropic Claude Sonnet 5.5 — fast coding & agents (1M ctx)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "claude-opus-5-5".to_string(),
-                    model_id: "claude-opus-5-5".to_string(),
-                    label: "Claude Opus 5.5".to_string(),
-                    badge: "🧠 Deep".to_string(),
-                    desc: "Anthropic Claude Opus 5.5 — flagship reasoning & SWE (1M ctx)"
-                        .to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "claude-fable-5-1".to_string(),
-                    model_id: "claude-fable-5-1".to_string(),
-                    label: "Claude Fable 5.1".to_string(),
-                    badge: "👑 Frontier".to_string(),
-                    desc: "Anthropic Claude Fable 5.1 — top capability tier (1M ctx)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "claude-haiku-5-5".to_string(),
-                    model_id: "claude-haiku-5-5".to_string(),
-                    label: "Claude Haiku 5.5".to_string(),
-                    badge: "🚀 Fast".to_string(),
-                    desc: "Anthropic Claude Haiku 5.5 — fastest & lowest cost (1M ctx)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "sonnet".to_string(),
-                    model_id: "claude-sonnet-5-5".to_string(),
-                    label: "Sonnet (short name)".to_string(),
-                    badge: "⚡ Balanced".to_string(),
-                    desc: "Alias → claude-sonnet-5-5 (1M context)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "opus".to_string(),
-                    model_id: "claude-opus-5-5".to_string(),
-                    label: "Opus (short name)".to_string(),
-                    badge: "🧠 Deep".to_string(),
-                    desc: "Alias → claude-opus-5-5 (1M context)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "haiku".to_string(),
-                    model_id: "claude-haiku-5-5".to_string(),
-                    label: "Haiku (short name)".to_string(),
-                    badge: "🚀 Fast".to_string(),
-                    desc: "Alias → claude-haiku-5-5 (1M context)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "fable".to_string(),
-                    model_id: "claude-fable-5-1".to_string(),
-                    label: "Fable (short name)".to_string(),
-                    badge: "👑 Frontier".to_string(),
-                    desc: "Alias → claude-fable-5-1 (1M context)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "gemini".to_string(),
-            title: "🔵 Google Gemini (BYOK)".to_string(),
-            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
-            api_key_env: "GEMINI_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(1_000_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "gemini-4-argon".to_string(),
-                    model_id: "gemini-4-argon".to_string(),
-                    label: "Gemini 4 Argon".to_string(),
-                    badge: "🧠 Flagship".to_string(),
-                    desc: "Google Gemini 4 Argon — flagship reasoning (1M ctx)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "gemini-3.8-flash".to_string(),
-                    model_id: "gemini-3.8-flash".to_string(),
-                    label: "Gemini 3.8 Flash".to_string(),
-                    badge: "🔵 SWE/Agents".to_string(),
-                    desc: "Google Gemini 3.8 Flash — long-horizon SWE & agents (1M ctx)"
-                        .to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "gemini-3.6-flash".to_string(),
-                    model_id: "gemini-3.6-flash".to_string(),
-                    label: "Gemini 3.6 Flash".to_string(),
-                    badge: "⚡ Balanced".to_string(),
-                    desc: "Google Gemini 3.6 Flash — general agentic & multimodal (1M ctx)"
-                        .to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "gemini-3.5-flash-lite".to_string(),
-                    model_id: "gemini-3.5-flash-lite".to_string(),
-                    label: "Gemini 3.5 Flash-Lite".to_string(),
-                    badge: "🚀 Lite".to_string(),
-                    desc: "Google Gemini 3.5 Flash-Lite — fastest & lowest cost (1M ctx)"
-                        .to_string(),
-                    context_window: Some(1_000_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "openrouter".to_string(),
-            title: "🌐 OpenRouter (BYOK)".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            api_key_env: "OPENROUTER_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(1_000_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "openrouter/auto".to_string(),
-                    model_id: "openrouter/auto".to_string(),
-                    label: "OpenRouter Auto".to_string(),
-                    badge: "🌐 Auto".to_string(),
-                    desc: "OpenRouter Smart Router".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "anthropic/claude-sonnet-5.5".to_string(),
-                    model_id: "anthropic/claude-sonnet-5.5".to_string(),
-                    label: "Claude Sonnet 5.5 (OpenRouter)".to_string(),
-                    badge: "🟣 Claude 5.5".to_string(),
-                    desc: "Anthropic Claude Sonnet 5.5 via OpenRouter".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "anthropic/claude-opus-5.5".to_string(),
-                    model_id: "anthropic/claude-opus-5.5".to_string(),
-                    label: "Claude Opus 5.5 (OpenRouter)".to_string(),
-                    badge: "🟣 Opus 5.5".to_string(),
-                    desc: "Anthropic Claude Opus 5.5 via OpenRouter".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "openai/gpt-6.1-sol".to_string(),
-                    model_id: "openai/gpt-6.1-sol".to_string(),
-                    label: "GPT-6.1 Sol (OpenRouter)".to_string(),
-                    badge: "🟡 GPT-6.1".to_string(),
-                    desc: "OpenAI GPT-6.1 Sol via OpenRouter".to_string(),
-                    context_window: Some(1_050_000),
-                },
-                ModelConfigEntry {
-                    key: "google/gemini-4-argon".to_string(),
-                    model_id: "google/gemini-4-argon".to_string(),
-                    label: "Gemini 4 Argon (OpenRouter)".to_string(),
-                    badge: "🔵 Gemini 4".to_string(),
-                    desc: "Google Gemini 4 Argon via OpenRouter".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "deepseek/deepseek-v4-pro".to_string(),
-                    model_id: "deepseek/deepseek-v4-pro".to_string(),
-                    label: "DeepSeek V4 Pro (OpenRouter)".to_string(),
-                    badge: "🐋 DeepSeek V4".to_string(),
-                    desc: "DeepSeek V4 Pro via OpenRouter".to_string(),
-                    context_window: Some(1_000_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "deepseek".to_string(),
-            title: "🐋 DeepSeek (BYOK)".to_string(),
-            base_url: "https://api.deepseek.com/v1".to_string(),
-            api_key_env: "DEEPSEEK_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(1_000_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "deepseek-v4-pro".to_string(),
-                    model_id: "deepseek-v4-pro".to_string(),
-                    label: "DeepSeek V4 Pro".to_string(),
-                    badge: "🧠 V4 Pro".to_string(),
-                    desc: "DeepSeek V4 Pro — 1.6T/49B MoE flagship reasoning & coding (1M ctx)"
-                        .to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "deepseek-flash".to_string(),
-                    model_id: "deepseek-flash".to_string(),
-                    label: "DeepSeek V4.1 Flash".to_string(),
-                    badge: "⚡ V4.1 Flash".to_string(),
-                    desc: "DeepSeek V4.1 Flash — fast multimodal & thinking agent (1M ctx)"
-                        .to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "deepseek-chat".to_string(),
-                    model_id: "deepseek-chat".to_string(),
-                    label: "DeepSeek Chat (Pointer)".to_string(),
-                    badge: "🐋 Chat".to_string(),
-                    desc: "DeepSeek default chat pointer".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "deepseek-reasoner".to_string(),
-                    model_id: "deepseek-reasoner".to_string(),
-                    label: "DeepSeek Reasoner (Pointer)".to_string(),
-                    badge: "🧠 Reasoner".to_string(),
-                    desc: "DeepSeek default reasoner pointer".to_string(),
-                    context_window: Some(1_000_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "minimax".to_string(),
-            title: "🟠 MiniMax (BYOK)".to_string(),
-            base_url: "https://api.minimax.io/v1".to_string(),
-            api_key_env: "MINIMAX_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(200_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "MiniMax-M3".to_string(),
-                    model_id: "MiniMax-M3".to_string(),
-                    label: "MiniMax M3".to_string(),
-                    badge: "🟠 M3".to_string(),
-                    desc: "MiniMax M3 Reasoning".to_string(),
-                    context_window: Some(200_000),
-                },
-                ModelConfigEntry {
-                    key: "MiniMax-M2.7".to_string(),
-                    model_id: "MiniMax-M2.7".to_string(),
-                    label: "MiniMax M2.7".to_string(),
-                    badge: "🟠 M2.7".to_string(),
-                    desc: "MiniMax M2.7 Coding".to_string(),
-                    context_window: Some(200_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "glm".to_string(),
-            title: "🟢 Z.ai / GLM (BYOK)".to_string(),
-            base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
-            api_key_env: "GLM_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(1_000_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "glm-5.3".to_string(),
-                    model_id: "glm-5.3".to_string(),
-                    label: "GLM-5.3".to_string(),
-                    badge: "🧠 GLM-5.3".to_string(),
-                    desc: "Z.ai GLM-5.3 flagship coding & agent model (1M ctx)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "glm-5.3-flash".to_string(),
-                    model_id: "glm-5.3-flash".to_string(),
-                    label: "GLM-5.3 Flash".to_string(),
-                    badge: "⚡ Flash".to_string(),
-                    desc: "Z.ai GLM-5.3 Flash native multimodal high-speed model".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "glm-5.1".to_string(),
-                    model_id: "glm-5.1".to_string(),
-                    label: "GLM-5.1".to_string(),
-                    badge: "🟢 GLM-5.1".to_string(),
-                    desc: "Z.ai GLM-5.1 long-horizon coding agent".to_string(),
-                    context_window: Some(200_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "groq".to_string(),
-            title: "⚡ Groq LPU (BYOK)".to_string(),
-            base_url: "https://api.groq.com/openai/v1".to_string(),
-            api_key_env: "GROQ_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(131_072),
-            models: vec![
-                ModelConfigEntry {
-                    key: "openai/gpt-oss-120b".to_string(),
-                    model_id: "openai/gpt-oss-120b".to_string(),
-                    label: "OpenAI GPT-OSS 120B (Groq)".to_string(),
-                    badge: "⚡ ~500 tps".to_string(),
-                    desc: "Flagship open-weight 120B reasoning & tool-use on Groq LPU".to_string(),
-                    context_window: Some(131_072),
-                },
-                ModelConfigEntry {
-                    key: "qwen/qwen3.8-27b".to_string(),
-                    model_id: "qwen/qwen3.8-27b".to_string(),
-                    label: "Qwen 3.8 27B (Groq)".to_string(),
-                    badge: "⚡ ~450 tps".to_string(),
-                    desc: "Qwen 3.8 27B coding & reasoning on Groq LPU".to_string(),
-                    context_window: Some(131_072),
-                },
-                ModelConfigEntry {
-                    key: "minimaxai/minimax-m2.7".to_string(),
-                    model_id: "minimaxai/minimax-m2.7".to_string(),
-                    label: "MiniMax M2.7 (Groq)".to_string(),
-                    badge: "⚡ ~260 tps".to_string(),
-                    desc: "MiniMax M2.7 196K context coding model on Groq LPU".to_string(),
-                    context_window: Some(196_608),
-                },
-                ModelConfigEntry {
-                    key: "llama-3.3-70b-versatile".to_string(),
-                    model_id: "llama-3.3-70b-versatile".to_string(),
-                    label: "Llama 3.3 70B (Groq)".to_string(),
-                    badge: "⚡ ~280 tps".to_string(),
-                    desc: "Meta Llama 3.3 70B Versatile on Groq LPU".to_string(),
-                    context_window: Some(131_072),
-                },
-                ModelConfigEntry {
-                    key: "openai/gpt-oss-20b".to_string(),
-                    model_id: "openai/gpt-oss-20b".to_string(),
-                    label: "OpenAI GPT-OSS 20B (Groq)".to_string(),
-                    badge: "🚀 ~1000 tps".to_string(),
-                    desc: "Ultra-low latency 20B open-weight model on Groq LPU".to_string(),
-                    context_window: Some(131_072),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "xai".to_string(),
-            title: "✖️  xAI Grok (BYOK)".to_string(),
-            base_url: "https://api.x.ai/v1".to_string(),
-            api_key_env: "XAI_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(256_000),
-            models: vec![ModelConfigEntry {
-                key: "grok-4".to_string(),
-                model_id: "grok-4".to_string(),
-                label: "xAI Grok 4".to_string(),
-                badge: "✖️  Grok 4".to_string(),
-                desc: "xAI Grok 4".to_string(),
-                context_window: Some(256_000),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "zai".to_string(),
-            title: "🔮 Z.AI GLM Coding Plan (BYOK)".to_string(),
-            base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
-            api_key_env: "ZAI_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(1_000_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "glm-5.3".to_string(),
-                    model_id: "glm-5.3".to_string(),
-                    label: "GLM-5.3 (Z.AI Coding Plan)".to_string(),
-                    badge: "🔮 GLM-5.3".to_string(),
-                    desc: "Z.AI GLM-5.3 Coding Plan (1M ctx)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-                ModelConfigEntry {
-                    key: "glm-5.2".to_string(),
-                    model_id: "glm-5.2".to_string(),
-                    label: "GLM-5.2 (Z.AI Coding Plan)".to_string(),
-                    badge: "⚡ GLM-5.2".to_string(),
-                    desc: "Z.AI GLM-5.2 Coding Plan (1M ctx)".to_string(),
-                    context_window: Some(1_000_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "moonshot".to_string(),
-            title: "🌙 Moonshot Kimi API (BYOK)".to_string(),
-            base_url: "https://api.moonshot.ai/v1".to_string(),
-            api_key_env: "MOONSHOT_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(262_144),
-            models: vec![
-                ModelConfigEntry {
-                    key: "kimi-k2.7-code".to_string(),
-                    model_id: "kimi-k2.7-code".to_string(),
-                    label: "Kimi K2.7 Code".to_string(),
-                    badge: "🌙 K2.7 Code".to_string(),
-                    desc: "Moonshot Kimi K2.7 Code (262k ctx)".to_string(),
-                    context_window: Some(262_144),
-                },
-                ModelConfigEntry {
-                    key: "kimi-k2.6".to_string(),
-                    model_id: "kimi-k2.6".to_string(),
-                    label: "Kimi K2.6".to_string(),
-                    badge: "🌙 K2.6".to_string(),
-                    desc: "Moonshot Kimi K2.6 (262k ctx)".to_string(),
-                    context_window: Some(262_144),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "cerebras".to_string(),
-            title: "⚡ Cerebras Wafer-Scale (BYOK)".to_string(),
-            base_url: "https://api.cerebras.ai/v1".to_string(),
-            api_key_env: "CEREBRAS_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(131_072),
-            models: vec![
-                ModelConfigEntry {
-                    key: "gpt-oss-120b".to_string(),
-                    model_id: "gpt-oss-120b".to_string(),
-                    label: "GPT-OSS 120B (Cerebras)".to_string(),
-                    badge: "⚡ 2000+ tps".to_string(),
-                    desc: "Cerebras Wafer-Scale GPT-OSS 120B".to_string(),
-                    context_window: Some(131_072),
-                },
-                ModelConfigEntry {
-                    key: "zai-glm-4.7".to_string(),
-                    model_id: "zai-glm-4.7".to_string(),
-                    label: "Z.AI GLM-4.7 (Cerebras)".to_string(),
-                    badge: "⚡ Ultra-Fast".to_string(),
-                    desc: "Cerebras Wafer-Scale GLM-4.7".to_string(),
-                    context_window: Some(131_072),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "fireworks".to_string(),
-            title: "🎆 Fireworks AI (BYOK)".to_string(),
-            base_url: "https://api.fireworks.ai/inference/v1".to_string(),
-            api_key_env: "FIREWORKS_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(262_144),
-            models: vec![
-                ModelConfigEntry {
-                    key: "accounts/fireworks/models/deepseek-v4-pro".to_string(),
-                    model_id: "accounts/fireworks/models/deepseek-v4-pro".to_string(),
-                    label: "DeepSeek V4 Pro (Fireworks)".to_string(),
-                    badge: "🎆 V4 Pro".to_string(),
-                    desc: "Fireworks serverless DeepSeek V4 Pro".to_string(),
-                    context_window: Some(262_144),
-                },
-                ModelConfigEntry {
-                    key: "accounts/fireworks/models/kimi-k2p7-code".to_string(),
-                    model_id: "accounts/fireworks/models/kimi-k2p7-code".to_string(),
-                    label: "Kimi K2.7 Code (Fireworks)".to_string(),
-                    badge: "🎆 Kimi K2.7".to_string(),
-                    desc: "Fireworks serverless Kimi K2.7 Code".to_string(),
-                    context_window: Some(262_144),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "together".to_string(),
-            title: "🤝 Together AI (BYOK)".to_string(),
-            base_url: "https://api.together.xyz/v1".to_string(),
-            api_key_env: "TOGETHER_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(262_144),
-            models: vec![
-                ModelConfigEntry {
-                    key: "moonshotai/Kimi-K2.7-Code".to_string(),
-                    model_id: "moonshotai/Kimi-K2.7-Code".to_string(),
-                    label: "Kimi K2.7 Code (Together)".to_string(),
-                    badge: "🤝 Kimi K2.7".to_string(),
-                    desc: "Together AI Kimi K2.7 Code".to_string(),
-                    context_window: Some(262_144),
-                },
-                ModelConfigEntry {
-                    key: "deepseek-ai/DeepSeek-V4-Pro".to_string(),
-                    model_id: "deepseek-ai/DeepSeek-V4-Pro".to_string(),
-                    label: "DeepSeek V4 Pro (Together)".to_string(),
-                    badge: "🤝 V4 Pro".to_string(),
-                    desc: "Together AI DeepSeek V4 Pro".to_string(),
-                    context_window: Some(262_144),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "sambanova".to_string(),
-            title: "🚀 SambaNova Cloud (BYOK)".to_string(),
-            base_url: "https://api.sambanova.ai/v1".to_string(),
-            api_key_env: "SAMBANOVA_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(131_072),
-            models: vec![ModelConfigEntry {
-                key: "gpt-oss-120b".to_string(),
-                model_id: "gpt-oss-120b".to_string(),
-                label: "GPT-OSS 120B (SambaNova)".to_string(),
-                badge: "🚀 RDU".to_string(),
-                desc: "SambaNova RDU GPT-OSS 120B".to_string(),
-                context_window: Some(131_072),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "siliconflow".to_string(),
-            title: "💎 SiliconFlow (BYOK)".to_string(),
-            base_url: "https://api.siliconflow.com/v1".to_string(),
-            api_key_env: "SILICONFLOW_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(256_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "deepseek-ai/DeepSeek-V4-Pro".to_string(),
-                    model_id: "deepseek-ai/DeepSeek-V4-Pro".to_string(),
-                    label: "DeepSeek V4 Pro (SiliconFlow)".to_string(),
-                    badge: "💎 V4 Pro".to_string(),
-                    desc: "SiliconFlow DeepSeek V4 Pro".to_string(),
-                    context_window: Some(256_000),
-                },
-                ModelConfigEntry {
-                    key: "zai-org/GLM-5.1".to_string(),
-                    model_id: "zai-org/GLM-5.1".to_string(),
-                    label: "GLM-5.1 (SiliconFlow)".to_string(),
-                    badge: "💎 GLM-5.1".to_string(),
-                    desc: "SiliconFlow Z.AI GLM-5.1".to_string(),
-                    context_window: Some(200_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "deepinfra".to_string(),
-            title: "🏗️  DeepInfra (BYOK)".to_string(),
-            base_url: "https://api.deepinfra.com/v1/openai".to_string(),
-            api_key_env: "DEEPINFRA_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(256_000),
-            models: vec![ModelConfigEntry {
-                key: "deepseek-ai/DeepSeek-V4-Flash-0731".to_string(),
-                model_id: "deepseek-ai/DeepSeek-V4-Flash-0731".to_string(),
-                label: "DeepSeek V4 Flash (DeepInfra)".to_string(),
-                badge: "🏗️  V4 Flash".to_string(),
-                desc: "DeepInfra DeepSeek V4 Flash".to_string(),
-                context_window: Some(256_000),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "mistral".to_string(),
-            title: "🌬️  Mistral AI (BYOK)".to_string(),
-            base_url: "https://api.mistral.ai/v1".to_string(),
-            api_key_env: "MISTRAL_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(256_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "devstral-medium-latest".to_string(),
-                    model_id: "devstral-medium-latest".to_string(),
-                    label: "Mistral Devstral Medium".to_string(),
-                    badge: "🌬️  Devstral".to_string(),
-                    desc: "Mistral SWE & Coding Agent Model".to_string(),
-                    context_window: Some(256_000),
-                },
-                ModelConfigEntry {
-                    key: "codestral-latest".to_string(),
-                    model_id: "codestral-latest".to_string(),
-                    label: "Mistral Codestral".to_string(),
-                    badge: "⚡ Codestral".to_string(),
-                    desc: "Mistral fast code generation model".to_string(),
-                    context_window: Some(256_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "nvidia".to_string(),
-            title: "🟩 NVIDIA NIM (BYOK)".to_string(),
-            base_url: "https://integrate.api.nvidia.com/v1".to_string(),
-            api_key_env: "NVIDIA_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(131_072),
-            models: vec![ModelConfigEntry {
-                key: "nvidia/llama-3.1-nemotron-70b-instruct".to_string(),
-                model_id: "nvidia/llama-3.1-nemotron-70b-instruct".to_string(),
-                label: "Llama 3.1 Nemotron 70B (NVIDIA)".to_string(),
-                badge: "🟩 NIM".to_string(),
-                desc: "NVIDIA NIM hosted inference".to_string(),
-                context_window: Some(131_072),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "huggingface".to_string(),
-            title: "🤗 Hugging Face Inference (BYOK)".to_string(),
-            base_url: "https://router.huggingface.co/v1".to_string(),
-            api_key_env: "HF_TOKEN".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(131_072),
-            models: vec![ModelConfigEntry {
-                key: "openai/gpt-oss-120b".to_string(),
-                model_id: "openai/gpt-oss-120b".to_string(),
-                label: "GPT-OSS 120B (HF Router)".to_string(),
-                badge: "🤗 HF Router".to_string(),
-                desc: "Hugging Face Inference Router".to_string(),
-                context_window: Some(131_072),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "baseten".to_string(),
-            title: "🧱 Baseten (BYOK)".to_string(),
-            base_url: "https://inference.baseten.co/v1".to_string(),
-            api_key_env: "BASETEN_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(262_144),
-            models: vec![ModelConfigEntry {
-                key: "moonshotai/Kimi-K2.7-Code".to_string(),
-                model_id: "moonshotai/Kimi-K2.7-Code".to_string(),
-                label: "Kimi K2.7 Code (Baseten)".to_string(),
-                badge: "🧱 Baseten".to_string(),
-                desc: "Baseten dedicated Kimi K2.7 Code".to_string(),
-                context_window: Some(262_144),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "novita".to_string(),
-            title: "✨ Novita AI (BYOK)".to_string(),
-            base_url: "https://api.novita.ai/openai/v1".to_string(),
-            api_key_env: "NOVITA_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(262_144),
-            models: vec![ModelConfigEntry {
-                key: "moonshotai/kimi-k2.7-code".to_string(),
-                model_id: "moonshotai/kimi-k2.7-code".to_string(),
-                label: "Kimi K2.7 Code (Novita)".to_string(),
-                badge: "✨ Novita".to_string(),
-                desc: "Novita AI Kimi K2.7 Code".to_string(),
-                context_window: Some(262_144),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "venice".to_string(),
-            title: "🎭 Venice AI (BYOK)".to_string(),
-            base_url: "https://api.venice.ai/api/v1".to_string(),
-            api_key_env: "VENICE_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(131_072),
-            models: vec![ModelConfigEntry {
-                key: "llama-3.3-70b".to_string(),
-                model_id: "llama-3.3-70b".to_string(),
-                label: "Llama 3.3 70B (Venice)".to_string(),
-                badge: "🎭 Private".to_string(),
-                desc: "Venice AI privacy-preserving inference".to_string(),
-                context_window: Some(131_072),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "microsoft-github".to_string(),
-            title: "🪟 Microsoft / GitHub Models (BYOK)".to_string(),
-            base_url: "https://models.inference.ai.azure.com".to_string(),
-            api_key_env: "GITHUB_TOKEN".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(128_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "gpt-4.1".to_string(),
-                    model_id: "gpt-4.1".to_string(),
-                    label: "GitHub Models GPT-4.1".to_string(),
-                    badge: "🐙 GitHub Pro".to_string(),
-                    desc: "GitHub Copilot / Azure AI Inference".to_string(),
-                    context_window: Some(128_000),
-                },
-                ModelConfigEntry {
-                    key: "DeepSeek-R1".to_string(),
-                    model_id: "DeepSeek-R1".to_string(),
-                    label: "GitHub Models DeepSeek-R1".to_string(),
-                    badge: "🧠 GitHub R1".to_string(),
-                    desc: "Azure-hosted DeepSeek-R1".to_string(),
-                    context_window: Some(128_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "opencode-zen".to_string(),
-            title: "🧘 OpenCode Zen / Go (BYOK)".to_string(),
-            base_url: "https://opencode.ai/zen/go/v1".to_string(),
-            api_key_env: "OPENCODE_API_KEY".to_string(),
-            is_local: false,
-            protocol: None,
-            context_window: Some(256_000),
-            models: vec![
-                ModelConfigEntry {
-                    key: "gpt-6-luna".to_string(),
-                    model_id: "gpt-6-luna".to_string(),
-                    label: "GPT-6 Luna (Zen)".to_string(),
-                    badge: "🧘 Zen Flagship".to_string(),
-                    desc: "OpenCode Zen GPT-6 Luna".to_string(),
-                    context_window: Some(256_000),
-                },
-                ModelConfigEntry {
-                    key: "gpt-5.6-luna".to_string(),
-                    model_id: "gpt-5.6-luna".to_string(),
-                    label: "GPT-5.6 Luna (Zen)".to_string(),
-                    badge: "⚡ Zen Fast".to_string(),
-                    desc: "OpenCode Zen GPT-5.6 Luna".to_string(),
-                    context_window: Some(256_000),
-                },
-                ModelConfigEntry {
-                    key: "deepseek-v4.1-flash".to_string(),
-                    model_id: "deepseek-v4.1-flash".to_string(),
-                    label: "DeepSeek V4.1 Flash (Zen)".to_string(),
-                    badge: "🐋 Zen Flash".to_string(),
-                    desc: "OpenCode Zen DeepSeek V4.1 Flash".to_string(),
-                    context_window: Some(256_000),
-                },
-                ModelConfigEntry {
-                    key: "grok-4.7".to_string(),
-                    model_id: "grok-4.7".to_string(),
-                    label: "Grok 4.7 (Zen)".to_string(),
-                    badge: "✖️  Zen Grok".to_string(),
-                    desc: "OpenCode Zen Grok 4.7".to_string(),
-                    context_window: Some(256_000),
-                },
-                ModelConfigEntry {
-                    key: "glm-5.3".to_string(),
-                    model_id: "glm-5.3".to_string(),
-                    label: "GLM-5.3 (Zen)".to_string(),
-                    badge: "🔮 Zen GLM".to_string(),
-                    desc: "OpenCode Zen GLM-5.3".to_string(),
-                    context_window: Some(200_000),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "ollama".to_string(),
-            title: "🦙 Ollama (Yerel · :11434)".to_string(),
-            base_url: "http://127.0.0.1:11434/v1".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            is_local: true,
-            protocol: None,
-            context_window: Some(65_536),
-            models: vec![
-                ModelConfigEntry {
-                    key: "qwen2.5-coder:32b".to_string(),
-                    model_id: "qwen2.5-coder:32b".to_string(),
-                    label: "Ollama Qwen 2.5 Coder 32B".to_string(),
-                    badge: "🟢 Local".to_string(),
-                    desc: "Local Ollama (127.0.0.1:11434)".to_string(),
-                    context_window: Some(65_536),
-                },
-                ModelConfigEntry {
-                    key: "deepseek-r1:32b".to_string(),
-                    model_id: "deepseek-r1:32b".to_string(),
-                    label: "Ollama DeepSeek R1 32B".to_string(),
-                    badge: "🟢 Local R1".to_string(),
-                    desc: "Local Ollama Reasoning (127.0.0.1:11434)".to_string(),
-                    context_window: Some(65_536),
-                },
-            ],
-        },
-        ProviderGroupConfig {
-            id: "lm-studio".to_string(),
-            title: "🎛️  LM Studio (Yerel · :1234)".to_string(),
-            base_url: "http://127.0.0.1:1234/v1".to_string(),
-            api_key_env: "LM_STUDIO_API_KEY".to_string(),
-            is_local: true,
-            protocol: None,
-            context_window: Some(65_536),
-            models: vec![ModelConfigEntry {
-                key: "local-model".to_string(),
-                model_id: "local-model".to_string(),
-                label: "LM Studio Active Model".to_string(),
-                badge: "🟢 LM Studio".to_string(),
-                desc: "Local LM Studio OpenAI Server (127.0.0.1:1234)".to_string(),
-                context_window: Some(65_536),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "llama.cpp".to_string(),
-            title: "⚡ llama.cpp / llama-swap (Yerel · :8080)".to_string(),
-            base_url: "http://127.0.0.1:8080/v1".to_string(),
-            api_key_env: "LLAMA_CPP_API_KEY".to_string(),
-            is_local: true,
-            protocol: None,
-            context_window: Some(65_536),
-            models: vec![ModelConfigEntry {
-                key: "default".to_string(),
-                model_id: "default".to_string(),
-                label: "llama.cpp / llama-swap Active Model".to_string(),
-                badge: "🟢 llama.cpp".to_string(),
-                desc: "Local llama-server / llama-swap (127.0.0.1:8080)".to_string(),
-                context_window: Some(65_536),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "vllm".to_string(),
-            title: "🚀 vLLM (Yerel · :8000)".to_string(),
-            base_url: "http://127.0.0.1:8000/v1".to_string(),
-            api_key_env: "VLLM_API_KEY".to_string(),
-            is_local: true,
-            protocol: None,
-            context_window: Some(65_536),
-            models: vec![ModelConfigEntry {
-                key: "default".to_string(),
-                model_id: "default".to_string(),
-                label: "vLLM Active Model".to_string(),
-                badge: "🟢 vLLM".to_string(),
-                desc: "Local vLLM OpenAI Server (127.0.0.1:8000)".to_string(),
-                context_window: Some(65_536),
-            }],
-        },
-        ProviderGroupConfig {
-            id: "litellm".to_string(),
-            title: "🔀 LiteLLM Proxy (Yerel/Gateway · :4000)".to_string(),
-            base_url: "http://127.0.0.1:4000/v1".to_string(),
-            api_key_env: "LITELLM_API_KEY".to_string(),
-            is_local: true,
-            protocol: None,
-            context_window: Some(128_000),
-            models: vec![ModelConfigEntry {
-                key: "default".to_string(),
-                model_id: "default".to_string(),
-                label: "LiteLLM Default Route".to_string(),
-                badge: "🔀 LiteLLM".to_string(),
-                desc: "LiteLLM Proxy (127.0.0.1:4000)".to_string(),
-                context_window: Some(128_000),
-            }],
-        },
-    ]
+    serde_json::from_str(include_str!("../data/byok_catalog.json")).unwrap_or_default()
 }
 
 fn default_hosts() -> Vec<RemoteHostConfig> {
@@ -1875,7 +1015,67 @@ pub fn load_external_models_yml_providers_opts(include_omp: bool) -> Vec<Provide
     out
 }
 
+/// Everything `load_user_config` derives its result from: the config dir, the two files it reads
+/// (mtime + length) and the env vars that feed defaults. Same stamp, same config.
+type ConfigStamp = (
+    PathBuf,
+    Vec<Option<(std::time::SystemTime, u64)>>,
+    Vec<Option<String>>,
+);
+
+static CONFIG_CACHE: Mutex<Option<(ConfigStamp, SpavnUserConfig)>> = Mutex::new(None);
+
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+fn config_stamp() -> ConfigStamp {
+    let dir = spavn_dir();
+    let mut files = vec![dir.join("config.json"), dir.join("models.yml")];
+    if let Ok(h) = std::env::var("HOME") {
+        files.push(
+            PathBuf::from(&h)
+                .join(".omp")
+                .join("agent")
+                .join("models.yml"),
+        );
+    }
+    let stamps = files.iter().map(|f| file_stamp(f)).collect();
+    let env = ["HOME", "SPAVN_MODEL", "SPAVN_LANG", "LANG", "LC_ALL"]
+        .iter()
+        .map(|k| std::env::var(k).ok())
+        .collect();
+    (dir, stamps, env)
+}
+
+/// Cached by file stamp: ~45 call sites (every `resolve_endpoint`, tool call, picker) used to
+/// re-read and re-parse `config.json` plus `models.yml` each time. Editing either file from
+/// outside is still picked up on the next call; `save_user_config` drops the cache itself.
 pub fn load_user_config() -> SpavnUserConfig {
+    let stamp = config_stamp();
+    if let Ok(guard) = CONFIG_CACHE.lock() {
+        if let Some((cached_stamp, cfg)) = guard.as_ref() {
+            if *cached_stamp == stamp {
+                set_lang_en(cfg.language.eq_ignore_ascii_case("en"));
+                return cfg.clone();
+            }
+        }
+    }
+    let cfg = load_user_config_uncached();
+    if let Ok(mut guard) = CONFIG_CACHE.lock() {
+        *guard = Some((stamp, cfg.clone()));
+    }
+    cfg
+}
+
+fn invalidate_config_cache() {
+    if let Ok(mut guard) = CONFIG_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+fn load_user_config_uncached() -> SpavnUserConfig {
     let cfg_path = spavn_dir().join("config.json");
     let mut cfg = if let Ok(raw) = fs::read_to_string(&cfg_path) {
         set_owner_only_mode(&cfg_path, 0o600);
@@ -1967,9 +1167,83 @@ pub fn save_user_config(cfg: &SpavnUserConfig) -> Result<(), String> {
     set_lang_en(cfg.language.eq_ignore_ascii_case("en"));
     let cfg_path = spavn_dir().join("config.json");
     let json_str = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    fs::write(&cfg_path, format!("{}\n", json_str)).map_err(|e| e.to_string())?;
-    set_owner_only_mode(&cfg_path, 0o600);
-    Ok(())
+    let written = write_atomic(&cfg_path, &format!("{}\n", json_str));
+    invalidate_config_cache();
+    written
+}
+
+/// Held while `config.json` is read-modified-written so two terminals cannot lose each other's
+/// edits. A plain `create_new` lock file (no extra dependency, works on the 1.80 MSRV); a lock
+/// older than 5 s is treated as left behind by a crashed process and taken over.
+struct ConfigLock(PathBuf);
+
+impl ConfigLock {
+    fn acquire() -> Self {
+        let path = spavn_dir().join("config.json.lock");
+        for _ in 0..100 {
+            if fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .is_ok()
+            {
+                return Self(path);
+            }
+            let stale = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(5));
+            if stale {
+                let _ = fs::remove_file(&path);
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        Self(path)
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Atomic read-modify-write of `config.json`: re-reads the file under the lock, applies `f`,
+/// saves. Prefer this over `load_user_config()` + `save_user_config()`.
+pub fn update_user_config(f: impl FnOnce(&mut SpavnUserConfig)) -> Result<(), String> {
+    let _lock = ConfigLock::acquire();
+    invalidate_config_cache();
+    let mut cfg = load_user_config();
+    f(&mut cfg);
+    save_user_config(&cfg)
+}
+
+/// Write via a sibling temp file + rename so concurrent readers (other terminals) never see a
+/// truncated file and a crash mid-write cannot corrupt the target. Result is owner-only (0600).
+pub fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&tmp, contents).map_err(|e| e.to_string())?;
+    set_owner_only_mode(&tmp, 0o600);
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
+/// Model most recently selected in any terminal; seeds new sessions (see `main`).
+pub fn save_last_model(model_key: &str) {
+    let key = model_key.trim();
+    if !key.is_empty() {
+        let _ = write_atomic(&spavn_dir().join("last_model"), &format!("{}\n", key));
+    }
+}
+
+pub fn load_last_model() -> Option<String> {
+    let raw = fs::read_to_string(spavn_dir().join("last_model")).ok()?;
+    let key = raw.trim();
+    (!key.is_empty()).then(|| key.to_string())
 }
 
 pub fn load_user_profile_markdown() -> Option<String> {

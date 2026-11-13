@@ -1,0 +1,926 @@
+[
+  {
+    "id": "openai",
+    "title": "🟡 OpenAI (BYOK)",
+    "base_url": "https://api.openai.com/v1",
+    "api_key_env": "OPENAI_API_KEY",
+    "is_local": false,
+    "context_window": 1050000,
+    "models": [
+      {
+        "key": "gpt-6.1-sol",
+        "model_id": "gpt-6.1-sol",
+        "label": "OpenAI GPT-6.1 Sol",
+        "badge": "🟡 Coding",
+        "desc": "Near-Astra complex coding & agentic workhorse (1.05M ctx)",
+        "context_window": 1050000
+      },
+      {
+        "key": "gpt-6-astra",
+        "model_id": "gpt-6-astra",
+        "label": "OpenAI GPT-6 Astra",
+        "badge": "🧠 Flagship",
+        "desc": "Most capable frontier reasoning & coding model (1.05M ctx)",
+        "context_window": 1050000
+      },
+      {
+        "key": "gpt-6.1-terra",
+        "model_id": "gpt-6.1-terra",
+        "label": "OpenAI GPT-6.1 Terra",
+        "badge": "⚡ Fast",
+        "desc": "Fast visual reasoning, computer use & writing (1.05M ctx)",
+        "context_window": 1050000
+      },
+      {
+        "key": "gpt-6-luna",
+        "model_id": "gpt-6-luna",
+        "label": "OpenAI GPT-6 Luna",
+        "badge": "🚀 Efficient",
+        "desc": "Ultra-fast, cost-efficient high-volume model (1.05M ctx)",
+        "context_window": 1050000
+      },
+      {
+        "key": "gpt-5.6-sol",
+        "model_id": "gpt-5.6-sol",
+        "label": "OpenAI GPT-5.6 Sol",
+        "badge": "🟡 GPT-5.6",
+        "desc": "GPT-5.6 flagship for complex professional work (1.05M ctx)",
+        "context_window": 1050000
+      },
+      {
+        "key": "gpt-5.5",
+        "model_id": "gpt-5.5",
+        "label": "OpenAI GPT-5.5",
+        "badge": "🟡 GPT-5.5",
+        "desc": "GPT-5.5 flagship for coding & professional work (1.05M ctx)",
+        "context_window": 1050000
+      },
+      {
+        "key": "gpt-5.4",
+        "model_id": "gpt-5.4",
+        "label": "OpenAI GPT-5.4",
+        "badge": "🟡 GPT-5.4",
+        "desc": "OpenAI GPT-5.4 coding & reasoning",
+        "context_window": 272000
+      },
+      {
+        "key": "gpt-5.4-mini",
+        "model_id": "gpt-5.4-mini",
+        "label": "OpenAI GPT-5.4 Mini",
+        "badge": "⚡ Mini",
+        "desc": "Fast mini model for coding, computer use & sub-agents",
+        "context_window": 272000
+      }
+    ]
+  },
+  {
+    "id": "anthropic",
+    "title": "🟣 Anthropic Claude (BYOK)",
+    "base_url": "https://api.anthropic.com/v1",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "is_local": false,
+    "context_window": 1000000,
+    "models": [
+      {
+        "key": "claude-sonnet-5-5",
+        "model_id": "claude-sonnet-5-5",
+        "label": "Claude Sonnet 5.5",
+        "badge": "⚡ Balanced",
+        "desc": "Anthropic Claude Sonnet 5.5 — fast coding & agents (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "claude-opus-5-5",
+        "model_id": "claude-opus-5-5",
+        "label": "Claude Opus 5.5",
+        "badge": "🧠 Deep",
+        "desc": "Anthropic Claude Opus 5.5 — flagship reasoning & SWE (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "claude-fable-5-1",
+        "model_id": "claude-fable-5-1",
+        "label": "Claude Fable 5.1",
+        "badge": "👑 Frontier",
+        "desc": "Anthropic Claude Fable 5.1 — top capability tier (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "claude-haiku-5-5",
+        "model_id": "claude-haiku-5-5",
+        "label": "Claude Haiku 5.5",
+        "badge": "🚀 Fast",
+        "desc": "Anthropic Claude Haiku 5.5 — fastest & lowest cost (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "sonnet",
+        "model_id": "claude-sonnet-5-5",
+        "label": "Sonnet (short name)",
+        "badge": "⚡ Balanced",
+        "desc": "Alias → claude-sonnet-5-5 (1M context)",
+        "context_window": 1000000
+      },
+      {
+        "key": "opus",
+        "model_id": "claude-opus-5-5",
+        "label": "Opus (short name)",
+        "badge": "🧠 Deep",
+        "desc": "Alias → claude-opus-5-5 (1M context)",
+        "context_window": 1000000
+      },
+      {
+        "key": "haiku",
+        "model_id": "claude-haiku-5-5",
+        "label": "Haiku (short name)",
+        "badge": "🚀 Fast",
+        "desc": "Alias → claude-haiku-5-5 (1M context)",
+        "context_window": 1000000
+      },
+      {
+        "key": "fable",
+        "model_id": "claude-fable-5-1",
+        "label": "Fable (short name)",
+        "badge": "👑 Frontier",
+        "desc": "Alias → claude-fable-5-1 (1M context)",
+        "context_window": 1000000
+      }
+    ]
+  },
+  {
+    "id": "gemini",
+    "title": "🔵 Google Gemini (BYOK)",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "api_key_env": "GEMINI_API_KEY",
+    "is_local": false,
+    "context_window": 1000000,
+    "models": [
+      {
+        "key": "gemini-4-argon",
+        "model_id": "gemini-4-argon",
+        "label": "Gemini 4 Argon",
+        "badge": "🧠 Flagship",
+        "desc": "Google Gemini 4 Argon — flagship reasoning (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "gemini-4-carbon",
+        "model_id": "gemini-4-carbon",
+        "label": "Gemini 4 Carbon",
+        "badge": "💎 Carbon",
+        "desc": "Google Gemini 4 Carbon — frontier reasoning & 256K output (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "gemini-4-hydrogen",
+        "model_id": "gemini-4-hydrogen",
+        "label": "Gemini 4 Hydrogen",
+        "badge": "⚛️ Hydrogen",
+        "desc": "Google Gemini 4 Hydrogen — fast agentic coding, xhigh thinking (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "gemini-3.8-flash",
+        "model_id": "gemini-3.8-flash",
+        "label": "Gemini 3.8 Flash",
+        "badge": "🔵 SWE/Agents",
+        "desc": "Google Gemini 3.8 Flash — long-horizon SWE & agents (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "gemini-3.6-flash",
+        "model_id": "gemini-3.6-flash",
+        "label": "Gemini 3.6 Flash",
+        "badge": "⚡ Balanced",
+        "desc": "Google Gemini 3.6 Flash — general agentic & multimodal (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "gemini-3.5-flash-lite",
+        "model_id": "gemini-3.5-flash-lite",
+        "label": "Gemini 3.5 Flash-Lite",
+        "badge": "🚀 Lite",
+        "desc": "Google Gemini 3.5 Flash-Lite — fastest & lowest cost (1M ctx)",
+        "context_window": 1000000
+      }
+    ]
+  },
+  {
+    "id": "openrouter",
+    "title": "🌐 OpenRouter (BYOK)",
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "is_local": false,
+    "context_window": 1000000,
+    "models": [
+      {
+        "key": "openrouter/auto",
+        "model_id": "openrouter/auto",
+        "label": "OpenRouter Auto",
+        "badge": "🌐 Auto",
+        "desc": "OpenRouter Smart Router",
+        "context_window": 1000000
+      },
+      {
+        "key": "anthropic/claude-sonnet-5.5",
+        "model_id": "anthropic/claude-sonnet-5.5",
+        "label": "Claude Sonnet 5.5 (OpenRouter)",
+        "badge": "🟣 Claude 5.5",
+        "desc": "Anthropic Claude Sonnet 5.5 via OpenRouter",
+        "context_window": 1000000
+      },
+      {
+        "key": "anthropic/claude-opus-5.5",
+        "model_id": "anthropic/claude-opus-5.5",
+        "label": "Claude Opus 5.5 (OpenRouter)",
+        "badge": "🟣 Opus 5.5",
+        "desc": "Anthropic Claude Opus 5.5 via OpenRouter",
+        "context_window": 1000000
+      },
+      {
+        "key": "openai/gpt-6.1-sol",
+        "model_id": "openai/gpt-6.1-sol",
+        "label": "GPT-6.1 Sol (OpenRouter)",
+        "badge": "🟡 GPT-6.1",
+        "desc": "OpenAI GPT-6.1 Sol via OpenRouter",
+        "context_window": 1050000
+      },
+      {
+        "key": "google/gemini-4-argon",
+        "model_id": "google/gemini-4-argon",
+        "label": "Gemini 4 Argon (OpenRouter)",
+        "badge": "🔵 Gemini 4",
+        "desc": "Google Gemini 4 Argon via OpenRouter",
+        "context_window": 1000000
+      },
+      {
+        "key": "google/gemini-4-carbon",
+        "model_id": "google/gemini-4-carbon",
+        "label": "Gemini 4 Carbon (OpenRouter)",
+        "badge": "💎 Gemini 4",
+        "desc": "Google Gemini 4 Carbon via OpenRouter",
+        "context_window": 1000000
+      },
+      {
+        "key": "deepseek/deepseek-v4-pro",
+        "model_id": "deepseek/deepseek-v4-pro",
+        "label": "DeepSeek V4 Pro (OpenRouter)",
+        "badge": "🐋 DeepSeek V4",
+        "desc": "DeepSeek V4 Pro via OpenRouter",
+        "context_window": 1000000
+      }
+    ]
+  },
+  {
+    "id": "deepseek",
+    "title": "🐋 DeepSeek (BYOK)",
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "is_local": false,
+    "context_window": 1000000,
+    "models": [
+      {
+        "key": "deepseek-v4-pro",
+        "model_id": "deepseek-v4-pro",
+        "label": "DeepSeek V4 Pro",
+        "badge": "🧠 V4 Pro",
+        "desc": "DeepSeek V4 Pro — 1.6T/49B MoE flagship reasoning & coding (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "deepseek-flash",
+        "model_id": "deepseek-flash",
+        "label": "DeepSeek V4.1 Flash",
+        "badge": "⚡ V4.1 Flash",
+        "desc": "DeepSeek V4.1 Flash — fast multimodal & thinking agent (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "deepseek-chat",
+        "model_id": "deepseek-chat",
+        "label": "DeepSeek Chat (Pointer)",
+        "badge": "🐋 Chat",
+        "desc": "DeepSeek default chat pointer",
+        "context_window": 1000000
+      },
+      {
+        "key": "deepseek-reasoner",
+        "model_id": "deepseek-reasoner",
+        "label": "DeepSeek Reasoner (Pointer)",
+        "badge": "🧠 Reasoner",
+        "desc": "DeepSeek default reasoner pointer",
+        "context_window": 1000000
+      }
+    ]
+  },
+  {
+    "id": "minimax",
+    "title": "🟠 MiniMax (BYOK)",
+    "base_url": "https://api.minimax.io/v1",
+    "api_key_env": "MINIMAX_API_KEY",
+    "is_local": false,
+    "context_window": 200000,
+    "models": [
+      {
+        "key": "MiniMax-M3",
+        "model_id": "MiniMax-M3",
+        "label": "MiniMax M3",
+        "badge": "🟠 M3",
+        "desc": "MiniMax M3 Reasoning",
+        "context_window": 200000
+      },
+      {
+        "key": "MiniMax-M2.7",
+        "model_id": "MiniMax-M2.7",
+        "label": "MiniMax M2.7",
+        "badge": "🟠 M2.7",
+        "desc": "MiniMax M2.7 Coding",
+        "context_window": 200000
+      }
+    ]
+  },
+  {
+    "id": "glm",
+    "title": "🟢 Z.ai / GLM (BYOK)",
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key_env": "GLM_API_KEY",
+    "is_local": false,
+    "context_window": 1000000,
+    "models": [
+      {
+        "key": "glm-5.3",
+        "model_id": "glm-5.3",
+        "label": "GLM-5.3",
+        "badge": "🧠 GLM-5.3",
+        "desc": "Z.ai GLM-5.3 flagship coding & agent model (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "glm-5.3-flash",
+        "model_id": "glm-5.3-flash",
+        "label": "GLM-5.3 Flash",
+        "badge": "⚡ Flash",
+        "desc": "Z.ai GLM-5.3 Flash native multimodal high-speed model",
+        "context_window": 1000000
+      },
+      {
+        "key": "glm-5.1",
+        "model_id": "glm-5.1",
+        "label": "GLM-5.1",
+        "badge": "🟢 GLM-5.1",
+        "desc": "Z.ai GLM-5.1 long-horizon coding agent",
+        "context_window": 200000
+      }
+    ]
+  },
+  {
+    "id": "groq",
+    "title": "⚡ Groq LPU (BYOK)",
+    "base_url": "https://api.groq.com/openai/v1",
+    "api_key_env": "GROQ_API_KEY",
+    "is_local": false,
+    "context_window": 131072,
+    "models": [
+      {
+        "key": "openai/gpt-oss-120b",
+        "model_id": "openai/gpt-oss-120b",
+        "label": "OpenAI GPT-OSS 120B (Groq)",
+        "badge": "⚡ ~500 tps",
+        "desc": "Flagship open-weight 120B reasoning & tool-use on Groq LPU",
+        "context_window": 131072
+      },
+      {
+        "key": "qwen/qwen3.8-27b",
+        "model_id": "qwen/qwen3.8-27b",
+        "label": "Qwen 3.8 27B (Groq)",
+        "badge": "⚡ ~450 tps",
+        "desc": "Qwen 3.8 27B coding & reasoning on Groq LPU",
+        "context_window": 131072
+      },
+      {
+        "key": "minimaxai/minimax-m2.7",
+        "model_id": "minimaxai/minimax-m2.7",
+        "label": "MiniMax M2.7 (Groq)",
+        "badge": "⚡ ~260 tps",
+        "desc": "MiniMax M2.7 196K context coding model on Groq LPU",
+        "context_window": 196608
+      },
+      {
+        "key": "llama-3.3-70b-versatile",
+        "model_id": "llama-3.3-70b-versatile",
+        "label": "Llama 3.3 70B (Groq)",
+        "badge": "⚡ ~280 tps",
+        "desc": "Meta Llama 3.3 70B Versatile on Groq LPU",
+        "context_window": 131072
+      },
+      {
+        "key": "openai/gpt-oss-20b",
+        "model_id": "openai/gpt-oss-20b",
+        "label": "OpenAI GPT-OSS 20B (Groq)",
+        "badge": "🚀 ~1000 tps",
+        "desc": "Ultra-low latency 20B open-weight model on Groq LPU",
+        "context_window": 131072
+      }
+    ]
+  },
+  {
+    "id": "xai",
+    "title": "✖️  xAI Grok (BYOK)",
+    "base_url": "https://api.x.ai/v1",
+    "api_key_env": "XAI_API_KEY",
+    "is_local": false,
+    "context_window": 256000,
+    "models": [
+      {
+        "key": "grok-4",
+        "model_id": "grok-4",
+        "label": "xAI Grok 4",
+        "badge": "✖️  Grok 4",
+        "desc": "xAI Grok 4",
+        "context_window": 256000
+      }
+    ]
+  },
+  {
+    "id": "zai",
+    "title": "🔮 Z.AI GLM Coding Plan (BYOK)",
+    "base_url": "https://api.z.ai/api/coding/paas/v4",
+    "api_key_env": "ZAI_API_KEY",
+    "is_local": false,
+    "context_window": 1000000,
+    "models": [
+      {
+        "key": "glm-5.3",
+        "model_id": "glm-5.3",
+        "label": "GLM-5.3 (Z.AI Coding Plan)",
+        "badge": "🔮 GLM-5.3",
+        "desc": "Z.AI GLM-5.3 Coding Plan (1M ctx)",
+        "context_window": 1000000
+      },
+      {
+        "key": "glm-5.2",
+        "model_id": "glm-5.2",
+        "label": "GLM-5.2 (Z.AI Coding Plan)",
+        "badge": "⚡ GLM-5.2",
+        "desc": "Z.AI GLM-5.2 Coding Plan (1M ctx)",
+        "context_window": 1000000
+      }
+    ]
+  },
+  {
+    "id": "moonshot",
+    "title": "🌙 Moonshot Kimi API (BYOK)",
+    "base_url": "https://api.moonshot.ai/v1",
+    "api_key_env": "MOONSHOT_API_KEY",
+    "is_local": false,
+    "context_window": 262144,
+    "models": [
+      {
+        "key": "kimi-k2.7-code",
+        "model_id": "kimi-k2.7-code",
+        "label": "Kimi K2.7 Code",
+        "badge": "🌙 K2.7 Code",
+        "desc": "Moonshot Kimi K2.7 Code (262k ctx)",
+        "context_window": 262144
+      },
+      {
+        "key": "kimi-k2.6",
+        "model_id": "kimi-k2.6",
+        "label": "Kimi K2.6",
+        "badge": "🌙 K2.6",
+        "desc": "Moonshot Kimi K2.6 (262k ctx)",
+        "context_window": 262144
+      }
+    ]
+  },
+  {
+    "id": "cerebras",
+    "title": "⚡ Cerebras Wafer-Scale (BYOK)",
+    "base_url": "https://api.cerebras.ai/v1",
+    "api_key_env": "CEREBRAS_API_KEY",
+    "is_local": false,
+    "context_window": 131072,
+    "models": [
+      {
+        "key": "gpt-oss-120b",
+        "model_id": "gpt-oss-120b",
+        "label": "GPT-OSS 120B (Cerebras)",
+        "badge": "⚡ 2000+ tps",
+        "desc": "Cerebras Wafer-Scale GPT-OSS 120B",
+        "context_window": 131072
+      },
+      {
+        "key": "zai-glm-4.7",
+        "model_id": "zai-glm-4.7",
+        "label": "Z.AI GLM-4.7 (Cerebras)",
+        "badge": "⚡ Ultra-Fast",
+        "desc": "Cerebras Wafer-Scale GLM-4.7",
+        "context_window": 131072
+      }
+    ]
+  },
+  {
+    "id": "fireworks",
+    "title": "🎆 Fireworks AI (BYOK)",
+    "base_url": "https://api.fireworks.ai/inference/v1",
+    "api_key_env": "FIREWORKS_API_KEY",
+    "is_local": false,
+    "context_window": 262144,
+    "models": [
+      {
+        "key": "accounts/fireworks/models/deepseek-v4-pro",
+        "model_id": "accounts/fireworks/models/deepseek-v4-pro",
+        "label": "DeepSeek V4 Pro (Fireworks)",
+        "badge": "🎆 V4 Pro",
+        "desc": "Fireworks serverless DeepSeek V4 Pro",
+        "context_window": 262144
+      },
+      {
+        "key": "accounts/fireworks/models/kimi-k2p7-code",
+        "model_id": "accounts/fireworks/models/kimi-k2p7-code",
+        "label": "Kimi K2.7 Code (Fireworks)",
+        "badge": "🎆 Kimi K2.7",
+        "desc": "Fireworks serverless Kimi K2.7 Code",
+        "context_window": 262144
+      }
+    ]
+  },
+  {
+    "id": "together",
+    "title": "🤝 Together AI (BYOK)",
+    "base_url": "https://api.together.xyz/v1",
+    "api_key_env": "TOGETHER_API_KEY",
+    "is_local": false,
+    "context_window": 262144,
+    "models": [
+      {
+        "key": "moonshotai/Kimi-K2.7-Code",
+        "model_id": "moonshotai/Kimi-K2.7-Code",
+        "label": "Kimi K2.7 Code (Together)",
+        "badge": "🤝 Kimi K2.7",
+        "desc": "Together AI Kimi K2.7 Code",
+        "context_window": 262144
+      },
+      {
+        "key": "deepseek-ai/DeepSeek-V4-Pro",
+        "model_id": "deepseek-ai/DeepSeek-V4-Pro",
+        "label": "DeepSeek V4 Pro (Together)",
+        "badge": "🤝 V4 Pro",
+        "desc": "Together AI DeepSeek V4 Pro",
+        "context_window": 262144
+      }
+    ]
+  },
+  {
+    "id": "sambanova",
+    "title": "🚀 SambaNova Cloud (BYOK)",
+    "base_url": "https://api.sambanova.ai/v1",
+    "api_key_env": "SAMBANOVA_API_KEY",
+    "is_local": false,
+    "context_window": 131072,
+    "models": [
+      {
+        "key": "gpt-oss-120b",
+        "model_id": "gpt-oss-120b",
+        "label": "GPT-OSS 120B (SambaNova)",
+        "badge": "🚀 RDU",
+        "desc": "SambaNova RDU GPT-OSS 120B",
+        "context_window": 131072
+      }
+    ]
+  },
+  {
+    "id": "siliconflow",
+    "title": "💎 SiliconFlow (BYOK)",
+    "base_url": "https://api.siliconflow.com/v1",
+    "api_key_env": "SILICONFLOW_API_KEY",
+    "is_local": false,
+    "context_window": 256000,
+    "models": [
+      {
+        "key": "deepseek-ai/DeepSeek-V4-Pro",
+        "model_id": "deepseek-ai/DeepSeek-V4-Pro",
+        "label": "DeepSeek V4 Pro (SiliconFlow)",
+        "badge": "💎 V4 Pro",
+        "desc": "SiliconFlow DeepSeek V4 Pro",
+        "context_window": 256000
+      },
+      {
+        "key": "zai-org/GLM-5.1",
+        "model_id": "zai-org/GLM-5.1",
+        "label": "GLM-5.1 (SiliconFlow)",
+        "badge": "💎 GLM-5.1",
+        "desc": "SiliconFlow Z.AI GLM-5.1",
+        "context_window": 200000
+      }
+    ]
+  },
+  {
+    "id": "deepinfra",
+    "title": "🏗️  DeepInfra (BYOK)",
+    "base_url": "https://api.deepinfra.com/v1/openai",
+    "api_key_env": "DEEPINFRA_API_KEY",
+    "is_local": false,
+    "context_window": 256000,
+    "models": [
+      {
+        "key": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "model_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "label": "DeepSeek V4 Flash (DeepInfra)",
+        "badge": "🏗️  V4 Flash",
+        "desc": "DeepInfra DeepSeek V4 Flash",
+        "context_window": 256000
+      }
+    ]
+  },
+  {
+    "id": "mistral",
+    "title": "🌬️  Mistral AI (BYOK)",
+    "base_url": "https://api.mistral.ai/v1",
+    "api_key_env": "MISTRAL_API_KEY",
+    "is_local": false,
+    "context_window": 256000,
+    "models": [
+      {
+        "key": "devstral-medium-latest",
+        "model_id": "devstral-medium-latest",
+        "label": "Mistral Devstral Medium",
+        "badge": "🌬️  Devstral",
+        "desc": "Mistral SWE & Coding Agent Model",
+        "context_window": 256000
+      },
+      {
+        "key": "codestral-latest",
+        "model_id": "codestral-latest",
+        "label": "Mistral Codestral",
+        "badge": "⚡ Codestral",
+        "desc": "Mistral fast code generation model",
+        "context_window": 256000
+      }
+    ]
+  },
+  {
+    "id": "nvidia",
+    "title": "🟩 NVIDIA NIM (BYOK)",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "is_local": false,
+    "context_window": 131072,
+    "models": [
+      {
+        "key": "nvidia/llama-3.1-nemotron-70b-instruct",
+        "model_id": "nvidia/llama-3.1-nemotron-70b-instruct",
+        "label": "Llama 3.1 Nemotron 70B (NVIDIA)",
+        "badge": "🟩 NIM",
+        "desc": "NVIDIA NIM hosted inference",
+        "context_window": 131072
+      }
+    ]
+  },
+  {
+    "id": "huggingface",
+    "title": "🤗 Hugging Face Inference (BYOK)",
+    "base_url": "https://router.huggingface.co/v1",
+    "api_key_env": "HF_TOKEN",
+    "is_local": false,
+    "context_window": 131072,
+    "models": [
+      {
+        "key": "openai/gpt-oss-120b",
+        "model_id": "openai/gpt-oss-120b",
+        "label": "GPT-OSS 120B (HF Router)",
+        "badge": "🤗 HF Router",
+        "desc": "Hugging Face Inference Router",
+        "context_window": 131072
+      }
+    ]
+  },
+  {
+    "id": "baseten",
+    "title": "🧱 Baseten (BYOK)",
+    "base_url": "https://inference.baseten.co/v1",
+    "api_key_env": "BASETEN_API_KEY",
+    "is_local": false,
+    "context_window": 262144,
+    "models": [
+      {
+        "key": "moonshotai/Kimi-K2.7-Code",
+        "model_id": "moonshotai/Kimi-K2.7-Code",
+        "label": "Kimi K2.7 Code (Baseten)",
+        "badge": "🧱 Baseten",
+        "desc": "Baseten dedicated Kimi K2.7 Code",
+        "context_window": 262144
+      }
+    ]
+  },
+  {
+    "id": "novita",
+    "title": "✨ Novita AI (BYOK)",
+    "base_url": "https://api.novita.ai/openai/v1",
+    "api_key_env": "NOVITA_API_KEY",
+    "is_local": false,
+    "context_window": 262144,
+    "models": [
+      {
+        "key": "moonshotai/kimi-k2.7-code",
+        "model_id": "moonshotai/kimi-k2.7-code",
+        "label": "Kimi K2.7 Code (Novita)",
+        "badge": "✨ Novita",
+        "desc": "Novita AI Kimi K2.7 Code",
+        "context_window": 262144
+      }
+    ]
+  },
+  {
+    "id": "venice",
+    "title": "🎭 Venice AI (BYOK)",
+    "base_url": "https://api.venice.ai/api/v1",
+    "api_key_env": "VENICE_API_KEY",
+    "is_local": false,
+    "context_window": 131072,
+    "models": [
+      {
+        "key": "llama-3.3-70b",
+        "model_id": "llama-3.3-70b",
+        "label": "Llama 3.3 70B (Venice)",
+        "badge": "🎭 Private",
+        "desc": "Venice AI privacy-preserving inference",
+        "context_window": 131072
+      }
+    ]
+  },
+  {
+    "id": "microsoft-github",
+    "title": "🪟 Microsoft / GitHub Models (BYOK)",
+    "base_url": "https://models.inference.ai.azure.com",
+    "api_key_env": "GITHUB_TOKEN",
+    "is_local": false,
+    "context_window": 128000,
+    "models": [
+      {
+        "key": "gpt-4.1",
+        "model_id": "gpt-4.1",
+        "label": "GitHub Models GPT-4.1",
+        "badge": "🐙 GitHub Pro",
+        "desc": "GitHub Copilot / Azure AI Inference",
+        "context_window": 128000
+      },
+      {
+        "key": "DeepSeek-R1",
+        "model_id": "DeepSeek-R1",
+        "label": "GitHub Models DeepSeek-R1",
+        "badge": "🧠 GitHub R1",
+        "desc": "Azure-hosted DeepSeek-R1",
+        "context_window": 128000
+      }
+    ]
+  },
+  {
+    "id": "opencode-zen",
+    "title": "🧘 OpenCode Zen / Go (BYOK)",
+    "base_url": "https://opencode.ai/zen/go/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "is_local": false,
+    "context_window": 256000,
+    "models": [
+      {
+        "key": "gpt-6-luna",
+        "model_id": "gpt-6-luna",
+        "label": "GPT-6 Luna (Zen)",
+        "badge": "🧘 Zen Flagship",
+        "desc": "OpenCode Zen GPT-6 Luna",
+        "context_window": 256000
+      },
+      {
+        "key": "gpt-5.6-luna",
+        "model_id": "gpt-5.6-luna",
+        "label": "GPT-5.6 Luna (Zen)",
+        "badge": "⚡ Zen Fast",
+        "desc": "OpenCode Zen GPT-5.6 Luna",
+        "context_window": 256000
+      },
+      {
+        "key": "deepseek-v4.1-flash",
+        "model_id": "deepseek-v4.1-flash",
+        "label": "DeepSeek V4.1 Flash (Zen)",
+        "badge": "🐋 Zen Flash",
+        "desc": "OpenCode Zen DeepSeek V4.1 Flash",
+        "context_window": 256000
+      },
+      {
+        "key": "grok-4.7",
+        "model_id": "grok-4.7",
+        "label": "Grok 4.7 (Zen)",
+        "badge": "✖️  Zen Grok",
+        "desc": "OpenCode Zen Grok 4.7",
+        "context_window": 256000
+      },
+      {
+        "key": "glm-5.3",
+        "model_id": "glm-5.3",
+        "label": "GLM-5.3 (Zen)",
+        "badge": "🔮 Zen GLM",
+        "desc": "OpenCode Zen GLM-5.3",
+        "context_window": 200000
+      }
+    ]
+  },
+  {
+    "id": "ollama",
+    "title": "🦙 Ollama (Yerel · :11434)",
+    "base_url": "http://127.0.0.1:11434/v1",
+    "api_key_env": "OLLAMA_API_KEY",
+    "is_local": true,
+    "context_window": 65536,
+    "models": [
+      {
+        "key": "qwen2.5-coder:32b",
+        "model_id": "qwen2.5-coder:32b",
+        "label": "Ollama Qwen 2.5 Coder 32B",
+        "badge": "🟢 Local",
+        "desc": "Local Ollama (127.0.0.1:11434)",
+        "context_window": 65536
+      },
+      {
+        "key": "deepseek-r1:32b",
+        "model_id": "deepseek-r1:32b",
+        "label": "Ollama DeepSeek R1 32B",
+        "badge": "🟢 Local R1",
+        "desc": "Local Ollama Reasoning (127.0.0.1:11434)",
+        "context_window": 65536
+      }
+    ]
+  },
+  {
+    "id": "lm-studio",
+    "title": "🎛️  LM Studio (Yerel · :1234)",
+    "base_url": "http://127.0.0.1:1234/v1",
+    "api_key_env": "LM_STUDIO_API_KEY",
+    "is_local": true,
+    "context_window": 65536,
+    "models": [
+      {
+        "key": "local-model",
+        "model_id": "local-model",
+        "label": "LM Studio Active Model",
+        "badge": "🟢 LM Studio",
+        "desc": "Local LM Studio OpenAI Server (127.0.0.1:1234)",
+        "context_window": 65536
+      }
+    ]
+  },
+  {
+    "id": "llama.cpp",
+    "title": "⚡ llama.cpp / llama-swap (Yerel · :8080)",
+    "base_url": "http://127.0.0.1:8080/v1",
+    "api_key_env": "LLAMA_CPP_API_KEY",
+    "is_local": true,
+    "context_window": 65536,
+    "models": [
+      {
+        "key": "default",
+        "model_id": "default",
+        "label": "llama.cpp / llama-swap Active Model",
+        "badge": "🟢 llama.cpp",
+        "desc": "Local llama-server / llama-swap (127.0.0.1:8080)",
+        "context_window": 65536
+      }
+    ]
+  },
+  {
+    "id": "vllm",
+    "title": "🚀 vLLM (Yerel · :8000)",
+    "base_url": "http://127.0.0.1:8000/v1",
+    "api_key_env": "VLLM_API_KEY",
+    "is_local": true,
+    "context_window": 65536,
+    "models": [
+      {
+        "key": "default",
+        "model_id": "default",
+        "label": "vLLM Active Model",
+        "badge": "🟢 vLLM",
+        "desc": "Local vLLM OpenAI Server (127.0.0.1:8000)",
+        "context_window": 65536
+      }
+    ]
+  },
+  {
+    "id": "litellm",
+    "title": "🔀 LiteLLM Proxy (Yerel/Gateway · :4000)",
+    "base_url": "http://127.0.0.1:4000/v1",
+    "api_key_env": "LITELLM_API_KEY",
+    "is_local": true,
+    "context_window": 128000,
+    "models": [
+      {
+        "key": "default",
+        "model_id": "default",
+        "label": "LiteLLM Default Route",
+        "badge": "🔀 LiteLLM",
+        "desc": "LiteLLM Proxy (127.0.0.1:4000)",
+        "context_window": 128000
+      }
+    ]
+  }
+]

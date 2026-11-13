@@ -19,6 +19,11 @@ install_binary() {
   xattr -c "$_tmp" >/dev/null 2>&1 || true
   mv -f "$_tmp" "$INSTALL_DIR/spavn"
   ln -sf "$INSTALL_DIR/spavn" "$INSTALL_DIR/spvn"
+  if [ -d "$HOME/bin" ] && [ "$INSTALL_DIR" != "$HOME/bin" ]; then
+    rm -f "$HOME/bin/spavn" "$HOME/bin/spvn"
+    ln -sf "$INSTALL_DIR/spavn" "$HOME/bin/spavn"
+    ln -sf "$INSTALL_DIR/spavn" "$HOME/bin/spvn"
+  fi
   if ! "$INSTALL_DIR/spavn" --version >/dev/null 2>&1; then
     echo "Error: $INSTALL_DIR/spavn does not run (killed on execve)." >&2
     echo "       The staged signature is unusable. Re-run this installer, or move the" >&2

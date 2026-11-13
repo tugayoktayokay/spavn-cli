@@ -149,12 +149,7 @@ pub(crate) fn compact_messages_for_model(
     let last_user_idx = messages
         .iter()
         .rposition(|m| {
-            m.role == "user"
-                && !m
-                    .content
-                    .as_deref()
-                    .unwrap_or("")
-                    .starts_with("[SPAVN ")
+            m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
         })
         .unwrap_or_else(|| {
             messages
@@ -539,12 +534,7 @@ pub(crate) fn run_agent_turn(
         let last_user_idx_for_anchor = messages
             .iter()
             .rposition(|m| {
-                m.role == "user"
-                    && !m
-                        .content
-                        .as_deref()
-                        .unwrap_or("")
-                        .starts_with("[SPAVN ")
+                m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
             })
             .unwrap_or_else(|| {
                 messages
@@ -1207,7 +1197,8 @@ pub(crate) fn run_agent_turn(
                         *target_entry = (*target_entry).max(err_c);
                     }
                 } else if !target_hint.is_empty() {
-                    tool_failure_counts.remove(&format!("err_target:{}:{}", tool_name, target_hint));
+                    tool_failure_counts
+                        .remove(&format!("err_target:{}:{}", tool_name, target_hint));
                 }
 
                 if matches!(
@@ -1607,10 +1598,30 @@ pub(crate) fn run_agent_turn(
                     continue;
                 }
             } else if highest_verification_level < VerificationLevel::Compile {
-                let applicable = tools::find_manifest_dir_for_gate(eff_cwd, &modified_files_in_turn, "Cargo.toml").is_some()
-                    || tools::find_manifest_dir_for_gate(eff_cwd, &modified_files_in_turn, "tsconfig.json").is_some()
-                    || tools::find_manifest_dir_for_gate(eff_cwd, &modified_files_in_turn, "go.work").is_some()
-                    || tools::find_manifest_dir_for_gate(eff_cwd, &modified_files_in_turn, "go.mod").is_some()
+                let applicable = tools::find_manifest_dir_for_gate(
+                    eff_cwd,
+                    &modified_files_in_turn,
+                    "Cargo.toml",
+                )
+                .is_some()
+                    || tools::find_manifest_dir_for_gate(
+                        eff_cwd,
+                        &modified_files_in_turn,
+                        "tsconfig.json",
+                    )
+                    .is_some()
+                    || tools::find_manifest_dir_for_gate(
+                        eff_cwd,
+                        &modified_files_in_turn,
+                        "go.work",
+                    )
+                    .is_some()
+                    || tools::find_manifest_dir_for_gate(
+                        eff_cwd,
+                        &modified_files_in_turn,
+                        "go.mod",
+                    )
+                    .is_some()
                     || modified_files_in_turn.iter().any(|f| {
                         std::path::Path::new(f)
                             .extension()
@@ -2196,10 +2207,8 @@ mod premature_stop_tests {
             "read",
             r#"{"path":"backend/semantic_read.py","start_line":1,"end_line":60}"#,
         );
-        let k2 = super::extract_file_op_key(
-            "read",
-            r#"{"path":"backend/semantic_read.py:128-149"}"#,
-        );
+        let k2 =
+            super::extract_file_op_key("read", r#"{"path":"backend/semantic_read.py:128-149"}"#);
         let k3 = super::extract_file_op_key(
             "read",
             r#"{"path":"backend/semantic_read.py","offset":200,"limit":50}"#,

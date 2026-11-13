@@ -276,7 +276,11 @@ pub(crate) fn cached_system_prompt_for_lang(cwd: &str, compact: bool, en: bool) 
     };
     let today = crate::spavn_engine::today_ymd();
     if let Some((cached_cwd, cached_compact, cached_en, cached_today, text)) = slot.as_ref() {
-        if cached_cwd == cwd && *cached_compact == compact && *cached_en == en && cached_today == &today {
+        if cached_cwd == cwd
+            && *cached_compact == compact
+            && *cached_en == en
+            && cached_today == &today
+        {
             return text.clone();
         }
     }

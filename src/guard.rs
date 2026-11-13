@@ -959,6 +959,8 @@ fn tokenize(cmd: &str) -> Vec<Vec<Tok>> {
     let mut dynamic = false;
     let mut in_word = false;
     let mut chars = cmd.chars().peekable();
+    // (delimiter, quoted) of heredocs whose bodies start after the next newline.
+    let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
 
     macro_rules! flush {
         () => {{
@@ -976,6 +978,43 @@ fn tokenize(cmd: &str) -> Vec<Vec<Tok>> {
         () => {{
             flush!();
             segments.push(Vec::new());
+        }};
+    }
+
+    macro_rules! consume_heredocs {
+        () => {{
+            for (delim, quoted) in pending_heredocs.drain(..) {
+                let mut line = String::new();
+                let mut body = String::new();
+                let mut closed = false;
+                for ch in chars.by_ref() {
+                    if ch == '\n' {
+                        if line.trim_matches(|x| x == '\t' || x == '\r') == delim
+                            || line.trim_end_matches('\r') == delim
+                        {
+                            closed = true;
+                            break;
+                        }
+                        body.push_str(&line);
+                        body.push('\n');
+                        line.clear();
+                    } else {
+                        line.push(ch);
+                    }
+                }
+                if !closed && line.trim_end_matches('\r') == delim {
+                    closed = true;
+                } else if !closed {
+                    body.push_str(&line);
+                }
+                // Unquoted bodies expand `$(..)`/backticks; unterminated ones are unknowable.
+                if !closed || (!quoted && (body.contains("$(") || body.contains('`'))) {
+                    segments.last_mut().unwrap().push(Tok {
+                        text: "$(heredoc)".to_string(),
+                        dynamic: true,
+                    });
+                }
+            }
         }};
     }
 
@@ -1015,7 +1054,11 @@ fn tokenize(cmd: &str) -> Vec<Vec<Tok>> {
                 }
             }
             ' ' | '\t' | '\r' => flush!(),
-            ';' | '\n' => split_segment!(),
+            ';' => split_segment!(),
+            '\n' => {
+                split_segment!();
+                consume_heredocs!();
+            }
             '&' => {
                 if chars.peek() == Some(&'&') {
                     chars.next();
@@ -1036,8 +1079,70 @@ fn tokenize(cmd: &str) -> Vec<Vec<Tok>> {
                     }
                 }
                 split_segment!();
+                consume_heredocs!();
             }
             '>' | '<' => {
+                if c == '<' && chars.peek() == Some(&'<') {
+                    chars.next();
+                    if chars.peek() == Some(&'<') {
+                        // here-string `<<<`: a plain redirect, no heredoc body follows.
+                        chars.next();
+                        flush!();
+                        segments.last_mut().unwrap().push(Tok {
+                            text: "<<<".to_string(),
+                            dynamic: false,
+                        });
+                        continue;
+                    }
+                    if chars.peek() == Some(&'-') {
+                        chars.next();
+                    }
+                    flush!();
+                    while matches!(chars.peek(), Some(' ' | '\t')) {
+                        chars.next();
+                    }
+                    let mut delim = String::new();
+                    let mut quoted = false;
+                    if let Some(&q @ ('\'' | '"')) = chars.peek() {
+                        quoted = true;
+                        chars.next();
+                        for ch in chars.by_ref() {
+                            if ch == q {
+                                break;
+                            }
+                            delim.push(ch);
+                        }
+                    } else {
+                        while let Some(&ch) = chars.peek() {
+                            if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>') {
+                                break;
+                            }
+                            chars.next();
+                            if ch == '\\' {
+                                quoted = true;
+                                if let Some(escaped) = chars.next() {
+                                    delim.push(escaped);
+                                }
+                            } else {
+                                delim.push(ch);
+                            }
+                        }
+                    }
+                    segments.last_mut().unwrap().push(Tok {
+                        text: "<<".to_string(),
+                        dynamic: false,
+                    });
+                    if delim.is_empty() {
+                        // Malformed heredoc: fail closed.
+                        segments.last_mut().unwrap().push(Tok {
+                            text: "$(heredoc)".to_string(),
+                            dynamic: true,
+                        });
+                    } else {
+                        pending_heredocs.push((delim, quoted));
+                    }
+                    continue;
+                }
                 if c == '>'
                     && in_word
                     && !current.is_empty()
@@ -1106,6 +1211,19 @@ mod tests {
             "/Users/tester/proj",
             vec!["/Users/tester/apps"],
         )
+    }
+
+    #[test]
+    fn heredoc_tail_and_here_string_do_not_hide_commands() {
+        let p = policy();
+        let bad = |c: &str| !matches!(assess_shell_command(c, &p), ShellRisk::None);
+        assert!(bad("cat <<EOF && rm -rf ~\nx\nEOF"));
+        assert!(bad("cat <<< x\nrm -rf ~"));
+        assert!(bad("cat <<EOF\n$(rm -rf ~)\nEOF"));
+        assert!(bad("cat <<EOF\nnever closed"));
+        assert!(bad("cat <<EOF\nbody\nEOF\nrm -rf ~"));
+        assert!(!bad("cat <<'EOF'\n$(rm -rf ~)\nEOF"));
+        assert!(!bad("cat <<EOF\nhello\nEOF"));
     }
 
     #[test]

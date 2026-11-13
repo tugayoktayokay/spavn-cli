@@ -13,8 +13,8 @@ pub mod web_search;
 
 pub(crate) use edit::*;
 pub use edit::{
-    build_live_project_signatures, check_unfinished_placeholders,
-    find_manifest_dir_for_gate, has_compiler_or_test_error_signature, is_verification_shell_command,
+    build_live_project_signatures, check_unfinished_placeholders, find_manifest_dir_for_gate,
+    has_compiler_or_test_error_signature, is_verification_shell_command,
     run_project_verification_gate,
 };
 pub(crate) use mcp_subagent::*;

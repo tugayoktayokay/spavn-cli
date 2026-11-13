@@ -239,6 +239,20 @@ Run `/provider` inside the TUI (aliases `/login`, `/byok`, `/keys`, `/connect`) 
 
 ---
 
+## 📏 Measuring the harness
+
+`spavn-eval` runs the agent against the tasks in `evals/tasks/` and prints a pass rate. Each task is a small repo with a failing test; the agent gets a prompt, then the task's `verify` command decides pass or fail from the files on disk.
+
+```bash
+cargo build --release
+./target/release/spavn-eval --list                       # show the tasks
+./target/release/spavn-eval -m local -o runs/local.jsonl # run all with one model
+./target/release/spavn-eval -n 3 -o runs/a.jsonl         # 3 attempts per task, per-task pass rate
+./target/release/spavn-eval -f refactor -T 300           # only tasks tagged or named "refactor"
+```
+
+Compare two models, or one model before and after a harness change, by running both with `-o` and diffing the JSONL files. A task whose `verify` already passes before the agent starts is reported as `broken-fixture` and left out of the rate. `-f` matches a substring of the task name or tag, so `-f x-` also picks `bugfix-…`. Add a task by creating `evals/tasks/<name>/task.json` and a `repo/` folder.
+
 ## 🔌 Headless JSON-RPC 2.0 bridge
 
 `spavn --rpc` runs the agent as a headless NDJSON JSON-RPC 2.0 server over `stdin` / `stdout` — the exact protocol used by [`spavn-desktop`](https://github.com/tugayoktayokay/spavn-desktop) and external IDE integrations:
@@ -301,7 +315,8 @@ Streamable-HTTP servers use `url` instead of `command`. Stdio servers get a scru
 
 | Command | Aliases | Effect |
 | :--- | :--- | :--- |
-| `/model` | `/m`, `/models`, `/local` | Model picker: local → BYOK → catalog → free |
+| `/model` | `/m`, `/models`, `/local` | Model picker: local → BYOK → catalog → free (applies to the current session only; resumed sessions keep their own model) |
+| `/default` | `/model default` | Pin the active model as `default_model` for new sessions |
 | `/byok` | `/b`, `/keys`, `/login`, `/provider`, `/providers`, `/connect`, `/auth` | Key setup, balance, provider login |
 | `/bench` | — | Tournament across candidate models |
 | `/fleet` | `/f` | Host panel with latency probes |

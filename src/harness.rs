@@ -250,7 +250,10 @@ fn split_compound_command(cmd: &str) -> Vec<&str> {
         }
         // Heredoc (`<<EOF`, `<<'EOF'`, `<<-EOF`, excluding `<<<` here-string):
         // Everything after the current line's newline is heredoc payload, not shell subcommands.
-        if b == b'<' && i + 1 < len && bytes[i + 1] == b'<' && (i + 2 >= len || bytes[i + 2] != b'<')
+        if b == b'<'
+            && i + 1 < len
+            && bytes[i + 1] == b'<'
+            && (i + 2 >= len || bytes[i + 2] != b'<')
         {
             let line_end = cmd[i..].find('\n').map(|off| i + off).unwrap_or(len);
             parts.push(&cmd[start..line_end]);
@@ -397,10 +400,7 @@ fn strip_env_vars_and_wrappers(mut s: &str) -> &str {
             }
         }
         if let Some((first_word, rest)) = s.split_once(char::is_whitespace) {
-            if matches!(
-                first_word,
-                "sudo" | "env" | "nohup" | "time"
-            ) {
+            if matches!(first_word, "sudo" | "env" | "nohup" | "time") {
                 s = rest;
                 continue;
             }
@@ -738,7 +738,8 @@ fn compound_test_subcommand_passed(
     }
     // Verify the output contains an explicit test suite pass marker and zero failures
     let has_rust_pass = tool_output.contains("test result: ok.") && !tool_output.contains("FAILED");
-    let has_pytest_or_jest_pass = (tool_output.contains(" passed") || tool_output.contains("PASS "))
+    let has_pytest_or_jest_pass = (tool_output.contains(" passed")
+        || tool_output.contains("PASS "))
         && !tool_output.contains(" failed")
         && !tool_output.contains("FAIL ");
     let has_go_pass = tool_output.contains("\nok  \t") && !tool_output.contains("--- FAIL:");
@@ -871,10 +872,7 @@ fn test_run_clears_failed(run: &[String], failed: &[String]) -> bool {
         if !prefix.is_empty() && last.contains('*') && failed.starts_with(prefix) {
             let glob_dir_prefix = last.split('*').next().unwrap_or("");
             let remaining = &failed[prefix.len()..];
-            if !remaining.is_empty()
-                && remaining
-                    .iter()
-                    .all(|arg| arg.starts_with(glob_dir_prefix))
+            if !remaining.is_empty() && remaining.iter().all(|arg| arg.starts_with(glob_dir_prefix))
             {
                 return true;
             }
@@ -949,8 +947,9 @@ impl FailedTestRuns {
             }
         }
         let runs = test_invocations(&cmd, modified_files);
-        let tests_effectively_succeeded =
-            succeeded || (!runs.is_empty() && compound_test_subcommand_passed(&cmd, tool_output, modified_files));
+        let tests_effectively_succeeded = succeeded
+            || (!runs.is_empty()
+                && compound_test_subcommand_passed(&cmd, tool_output, modified_files));
         if !tests_effectively_succeeded {
             for run in runs {
                 if !self.open.contains(&run) {
@@ -1779,7 +1778,9 @@ for k, text in enumerate(value.get('lines') or [value['text']]):
         // 2. Quoted strings, heredocs, git commit messages, and inline Python/Rust snippets
         // containing `#[cfg(test)]` or `cargo test` never poison FailedTestRuns.
         runs.observe(
-            &call("python3 -c 's = \"} } #[cfg(test)] mod en { cargo test }\"; raise SystemExit(1)'"),
+            &call(
+                "python3 -c 's = \"} } #[cfg(test)] mod en { cargo test }\"; raise SystemExit(1)'",
+            ),
             false,
             &mods,
         );

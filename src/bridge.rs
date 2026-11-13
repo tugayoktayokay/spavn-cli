@@ -25,9 +25,10 @@ use crate::events::{self, Event};
 use crate::memory::cached_system_prompt;
 use crate::router::{ChatMessage, ModelEndpoint};
 use crate::session::{
-    append_message, fork_session, list_recent_sessions, load_session, new_session_path,
+    append_message, fork_session, list_recent_sessions, load_session, load_session_model,
+    new_session_path, save_session_model,
 };
-use crate::slash_commands::{dispatch_slash_command, SlashOutcome};
+use crate::slash_commands::{dispatch_slash_command, SlashCtx, SlashOutcome};
 use crate::spavn_engine::{AgentPhase, AgentRoleKey};
 use crate::state::{list_live_tasks, LiveTaskStatus};
 use crate::tools::{AccessMode, ToolContext};
@@ -674,6 +675,7 @@ fn handle(
                 guard.endpoint.wants_compact_prompt(),
             ));
             append_message(&path, &sys);
+            save_session_model(&path, &guard.endpoint.key);
             guard.messages = vec![sys];
             guard.session = path.clone();
             guard.session_name = path
@@ -707,6 +709,7 @@ fn handle(
             let forked = {
                 let mut guard = lock(shared);
                 let forked = fork_session(&guard.messages);
+                save_session_model(&forked, &guard.endpoint.key);
                 guard.session = forked.clone();
                 guard.turns = 0;
                 forked
@@ -729,17 +732,19 @@ fn handle(
                 let mut guard = &mut *guard;
                 dispatch_slash_command(
                     &command,
-                    &guard.cwd,
-                    &mut guard.endpoint,
-                    &mut guard.ctx,
-                    &mut guard.phase,
-                    &mut guard.role,
-                    &mut guard.show_thinking,
-                    &mut guard.quota_badge,
-                    &mut guard.prefill_input,
-                    &mut guard.session,
-                    &mut guard.session_name,
-                    &mut guard.messages,
+                    &mut SlashCtx {
+                        cwd: &guard.cwd,
+                        endpoint: &mut guard.endpoint,
+                        ctx: &mut guard.ctx,
+                        active_phase: &mut guard.phase,
+                        active_role: &mut guard.role,
+                        show_thinking: &mut guard.show_thinking,
+                        quota_badge: &mut guard.quota_badge,
+                        prefill_input: &mut guard.prefill_input,
+                        session_file: &mut guard.session,
+                        session_name: &mut guard.session_name,
+                        messages: &mut guard.messages,
+                    },
                 )
             };
             refresh(shared, ctl);
@@ -843,6 +848,11 @@ fn resume_locked(shared: &mut Shared, path: &Path) -> Result<(), (&'static str, 
     }
     shared.messages = loaded;
     shared.session = path.to_path_buf();
+    if let Some(key) = load_session_model(path) {
+        if key != shared.endpoint.key {
+            shared.endpoint = crate::router::resolve_endpoint(&key);
+        }
+    }
     shared.session_name = path
         .file_name()
         .unwrap_or_default()

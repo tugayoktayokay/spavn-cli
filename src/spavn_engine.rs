@@ -1248,7 +1248,9 @@ mod engine_tests {
         );
         // Combined fix + test directive ("düzeltip testini yaz") routes to Coder, not Test.
         assert_eq!(
-            dispatch_role_from_prompt("en kritik olan 1 tanesini cerrahi olarak düzeltip testini yaz"),
+            dispatch_role_from_prompt(
+                "en kritik olan 1 tanesini cerrahi olarak düzeltip testini yaz"
+            ),
             AgentRoleKey::Coder
         );
     }

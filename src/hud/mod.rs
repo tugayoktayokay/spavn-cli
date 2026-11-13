@@ -1,6 +1,6 @@
 use crate::config::{
-    byok_catalog, expand_user_path, load_user_config, resolve_api_key, save_user_config, tr_en,
-    upsert_spavn_secret, ModelConfigEntry, ProviderGroupConfig,
+    byok_catalog, expand_user_path, load_user_config, resolve_api_key, tr_en, upsert_spavn_secret,
+    ModelConfigEntry, ProviderGroupConfig,
 };
 use crate::router::{ChatMessage, ModelEndpoint};
 use crate::tools::AccessMode;

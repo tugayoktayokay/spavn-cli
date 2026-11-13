@@ -11,11 +11,11 @@ use spavn::hud::{
 use spavn::memory::{cached_system_prompt, current_workdir};
 use spavn::router::{resolve_endpoint, ChatMessage};
 use spavn::session::{
-    append_message, fork_session, latest_session_path, load_session, new_session_path,
-    rewrite_session, sessions_dir,
+    append_message, fork_session, latest_session_path, load_session, load_session_model,
+    new_session_path, rewrite_session, save_session_model, sessions_dir,
 };
 use spavn::skills::expand_inline_skills;
-use spavn::slash_commands::{dispatch_slash_command, SlashOutcome};
+use spavn::slash_commands::{dispatch_slash_command, SlashCtx, SlashOutcome};
 use spavn::spavn_engine::{
     dispatch_role_from_prompt, record_knowledge_artifact, retrieve_relevant_artifacts, AgentPhase,
     AgentRoleKey,
@@ -42,7 +42,12 @@ fn main() {
     install_sigint_handler();
     let cfg = load_user_config();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut model_key = std::env::var("SPAVN_MODEL").unwrap_or_else(|_| cfg.default_model.clone());
+    let env_model = std::env::var("SPAVN_MODEL").ok();
+    let mut model_explicit = env_model.is_some();
+    // Priority: SPAVN_MODEL > model last selected in any terminal > pinned `/default`.
+    let mut model_key = env_model
+        .or_else(spavn::config::load_last_model)
+        .unwrap_or_else(|| cfg.default_model.clone());
     let mut access_mode = AccessMode::Auto;
     let mut default_host = "local".to_string();
     let mut resume_last = false;
@@ -61,6 +66,7 @@ fn main() {
             "-m" | "--model" => {
                 if i + 1 < args.len() {
                     model_key = args[i + 1].clone();
+                    model_explicit = true;
                     i += 2;
                     continue;
                 }
@@ -331,6 +337,17 @@ fn main() {
         (p, vec![sys])
     };
 
+    // A resumed session continues on the model it was last using; an explicit `-m` / `SPAVN_MODEL`
+    // still wins. Either way the session remembers its model from here on.
+    if !model_explicit {
+        if let Some(key) = load_session_model(&session_file) {
+            if key != endpoint.key {
+                endpoint = resolve_endpoint(&key);
+            }
+        }
+    }
+    save_session_model(&session_file, &endpoint.key);
+
     if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
         *first = ChatMessage::system(cached_system_prompt(&cwd, endpoint.wants_compact_prompt()));
     }
@@ -498,9 +515,9 @@ fn main() {
         );
         if let Some(new_model_key) = hud::interactive_provider_login(None) {
             endpoint = resolve_endpoint(&new_model_key);
-            let mut cfg = load_user_config();
-            cfg.default_model = endpoint.key.clone();
-            let _ = spavn::config::save_user_config(&cfg);
+            let key = endpoint.key.clone();
+            let _ = spavn::config::update_user_config(|cfg| cfg.default_model = key);
+            save_session_model(&session_file, &endpoint.key);
             if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
                 *first = ChatMessage::system(cached_system_prompt(
                     &cwd,
@@ -527,6 +544,14 @@ fn main() {
                     .to_string_lossy()
                     .to_string();
                 messages = loaded;
+                if !model_explicit {
+                    if let Some(key) = load_session_model(&session_file) {
+                        if key != endpoint.key {
+                            endpoint = resolve_endpoint(&key);
+                        }
+                    }
+                }
+                save_session_model(&session_file, &endpoint.key);
                 if let Some(first) = messages.first_mut().filter(|m| m.role == "system") {
                     *first = ChatMessage::system(cached_system_prompt(
                         &cwd,
@@ -654,17 +679,19 @@ fn main() {
 
         match dispatch_slash_command(
             &input,
-            &cwd,
-            &mut endpoint,
-            &mut ctx,
-            &mut active_phase,
-            &mut active_role,
-            &mut show_thinking,
-            &mut quota_badge,
-            &mut prefill_input,
-            &mut session_file,
-            &mut session_name,
-            &mut messages,
+            &mut SlashCtx {
+                cwd: &cwd,
+                endpoint: &mut endpoint,
+                ctx: &mut ctx,
+                active_phase: &mut active_phase,
+                active_role: &mut active_role,
+                show_thinking: &mut show_thinking,
+                quota_badge: &mut quota_badge,
+                prefill_input: &mut prefill_input,
+                session_file: &mut session_file,
+                session_name: &mut session_name,
+                messages: &mut messages,
+            },
         ) {
             SlashOutcome::ExitLoop => break,
             SlashOutcome::Handled => continue,

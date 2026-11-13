@@ -1,6 +1,6 @@
 use super::menus::*;
 use super::*;
-use crate::config::is_en;
+use crate::config::{is_en, update_user_config};
 
 pub(crate) fn prompt_inline_line(prompt_label: &str) -> Option<String> {
     print!("{}{}{}: {}", CYAN, BOLD, prompt_label, RESET);
@@ -577,7 +577,11 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
         if let Some((base_url, disc_url, discovered)) = probed {
             cfg.local_base_url = Some(base_url.clone());
             cfg.local_discovery_url = Some(disc_url.clone());
-            let _ = save_user_config(&cfg);
+            let (b, d) = (base_url.clone(), disc_url.clone());
+            let _ = update_user_config(|c| {
+                c.local_base_url = Some(b);
+                c.local_discovery_url = Some(d);
+            });
             let mut local_items: Vec<MenuItem> = discovered
                 .iter()
                 .map(|m| MenuItem {
@@ -631,7 +635,11 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
         let (base_url, disc_url) = crate::router::derive_base_and_discovery_urls(&raw_url);
         cfg.local_base_url = Some(base_url.clone());
         cfg.local_discovery_url = Some(disc_url.clone());
-        let _ = save_user_config(&cfg);
+        let (b, d) = (base_url.clone(), disc_url.clone());
+        let _ = update_user_config(|c| {
+            c.local_base_url = Some(b);
+            c.local_discovery_url = Some(d);
+        });
         let discovered = crate::router::discover_local_models(&disc_url, true);
         println!(
             "{}╰─ ✅ {}: {}{}{}",
@@ -912,9 +920,7 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 });
             }
         }
-        cfg.providers
-            .retain(|p| !p.id.eq_ignore_ascii_case(&prov_name));
-        cfg.providers.push(ProviderGroupConfig {
+        let new_group = ProviderGroupConfig {
             id: prov_name.clone(),
             title: format!("🔌 {} (Custom BYOK)", prov_name),
             base_url,
@@ -931,8 +937,13 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             },
             context_window: None,
             models: all_models,
+        };
+        // Re-read under the config lock so a concurrent terminal's edits are not overwritten.
+        let _ = update_user_config(|c| {
+            c.providers
+                .retain(|p| !p.id.eq_ignore_ascii_case(&new_group.id));
+            c.providers.push(new_group);
         });
-        let _ = save_user_config(&cfg);
         println!(
             "{}╰─ ✅ {}: {}{}{}",
             CYAN,
@@ -964,9 +975,12 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
             crate::config::save_discovered_provider_models(&group.id, &remote_ids);
             let (base_url, disc_url) =
                 crate::router::derive_base_and_discovery_urls(&group.base_url);
-            cfg.local_base_url = Some(base_url);
-            cfg.local_discovery_url = Some(disc_url);
-            let _ = save_user_config(&cfg);
+            cfg.local_base_url = Some(base_url.clone());
+            cfg.local_discovery_url = Some(disc_url.clone());
+            let _ = update_user_config(|c| {
+                c.local_base_url = Some(base_url);
+                c.local_discovery_url = Some(disc_url);
+            });
         } else {
             println!(
                 "\n{}╭─ 🟢 {} ({}) ─────────────────────────────────{}",
@@ -989,9 +1003,12 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 let (base_url, disc_url) =
                     crate::router::derive_base_and_discovery_urls(&custom_url);
                 group.base_url = base_url.clone();
-                cfg.local_base_url = Some(base_url);
-                cfg.local_discovery_url = Some(disc_url);
-                let _ = save_user_config(&cfg);
+                cfg.local_base_url = Some(base_url.clone());
+                cfg.local_discovery_url = Some(disc_url.clone());
+                let _ = update_user_config(|c| {
+                    c.local_base_url = Some(base_url);
+                    c.local_discovery_url = Some(disc_url);
+                });
             }
             if !group.api_key_env.is_empty() {
                 if let Some(opt_key) = prompt_secret_line(tr_en(
@@ -1190,7 +1207,8 @@ pub fn interactive_queue_manager() -> QueueAction {
             } else {
                 "queue".to_string()
             };
-            let _ = save_user_config(&cfg);
+            let mode = cfg.busy_input_mode.clone();
+            let _ = update_user_config(|c| c.busy_input_mode = mode);
             continue;
         }
 
@@ -1385,9 +1403,8 @@ pub fn interactive_select_language() -> Option<String> {
         &items,
         initial_idx,
     ) {
-        let mut cfg = load_user_config();
-        cfg.language = chosen.clone();
-        let _ = save_user_config(&cfg);
+        let lang = chosen.clone();
+        let _ = update_user_config(|c| c.language = lang);
         return Some(chosen);
     }
     None

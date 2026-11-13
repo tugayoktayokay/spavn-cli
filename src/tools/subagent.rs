@@ -255,10 +255,7 @@ impl WorktreeGuard {
         }
 
         // 4. Commit baseline snapshot in worktree so diff against base isolates worker changes
-        let _ = git_cmd()
-            .args(["add", "-A"])
-            .current_dir(&wt_path)
-            .output();
+        let _ = git_cmd().args(["add", "-A"]).current_dir(&wt_path).output();
 
         let _ = git_cmd()
             .args([
@@ -1410,10 +1407,7 @@ mod tests {
         let _ = std::fs::write(&f1, "initial file1\n");
         let _ = std::fs::write(&f2, "initial file2\n");
 
-        let _ = git_cmd()
-            .args(["add", "."])
-            .current_dir(&repo_dir)
-            .output();
+        let _ = git_cmd().args(["add", "."]).current_dir(&repo_dir).output();
         let _ = git_cmd()
             .args(["commit", "-m", "init", "--no-gpg-sign"])
             .current_dir(&repo_dir)

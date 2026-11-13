@@ -357,6 +357,13 @@ pub fn compute_input_suggestions(input_buf: &str) -> Vec<(String, String)> {
                 ),
             ),
             (
+                "/default",
+                tr_en(
+                    "/default (Aktif Modeli Yeni Oturumlara Varsayılan Yap)",
+                    "/default (Pin Active Model for New Sessions)",
+                ),
+            ),
+            (
                 "/byok",
                 tr_en(
                     "/byok (API Anahtarı & Özel Sağlayıcı Ekle)",

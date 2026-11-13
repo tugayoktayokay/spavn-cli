@@ -1167,7 +1167,10 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
             let mut applied_outputs: Vec<String> = Vec::new();
             let mut touched_paths: Vec<String> = Vec::new();
             for (idx, item) in files_arr.iter().enumerate() {
-                let f_path = ctx.apply_default_host(get_str_alias(item, &["path", "file_path", "file", "filepath"]));
+                let f_path = ctx.apply_default_host(get_str_alias(
+                    item,
+                    &["path", "file_path", "file", "filepath"],
+                ));
                 if f_path.is_empty() {
                     for (p, orig) in snapshots.iter().rev() {
                         let _ = write_target_file(p, orig);
@@ -1219,7 +1222,10 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
             );
         }
     }
-    let raw_input_path = ctx.apply_default_host(get_str_alias(args, &["path", "file_path", "file", "filepath"]));
+    let raw_input_path = ctx.apply_default_host(get_str_alias(
+        args,
+        &["path", "file_path", "file", "filepath"],
+    ));
     let (raw_path, inline_range) = split_inline_line_range(&raw_input_path);
     if let Err(blocked) = ctx.enforce_path(raw_path, true, "edit") {
         return blocked;
@@ -2125,7 +2131,10 @@ fn find_closest_mismatch_window(
 }
 
 pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
-    let raw_path = ctx.apply_default_host(get_str_alias(args, &["path", "file_path", "file", "filepath"]));
+    let raw_path = ctx.apply_default_host(get_str_alias(
+        args,
+        &["path", "file_path", "file", "filepath"],
+    ));
     if let Err(blocked) = ctx.enforce_path(&raw_path, true, "write") {
         return blocked;
     }

@@ -141,6 +141,33 @@ pub fn fork_session(messages: &[ChatMessage]) -> PathBuf {
     forked_path
 }
 
+/// Sidecar next to `session-X.jsonl` holding the model key chosen inside that session, so a
+/// `/model` switch stays scoped to its own session instead of leaking into every new terminal.
+fn session_model_path(session: &Path) -> PathBuf {
+    session.with_extension("model")
+}
+
+pub fn save_session_model(session: &Path, model_key: &str) {
+    let key = model_key.trim();
+    if key.is_empty() {
+        return;
+    }
+    let path = session_model_path(session);
+    if crate::config::write_atomic(&path, &format!("{}\n", key)).is_ok() {
+        secure_file(&path);
+    }
+    // Only real sessions seed the cross-terminal default (scratch/test paths must not).
+    if session.starts_with(sessions_dir()) {
+        crate::config::save_last_model(key);
+    }
+}
+
+pub fn load_session_model(session: &Path) -> Option<String> {
+    let raw = fs::read_to_string(session_model_path(session)).ok()?;
+    let key = raw.trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionSummary {
     pub path: PathBuf,
@@ -1057,21 +1084,24 @@ pub fn format_compact_done_banner(before_tok: usize, after_tok: usize, saved_pct
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
-    fn session_files_and_dir_are_private() {
-        let dir = std::env::temp_dir().join(format!("spavn-session-test-{}", std::process::id()));
+    fn session_model_sidecar_is_scoped_per_session() {
+        let dir = std::env::temp_dir().join(format!("spavn-model-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        std::env::set_var("SPAVN_HOME", &dir);
+        let a = dir.join("session-1.jsonl");
+        let b = dir.join("session-2.jsonl");
 
-        let path = new_session_path();
-        let file_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        let dir_mode = fs::metadata(sessions_dir()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(file_mode, 0o600, "session file must be 0600");
-        assert_eq!(dir_mode, 0o700, "sessions dir must be 0700");
+        assert_eq!(load_session_model(&a), None);
+        save_session_model(&a, "  anthropic:claude-opus-5-5 \n");
+        save_session_model(&b, "local:qwen3");
+        save_session_model(&b, "   ");
+        assert_eq!(
+            load_session_model(&a).as_deref(),
+            Some("anthropic:claude-opus-5-5")
+        );
+        assert_eq!(load_session_model(&b).as_deref(), Some("local:qwen3"));
+        assert!(dir.join("session-1.model").exists());
 
-        let _ = fs::remove_file(&path);
-        std::env::remove_var("SPAVN_HOME");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -4,6 +4,12 @@ use std::io::Read;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+type TapHandles = (
+    Arc<Mutex<LiveStreamTap>>,
+    Option<std::thread::JoinHandle<()>>,
+    Option<std::thread::JoinHandle<()>>,
+);
+
 #[derive(Clone, Debug)]
 pub struct BgJobEntry {
     pub id: String,
@@ -425,10 +431,7 @@ pub(crate) fn intercept_shell_anti_pattern(cmd: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    let raw_first = segments
-        .first()
-        .copied()
-        .unwrap_or(clean_for_check.trim());
+    let raw_first = segments.first().copied().unwrap_or(clean_for_check.trim());
     let first_seg = if raw_first.split_whitespace().next() == Some("cd") {
         let mut s = raw_first.trim().to_string();
         loop {
@@ -1075,11 +1078,7 @@ fn register_and_monitor_bg_child(
     log_path: PathBuf,
     started_at: Instant,
     hard_timeout_sec: Option<u64>,
-    tap_handles: Option<(
-        Arc<Mutex<LiveStreamTap>>,
-        Option<std::thread::JoinHandle<()>>,
-        Option<std::thread::JoinHandle<()>>,
-    )>,
+    tap_handles: Option<TapHandles>,
 ) -> String {
     let seq = BG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let job_id = format!("bg_{}", seq);
@@ -1262,10 +1261,7 @@ fn run_bash_with_omp_lifecycle(
                 #[cfg(not(unix))]
                 let code = status.code().unwrap_or(-1);
                 let (stdout, stderr) = if let Ok(mut g) = tap.lock() {
-                    (
-                        std::mem::take(&mut g.stdout),
-                        std::mem::take(&mut g.stderr),
-                    )
+                    (std::mem::take(&mut g.stdout), std::mem::take(&mut g.stderr))
                 } else {
                     (Vec::new(), Vec::new())
                 };
@@ -1287,10 +1283,7 @@ fn run_bash_with_omp_lifecycle(
                         let _ = h.join();
                     }
                     let (stdout, stderr) = if let Ok(mut g) = tap.lock() {
-                        (
-                            std::mem::take(&mut g.stdout),
-                            std::mem::take(&mut g.stderr),
-                        )
+                        (std::mem::take(&mut g.stdout), std::mem::take(&mut g.stderr))
                     } else {
                         (Vec::new(), Vec::new())
                     };
@@ -1352,10 +1345,7 @@ fn run_bash_with_omp_lifecycle(
                             let _ = h.join();
                         }
                         let (stdout, stderr) = if let Ok(mut g) = tap.lock() {
-                            (
-                                std::mem::take(&mut g.stdout),
-                                std::mem::take(&mut g.stderr),
-                            )
+                            (std::mem::take(&mut g.stdout), std::mem::take(&mut g.stderr))
                         } else {
                             (Vec::new(), Vec::new())
                         };

@@ -1,4 +1,4 @@
-use crate::config::{self, is_en, load_user_config, tr_en};
+use crate::config::{self, is_en, tr_en};
 use crate::hud::{
     self, build_session_recap_line, fetch_quick_quota_line, interactive_provider_login,
     interactive_queue_manager, interactive_select_access, interactive_select_host,
@@ -11,8 +11,8 @@ use crate::hud::{
 use crate::memory::cached_system_prompt;
 use crate::router::{resolve_endpoint, ChatMessage, ModelEndpoint};
 use crate::session::{
-    append_message, fork_session, load_session, new_session_path, perform_manual_compact,
-    rewrite_session,
+    append_message, fork_session, load_session, load_session_model, new_session_path,
+    perform_manual_compact, rewrite_session, save_session_model,
 };
 use crate::skills::{
     discover_skills, load_skill_content, remove_custom_skill, render_skills_panel,
@@ -86,10 +86,9 @@ pub(crate) fn stage_binary(src: &Path, dest: &Path) -> bool {
     true
 }
 
-/// Points `spvn` at `spavn` as a symlink, matching `install.sh`.
-///
-/// A copy would be a second inode with its own signature to go stale, which is exactly how a
-/// working `spavn` and a killed `spvn` end up side by side.
+/// Points `spvn` at `spavn` as a symlink, matching `install.sh`, and also keeps
+/// `~/bin/spavn` and `~/bin/spvn` symlinked to the canonical `~/.local/bin/spavn` binary
+/// if `~/bin` exists on `PATH`, preventing stale copies with invalidated macOS kernel vnode signatures.
 pub(crate) fn link_alias(binary: &Path) {
     let Some(parent) = binary.parent() else {
         return;
@@ -100,6 +99,20 @@ pub(crate) fn link_alias(binary: &Path) {
     let _ = std::os::unix::fs::symlink(binary, &alias);
     #[cfg(not(unix))]
     let _ = std::fs::copy(binary, &alias);
+
+    #[cfg(unix)]
+    if let Ok(home) = std::env::var("HOME") {
+        let user_bin = PathBuf::from(home).join("bin");
+        if user_bin.is_dir() && user_bin != parent {
+            for name in ["spavn", "spvn"] {
+                let target = user_bin.join(name);
+                if target.exists() || target.symlink_metadata().is_ok() {
+                    let _ = std::fs::remove_file(&target);
+                    let _ = std::os::unix::fs::symlink(binary, &target);
+                }
+            }
+        }
+    }
 }
 
 /// True when `path` really execs, checked with `--version`.
@@ -136,29 +149,102 @@ pub(crate) fn probe_binary(path: &Path) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_slash_command(
-    input: &str,
-    cwd: &str,
-    endpoint: &mut ModelEndpoint,
-    ctx: &mut ToolContext,
-    active_phase: &mut AgentPhase,
-    active_role: &mut AgentRoleKey,
-    show_thinking: &mut bool,
-    quota_badge: &mut String,
-    prefill_input: &mut Option<String>,
-    session_file: &mut PathBuf,
-    session_name: &mut String,
-    messages: &mut Vec<ChatMessage>,
-) -> SlashOutcome {
+/// Mutable session state every slash-command handler works on. Callers (terminal loop, bridge,
+/// tests) build one per command instead of threading eleven `&mut` parameters.
+pub struct SlashCtx<'a> {
+    pub cwd: &'a str,
+    pub endpoint: &'a mut ModelEndpoint,
+    pub ctx: &'a mut ToolContext,
+    pub active_phase: &'a mut AgentPhase,
+    pub active_role: &'a mut AgentRoleKey,
+    pub show_thinking: &'a mut bool,
+    pub quota_badge: &'a mut String,
+    pub prefill_input: &'a mut Option<String>,
+    pub session_file: &'a mut PathBuf,
+    pub session_name: &'a mut String,
+    pub messages: &'a mut Vec<ChatMessage>,
+}
+
+/// One slash command: `Some(outcome)` when it recognised `input`, `None` to try the next handler.
+type SlashHandler = fn(&mut SlashCtx<'_>, &str) -> Option<SlashOutcome>;
+
+/// Tried in order; the first handler that recognises the input wins, so more specific commands
+/// (`/model default`) must stay ahead of their general form (`/model <key>`).
+static SLASH_HANDLERS: &[SlashHandler] = &[
+    cmd_exit,
+    cmd_reload,
+    cmd_byok,
+    cmd_lang,
+    cmd_lang_switch,
+    cmd_queue_list,
+    cmd_queue_clear,
+    cmd_queue_pop,
+    cmd_queue_add,
+    cmd_skills,
+    cmd_skill_add,
+    cmd_skill_show,
+    cmd_skill_rm,
+    cmd_access,
+    cmd_access_set,
+    cmd_plan,
+    cmd_model_picker,
+    cmd_model_default,
+    cmd_model_set,
+    cmd_host,
+    cmd_host_set,
+    cmd_quota,
+    cmd_fleet,
+    cmd_bench,
+    cmd_copy,
+    cmd_diff,
+    cmd_commit,
+    cmd_undo,
+    cmd_todo,
+    cmd_think,
+    cmd_recap,
+    cmd_compact,
+    cmd_compact_focus,
+    cmd_resume,
+    cmd_new,
+    cmd_fork,
+    cmd_role_shortcuts,
+    cmd_role,
+    cmd_role_set,
+    cmd_janitor,
+    cmd_audit,
+    cmd_audit_file,
+    cmd_blame_panel,
+    cmd_wiki,
+    cmd_pins,
+    cmd_pin_add,
+    cmd_unpin,
+    cmd_goals,
+    cmd_goal_done,
+    cmd_goal_add,
+    cmd_clear,
+    cmd_jobs,
+    cmd_update,
+    cmd_help,
+];
+
+fn cmd_exit(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if matches!(
         input,
         "/exit" | "/quit" | "/x" | ":q" | ":wq" | "q!" | "exit" | "quit"
     ) {
         reset_scroll_region();
-        return SlashOutcome::ExitLoop;
+        return Some(SlashOutcome::ExitLoop);
     }
+    None
+}
 
+fn cmd_reload(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let ctx = &mut *c.ctx;
+    let active_phase = &mut *c.active_phase;
+    let session_file = &mut *c.session_file;
+    let messages = &mut *c.messages;
     if input == "/reload" || input == "/r" || input == "/reload bin" || input == "/rb" {
         if !messages.is_empty() {
             messages.retain(|m| {
@@ -272,9 +358,16 @@ pub fn dispatch_slash_command(
                 std::process::exit(0);
             }
         }
-        return SlashOutcome::ExitLoop;
+        return Some(SlashOutcome::ExitLoop);
     }
+    None
+}
 
+fn cmd_byok(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let session_file = &mut *c.session_file;
+    let messages = &mut *c.messages;
     if matches!(
         input,
         "/byok" | "/b" | "/keys" | "/login" | "/provider" | "/providers" | "/connect" | "/auth"
@@ -289,18 +382,22 @@ pub fn dispatch_slash_command(
             .map(str::trim);
         if let Some(chosen_model) = interactive_provider_login(pre) {
             *endpoint = resolve_endpoint(&chosen_model);
-            let mut cfg = load_user_config();
-            cfg.default_model = endpoint.key.clone();
-            let _ = config::save_user_config(&cfg);
+            save_session_model(session_file, &endpoint.key);
             refresh_system_prompt(cwd, endpoint, session_file, messages);
             println!(
                 "\n{}🧠 Active Model Selected: {}{}{}",
                 GREEN, BOLD, endpoint.label, RESET
             );
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_lang(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let messages = &mut *c.messages;
     if matches!(input, "/lang" | "/language" | "/dil") {
         if let Some(chosen_lang) = interactive_select_language() {
             if !messages.is_empty() {
@@ -324,13 +421,18 @@ pub fn dispatch_slash_command(
                 RESET
             );
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_lang_switch(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let messages = &mut *c.messages;
     if input == "/en" || input == "/tr" {
-        let mut cfg = load_user_config();
-        cfg.language = input.trim_start_matches('/').to_string();
-        let _ = config::save_user_config(&cfg);
+        let lang = input.trim_start_matches('/').to_string();
+        let _ = config::update_user_config(|cfg| cfg.language = lang);
         if !messages.is_empty() {
             messages[0] =
                 ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
@@ -347,15 +449,23 @@ pub fn dispatch_slash_command(
             },
             RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_queue_list(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let prefill_input = &mut *c.prefill_input;
     if input == "/queue" || input == "/qlist" || input == "/qedit" {
         if let QueueAction::EditMessage(msg_to_edit) = interactive_queue_manager() {
             *prefill_input = Some(msg_to_edit);
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_queue_clear(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if matches!(
         input,
         "/queue clear" | "/qclear" | "/queue cancel" | "/qcancel"
@@ -371,8 +481,13 @@ pub fn dispatch_slash_command(
             ),
             RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_queue_pop(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let prefill_input = &mut *c.prefill_input;
     if matches!(input, "/queue pop" | "/qpop" | "/queue edit") {
         if let Some((_, popped)) = crate::pop_last_pending_message() {
             *prefill_input = Some(popped);
@@ -387,8 +502,12 @@ pub fn dispatch_slash_command(
                 RESET
             );
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_queue_add(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if let Some(rest) = input.strip_prefix("/queue ") {
         push_queued_message(rest.trim().to_string());
         println!(
@@ -399,9 +518,14 @@ pub fn dispatch_slash_command(
             rest.trim(),
             RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_skills(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let session_file = &mut *c.session_file;
+    let messages = &mut *c.messages;
     if input == "/skills" || input == "/skill" || input == "/s" {
         if let Some(chosen_skill) = interactive_select_skill() {
             if let Some((entry, content)) = load_skill_content(&chosen_skill) {
@@ -422,8 +546,12 @@ pub fn dispatch_slash_command(
         } else {
             render_skills_panel();
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_skill_add(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if let Some(rest) = input.strip_prefix("/skill add ") {
         let mut parts = rest.splitn(2, ' ');
         let name = parts.next().unwrap_or("").trim();
@@ -450,8 +578,12 @@ pub fn dispatch_slash_command(
                 Err(e) => println!("\n{}✗ Hata: {}{}", RED, e, RESET),
             }
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_skill_show(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if let Some(rest) = input.strip_prefix("/skill show ") {
         if let Some((entry, content)) = load_skill_content(rest) {
             println!(
@@ -471,16 +603,24 @@ pub fn dispatch_slash_command(
         } else {
             println!("\n{}Skill not found: {}{}", YELLOW, rest, RESET);
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_skill_rm(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if let Some(rest) = input.strip_prefix("/skill rm ") {
         match remove_custom_skill(rest) {
             Ok(()) => println!("\n{}🗑️  Yetenek silindi: @{}{}", GREEN, rest.trim(), RESET),
             Err(e) => println!("\n{}✗ {}{}", YELLOW, e, RESET),
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_access(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let ctx = &mut *c.ctx;
     if input == "/access" || input == "/a" {
         if let Some(chosen_access) = interactive_select_access(ctx.access) {
             ctx.access = chosen_access;
@@ -492,8 +632,13 @@ pub fn dispatch_slash_command(
                 RESET
             );
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_access_set(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let ctx = &mut *c.ctx;
     if let Some(rest) = input.strip_prefix("/access ") {
         if let Some(m) = AccessMode::parse_alias(rest) {
             ctx.access = m;
@@ -515,9 +660,14 @@ pub fn dispatch_slash_command(
                 RESET
             );
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_plan(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let ctx = &mut *c.ctx;
+    let active_phase = &mut *c.active_phase;
     if input.eq_ignore_ascii_case("/plan")
         || input.eq_ignore_ascii_case("/code")
         || input.eq_ignore_ascii_case("/act")
@@ -542,16 +692,23 @@ pub fn dispatch_slash_command(
                 );
             }
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_model_picker(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let ctx = &mut *c.ctx;
+    let session_file = &mut *c.session_file;
+    let session_name = &mut *c.session_name;
+    let messages = &mut *c.messages;
     if input == "/model" || input == "/m" || input == "/models" || input == "/local" {
         let local_first = input == "/local";
         if let Some(chosen_model) = interactive_select_model(&endpoint.key, local_first) {
             *endpoint = resolve_endpoint(&chosen_model);
-            let mut cfg = load_user_config();
-            cfg.default_model = endpoint.key.clone();
-            let _ = config::save_user_config(&cfg);
+            save_session_model(session_file, &endpoint.key);
             refresh_system_prompt(cwd, endpoint, session_file, messages);
             println!(
                 "\n{}🧠 Active Model Selected: {}{}{}",
@@ -559,22 +716,57 @@ pub fn dispatch_slash_command(
             );
             render_welcome_header(endpoint, ctx.access, &ctx.default_host, cwd, session_name);
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_model_default(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let endpoint = &mut *c.endpoint;
+    if input == "/model default" || input == "/default" {
+        let key = endpoint.key.clone();
+        match config::update_user_config(|cfg| cfg.default_model = key) {
+            Ok(()) => println!(
+                "\n{}📌 {}: {}{}{}",
+                GREEN,
+                tr_en(
+                    "Yeni oturumların varsayılan modeli",
+                    "Default model for new sessions"
+                ),
+                BOLD,
+                endpoint.label,
+                RESET
+            ),
+            Err(e) => println!("\n{}✗ {}{}", RED, e, RESET),
+        }
+        return Some(SlashOutcome::Handled);
+    }
+    None
+}
+
+fn cmd_model_set(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let ctx = &mut *c.ctx;
+    let session_file = &mut *c.session_file;
+    let session_name = &mut *c.session_name;
+    let messages = &mut *c.messages;
     if let Some(rest) = input.strip_prefix("/model ") {
         *endpoint = resolve_endpoint(rest);
-        let mut cfg = load_user_config();
-        cfg.default_model = endpoint.key.clone();
-        let _ = config::save_user_config(&cfg);
+        save_session_model(session_file, &endpoint.key);
         refresh_system_prompt(cwd, endpoint, session_file, messages);
         println!(
             "\n{}🧠 Active Model: {}{}{}",
             GREEN, BOLD, endpoint.label, RESET
         );
         render_welcome_header(endpoint, ctx.access, &ctx.default_host, cwd, session_name);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_host(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let ctx = &mut *c.ctx;
     if input == "/host" || input == "/h" {
         if let Some(chosen_host) = interactive_select_host(&ctx.default_host) {
             ctx.default_host = chosen_host;
@@ -583,28 +775,44 @@ pub fn dispatch_slash_command(
                 MAGENTA, BOLD, ctx.default_host, RESET
             );
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_host_set(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let ctx = &mut *c.ctx;
     if let Some(rest) = input.strip_prefix("/host ") {
         ctx.default_host = rest.trim().to_string();
         println!(
             "\n{}🖥️  Default Target Device: {}{}{}",
             MAGENTA, BOLD, ctx.default_host, RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_quota(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let quota_badge = &mut *c.quota_badge;
     if input == "/quota" || input == "/q" {
         render_full_quota_card();
         *quota_badge = fetch_quick_quota_line();
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_fleet(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/fleet" || input == "/f" {
         render_fleet_radar();
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_bench(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let endpoint = &mut *c.endpoint;
     if input == "/bench" || input.starts_with("/bench ") {
         let target_key = input.strip_prefix("/bench").unwrap_or("").trim();
         let bench_ep = if target_key.is_empty() {
@@ -712,9 +920,12 @@ pub fn dispatch_slash_command(
                 );
             }
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_copy(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/copy" || input.starts_with("/copy ") {
         let arg = input.strip_prefix("/copy").unwrap_or("").trim();
         let regions = crate::hud::copy_regions();
@@ -728,7 +939,7 @@ pub fn dispatch_slash_command(
                 ),
                 RESET
             );
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
         let print_menu = |regions: &[crate::hud::CopyRegion]| {
             println!(
@@ -827,7 +1038,7 @@ pub fn dispatch_slash_command(
                     }
                 }
             }
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
         match arg.parse::<usize>() {
             Ok(n) if n >= 1 && n <= regions.len() => {
@@ -870,9 +1081,12 @@ pub fn dispatch_slash_command(
                 print_menu(&regions);
             }
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_diff(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/diff" || input == "/d" || input.starts_with("/diff ") {
         let path_filter = input.strip_prefix("/diff").unwrap_or("").trim();
         let mut cmd = std::process::Command::new("git");
@@ -927,9 +1141,12 @@ pub fn dispatch_slash_command(
             }
             Err(e) => println!("\n{}✗ Git command failed: {}{}", RED, e, RESET),
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_commit(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/commit" || input == "/cm" || input.starts_with("/commit ") {
         let custom_msg = input
             .strip_prefix("/commit")
@@ -955,7 +1172,7 @@ pub fn dispatch_slash_command(
                 ),
                 RESET
             );
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
 
         let changed_files: Vec<String> = stat_out
@@ -1016,12 +1233,12 @@ pub fn dispatch_slash_command(
         // Ok(0) = EOF: never treat closed stdin as approval.
         if !matches!(std::io::stdin().read_line(&mut ans), Ok(n) if n > 0) {
             println!("\n{}✗ Commit iptal edildi.{}\n", YELLOW, RESET);
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
         let clean = ans.trim().to_lowercase();
         if !matches!(clean.as_str(), "e" | "evet" | "y" | "yes") {
             println!("{}✗ Commit cancelled.{}\n", YELLOW, RESET);
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
 
         let add_ok = std::process::Command::new("git")
@@ -1031,7 +1248,7 @@ pub fn dispatch_slash_command(
             .unwrap_or(false);
         if !add_ok {
             println!("{}✗ git add failed.{}\n", RED, RESET);
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
 
         match std::process::Command::new("git")
@@ -1050,17 +1267,24 @@ pub fn dispatch_slash_command(
             }
             Err(e) => println!("{}✗ Git error: {}{}\n", RED, e, RESET),
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_undo(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let ctx = &mut *c.ctx;
     if input == "/undo" || input == "/u" {
         match ctx.pop_undo() {
             Some(msg) => println!("\n{}{}{}", GREEN, msg, RESET),
             None => println!("\n{}No file change to undo.{}", YELLOW, RESET),
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_todo(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/todo"
         || input == "/tasks"
         || input.starts_with("/todo ")
@@ -1079,7 +1303,7 @@ pub fn dispatch_slash_command(
                 tr_en("Canlı görev listesi temizlendi.", "Live task list cleared."),
                 RESET
             );
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
         if let Some(rest) = arg
             .strip_prefix("done")
@@ -1129,7 +1353,7 @@ pub fn dispatch_slash_command(
                     ),
                 },
             }
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
         if let Some(rest) = arg.strip_prefix("add ") {
             crate::add_live_task(rest.trim().to_string());
@@ -1182,9 +1406,13 @@ pub fn dispatch_slash_command(
                 CYAN, RESET
             );
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_think(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let show_thinking = &mut *c.show_thinking;
     if input == "/think" {
         *show_thinking = !*show_thinking;
         println!(
@@ -1197,9 +1425,13 @@ pub fn dispatch_slash_command(
             },
             RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_recap(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let messages = &mut *c.messages;
     if input == "/recap" || input.starts_with("/recap ") {
         let arg = input.strip_prefix("/recap").unwrap_or("").trim();
         if matches!(arg, "toggle" | "off" | "on") {
@@ -1249,24 +1481,45 @@ pub fn dispatch_slash_command(
                 );
             }
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_compact(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let endpoint = &mut *c.endpoint;
+    let session_file = &mut *c.session_file;
+    let messages = &mut *c.messages;
     if input == "/compact" || input == "/c" {
         perform_manual_compact(endpoint, messages, None);
         rewrite_session(session_file, messages);
         crate::memory::invalidate_system_prompt_cache();
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_compact_focus(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let endpoint = &mut *c.endpoint;
+    let session_file = &mut *c.session_file;
+    let messages = &mut *c.messages;
     if let Some(focus) = input
         .strip_prefix("/compact ")
         .or_else(|| input.strip_prefix("/c "))
     {
         perform_manual_compact(endpoint, messages, Some(focus.trim()));
         rewrite_session(session_file, messages);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_resume(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let session_file = &mut *c.session_file;
+    let session_name = &mut *c.session_name;
+    let messages = &mut *c.messages;
     if input == "/resume" || input == "/sessions" {
         if let Some(chosen_path) = interactive_select_session(session_file) {
             let loaded = load_session(&chosen_path);
@@ -1278,13 +1531,27 @@ pub fn dispatch_slash_command(
                     .to_string_lossy()
                     .to_string();
                 *messages = loaded;
+                if let Some(key) = load_session_model(session_file) {
+                    if key != endpoint.key {
+                        *endpoint = resolve_endpoint(&key);
+                    }
+                }
                 refresh_system_prompt(cwd, endpoint, session_file, messages);
                 render_session_resume_preview(session_file, messages);
             }
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_new(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let ctx = &mut *c.ctx;
+    let session_file = &mut *c.session_file;
+    let session_name = &mut *c.session_name;
+    let messages = &mut *c.messages;
     if input == "/new" || input == "/n" {
         crate::clear_live_tasks();
         crate::clear_queued_messages();
@@ -1296,6 +1563,7 @@ pub fn dispatch_slash_command(
             .to_string();
         let sys = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
         append_message(session_file, &sys);
+        save_session_model(session_file, &endpoint.key);
         *messages = vec![sys];
         setup_scroll_region();
         render_welcome_header(endpoint, ctx.access, &ctx.default_host, cwd, session_name);
@@ -1303,11 +1571,19 @@ pub fn dispatch_slash_command(
             "\n{}✨ Fresh clean session started: {}{}{}",
             GREEN, BOLD, session_name, RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_fork(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let endpoint = &mut *c.endpoint;
+    let session_file = &mut *c.session_file;
+    let session_name = &mut *c.session_name;
+    let messages = &mut *c.messages;
     if input == "/fork" {
         *session_file = fork_session(messages);
+        save_session_model(session_file, &endpoint.key);
         *session_name = session_file
             .file_name()
             .unwrap_or_default()
@@ -1321,9 +1597,13 @@ pub fn dispatch_slash_command(
             RESET,
             messages.len()
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_role_shortcuts(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let active_role = &mut *c.active_role;
     if let Some(rest) = input
         .strip_prefix("/refactor ")
         .or_else(|| input.strip_prefix("/review "))
@@ -1335,10 +1615,14 @@ pub fn dispatch_slash_command(
         if let Some(r) = AgentRoleKey::parse_alias(cmd_head.trim_start_matches('/')) {
             *active_role = r;
             push_queued_message(rest.trim().to_string());
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
     }
+    None
+}
 
+fn cmd_role(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let active_role = &mut *c.active_role;
     if input == "/role" {
         if let Some(chosen_role) = interactive_select_role(*active_role) {
             *active_role = chosen_role;
@@ -1357,8 +1641,13 @@ pub fn dispatch_slash_command(
             );
             print!("{}", RESET);
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_role_set(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let active_role = &mut *c.active_role;
     if let Some(rest) = input.strip_prefix("/role ") {
         let mut parts = rest.trim().splitn(2, ' ');
         let role_tok = parts.next().unwrap_or("");
@@ -1387,39 +1676,69 @@ pub fn dispatch_slash_command(
                 RESET
             );
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_janitor(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
     if input == "/janitor" || input == "/j" {
         render_janitor_panel(cwd);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_audit(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/audit" {
         render_audit_panel(None);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_audit_file(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if let Some(file_flt) = input
         .strip_prefix("/blame ")
         .or_else(|| input.strip_prefix("/audit "))
     {
         render_audit_panel(Some(file_flt.trim()));
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_blame_panel(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/blame" {
         render_audit_panel(None);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_wiki(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
     if input == "/wiki" || input == "/w" {
         render_repo_wiki(cwd);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_pins(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
     if input == "/pin" || input == "/pins" || input == "/p" {
         render_pins_panel(cwd);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_pin_add(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let messages = &mut *c.messages;
     if let Some(note) = input.strip_prefix("/pin ") {
         let pin = add_pin(cwd, note);
         if !messages.is_empty() {
@@ -1430,8 +1749,15 @@ pub fn dispatch_slash_command(
             "\n{}📌 Pinned to project context (#{}): {}{}{}",
             GREEN, pin.id, BOLD, pin.content, RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_unpin(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let messages = &mut *c.messages;
     if let Some(id_str) = input.strip_prefix("/unpin ") {
         if let Ok(id) = id_str.trim().parse::<usize>() {
             if remove_pin(cwd, id) {
@@ -1446,13 +1772,24 @@ pub fn dispatch_slash_command(
                 println!("\n{}Pin not found: #{}{}", YELLOW, id, RESET);
             }
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_goals(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
     if input == "/goal" || input == "/goals" || input == "/g" {
         render_goals_panel(cwd);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_goal_done(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let messages = &mut *c.messages;
     if let Some(id_str) = input.strip_prefix("/goal done ") {
         if let Ok(id) = id_str.trim().parse::<usize>() {
             if complete_goal(id) {
@@ -1467,8 +1804,15 @@ pub fn dispatch_slash_command(
                 println!("\n{}Target not found: #{}{}", YELLOW, id, RESET);
             }
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
+
+fn cmd_goal_add(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let messages = &mut *c.messages;
     if let Some(obj) = input.strip_prefix("/goal ") {
         let g = add_goal(cwd, obj);
         if !messages.is_empty() {
@@ -1479,9 +1823,18 @@ pub fn dispatch_slash_command(
             "\n{}🎯 Yeni proje hedefi eklendi (#{}): {}{}{}",
             GREEN, g.id, BOLD, g.objective, RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_clear(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let cwd = c.cwd;
+    let endpoint = &mut *c.endpoint;
+    let ctx = &mut *c.ctx;
+    let session_file = &mut *c.session_file;
+    let session_name = &mut *c.session_name;
+    let messages = &mut *c.messages;
     if input == "/clear" {
         crate::memory::invalidate_system_prompt_cache();
         let sys = ChatMessage::system(cached_system_prompt(cwd, endpoint.wants_compact_prompt()));
@@ -1489,9 +1842,12 @@ pub fn dispatch_slash_command(
         rewrite_session(session_file, messages);
         setup_scroll_region();
         render_welcome_header(endpoint, ctx.access, &ctx.default_host, cwd, session_name);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_jobs(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/jobs"
         || input == "/ps"
         || input.starts_with("/jobs ")
@@ -1504,9 +1860,16 @@ pub fn dispatch_slash_command(
             .trim();
         let out = crate::tools::handle_bg_job_slash(rest);
         println!("\n{}{}{}", CYAN, out, RESET);
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_update(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
+    let endpoint = &mut *c.endpoint;
+    let ctx = &mut *c.ctx;
+    let active_phase = &mut *c.active_phase;
+    let session_file = &mut *c.session_file;
     if input == "/update" || input == "/upgrade" || input == "/upd" {
         if crate::update::is_check_disabled() {
             println!(
@@ -1518,7 +1881,7 @@ pub fn dispatch_slash_command(
                 ),
                 RESET
             );
-            return SlashOutcome::Handled;
+            return Some(SlashOutcome::Handled);
         }
 
         // In-place upgrade: ask the release endpoint what is newest (this also refreshes
@@ -1529,7 +1892,7 @@ pub fn dispatch_slash_command(
             Ok(Some(info)) => {
                 let Some(bin_src) = crate::update::fetch_asset_binary() else {
                     render_update_notice(&info);
-                    return SlashOutcome::Handled;
+                    return Some(SlashOutcome::Handled);
                 };
                 let home = std::env::var("HOME").unwrap_or_default();
                 let home_bin = PathBuf::from(&home).join(".local/bin/spavn");
@@ -1594,7 +1957,7 @@ pub fn dispatch_slash_command(
                         RESET
                     );
                 }
-                return SlashOutcome::Handled;
+                return Some(SlashOutcome::Handled);
             }
             Ok(None) => println!(
                 "\n{}✅ SPAVN v{} is up to date.{} ({}/{})",
@@ -1606,9 +1969,12 @@ pub fn dispatch_slash_command(
             ),
             Err(e) => println!("\n{}⚠️  Version check failed: {}{}", YELLOW, e, RESET),
         }
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+fn cmd_help(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/help" {
         println!(
             "\n{}╭─ ⚡ SPAVN v0.1 COMMANDS, BYOK & ENGINE FEATURES ──────────────────────────{}",
@@ -1618,7 +1984,8 @@ pub fn dispatch_slash_command(
             "{}│{}  {}/ (veya /menu){}                Interactive arrow-key main command menu",
             CYAN, RESET, BOLD, RESET
         );
-        println!("{}│{}  {}/model (/m) · /local{}          Two-column Provider (←/→) & Model (↑/↓) picker", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/model (/m) · /local{}          Two-column Provider (←/→) & Model (↑/↓) picker (this session only)", CYAN, RESET, BOLD, RESET);
+        println!("{}│{}  {}/model default · /default{}     Pin the active model as the default for new sessions", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/bench [model]{}                TTFT, tok/s and Tool-Call test on active/specified model", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/byok (/b){}                    BYOK API Key & Custom Provider (Base URL) manager", CYAN, RESET, BOLD, RESET);
         println!("{}│{}  {}/login · /provider (/connect){} Direct provider login (CLI Auth, Browser or Local Server)", CYAN, RESET, BOLD, RESET);
@@ -1651,9 +2018,17 @@ pub fn dispatch_slash_command(
             "{}╰────────────────────────────────────────────────────────────────────────────{}",
             CYAN, RESET
         );
-        return SlashOutcome::Handled;
+        return Some(SlashOutcome::Handled);
     }
+    None
+}
 
+pub fn dispatch_slash_command(input: &str, c: &mut SlashCtx<'_>) -> SlashOutcome {
+    for handler in SLASH_HANDLERS {
+        if let Some(outcome) = handler(c, input) {
+            return outcome;
+        }
+    }
     SlashOutcome::NotSlash
 }
 
@@ -1718,17 +2093,19 @@ mod slash_tests {
         let mut msgs = Vec::new();
         dispatch_slash_command(
             input,
-            "/tmp",
-            &mut ep,
-            ctx,
-            phase,
-            role,
-            thinking,
-            &mut quota,
-            &mut prefill,
-            &mut sess_file,
-            &mut sess_name,
-            &mut msgs,
+            &mut SlashCtx {
+                cwd: "/tmp",
+                endpoint: &mut ep,
+                ctx,
+                active_phase: phase,
+                active_role: role,
+                show_thinking: thinking,
+                quota_badge: &mut quota,
+                prefill_input: &mut prefill,
+                session_file: &mut sess_file,
+                session_name: &mut sess_name,
+                messages: &mut msgs,
+            },
         )
     }
 

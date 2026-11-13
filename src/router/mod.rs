@@ -124,7 +124,10 @@ pub(crate) fn is_moe_model_id(lower: &str) -> bool {
     // or `<digits>x<digits>b` (e.g., `8x7b`, `8x22b`, `16x14b`)
     for token in lower.split(|c: char| !c.is_ascii_alphanumeric() && c != '.') {
         if let Some(rest) = token.strip_prefix('a').and_then(|s| s.strip_suffix('b')) {
-            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.') && rest.chars().any(|c| c.is_ascii_digit()) {
+            if !rest.is_empty()
+                && rest.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && rest.chars().any(|c| c.is_ascii_digit())
+            {
                 return true;
             }
         }
@@ -610,6 +613,8 @@ impl ModelEndpoint {
             let k = self.model.to_lowercase();
             if k.contains("gemini")
                 || k.contains("argon")
+                || k.contains("carbon")
+                || k.contains("hydrogen")
                 || k.contains("claude")
                 || k.contains("opus")
                 || k.contains("sonnet")
@@ -717,6 +722,8 @@ impl ModelEndpoint {
             1_050_000
         } else if k.contains("gemini")
             || k.contains("argon")
+            || k.contains("carbon")
+            || k.contains("hydrogen")
             || k.contains("gpt-4.1")
             || k.contains("deepseek-v4")
             || k.contains("deepseek-flash")
@@ -1059,7 +1066,11 @@ mod tests {
             );
         }
 
-        for dense_id in ["arete-27b", "qwopus3.8-27b-coder-flash", "qwen2.5-coder-32b"] {
+        for dense_id in [
+            "arete-27b",
+            "qwopus3.8-27b-coder-flash",
+            "qwen2.5-coder-32b",
+        ] {
             let badge = infer_local_model_spec_badge(dense_id);
             assert!(
                 !badge.contains("MoE"),
