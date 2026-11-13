@@ -58,7 +58,12 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new(endpoint: ModelEndpoint, ctx: ToolContext, messages: Vec<ChatMessage>, session: PathBuf) -> Self {
+    pub fn new(
+        endpoint: ModelEndpoint,
+        ctx: ToolContext,
+        messages: Vec<ChatMessage>,
+        session: PathBuf,
+    ) -> Self {
         let cwd = ctx.default_host.clone();
         let _ = &cwd;
         let mut shared = Self {
@@ -285,7 +290,10 @@ impl Approver for BridgeApprover {
                 return ApprovalAnswer::Approve;
             }
         }
-        let id = format!("ap-{}", self.ctl.approval_seq.fetch_add(1, Ordering::Relaxed));
+        let id = format!(
+            "ap-{}",
+            self.ctl.approval_seq.fetch_add(1, Ordering::Relaxed)
+        );
         let (tx, rx) = mpsc::channel::<String>();
         if let Ok(mut map) = self.ctl.approvals.lock() {
             map.insert(id.clone(), tx);
@@ -299,7 +307,9 @@ impl Approver for BridgeApprover {
             access: label.clone(),
             options: vec!["approve", "deny", "sovereign", "session"],
         });
-        let answer = rx.recv_timeout(APPROVAL_TIMEOUT).unwrap_or_else(|_| "deny".into());
+        let answer = rx
+            .recv_timeout(APPROVAL_TIMEOUT)
+            .unwrap_or_else(|_| "deny".into());
         if let Ok(mut map) = self.ctl.approvals.lock() {
             map.remove(&id);
         }
@@ -366,7 +376,8 @@ fn ct_eq(a: &str, b: &str) -> bool {
 }
 
 fn reply(id: &Value, data: Value) -> String {
-    json!({ "v": events::VERSION, "method": "reply", "id": id, "ok": true, "data": data }).to_string()
+    json!({ "v": events::VERSION, "method": "reply", "id": id, "ok": true, "data": data })
+        .to_string()
 }
 
 fn error_reply(id: &Value, code: &str, message: impl Into<String>) -> String {
@@ -386,8 +397,8 @@ fn error_reply(id: &Value, code: &str, message: impl Into<String>) -> String {
 /// with the sink already installed and no event can jump ahead of the handshake.
 pub fn connect(socket: &str, shared: Shared) -> Result<Bridge, String> {
     let path = PathBuf::from(socket);
-    let stream = UnixStream::connect(&path)
-        .map_err(|e| format!("bridge: connect {socket}: {e}"))?;
+    let stream =
+        UnixStream::connect(&path).map_err(|e| format!("bridge: connect {socket}: {e}"))?;
     let token = read_token(&path);
     let shared = Arc::new(Mutex::new(shared));
     let ctl = Arc::new(Ctl {
@@ -410,7 +421,14 @@ pub fn connect(socket: &str, shared: Shared) -> Result<Bridge, String> {
     let reader_stream = stream
         .try_clone()
         .map_err(|e| format!("bridge: clone socket: {e}"))?;
-    spawn_reader(reader_stream, shared.clone(), ctl.clone(), out_tx.clone(), token, hs_tx);
+    spawn_reader(
+        reader_stream,
+        shared.clone(),
+        ctl.clone(),
+        out_tx.clone(),
+        token,
+        hs_tx,
+    );
     drop(stream);
 
     match hs_rx.recv_timeout(HANDSHAKE_TIMEOUT) {
@@ -509,7 +527,9 @@ fn handshake(
     match token {
         Some(expected) if ct_eq(expected, presented) => {}
         Some(_) => return Err("bridge: handshake rejected: wrong token".to_string()),
-        None => return Err("bridge: no token: set SPAVN_BRIDGE_TOKEN or <dir>/bridge.env".to_string()),
+        None => {
+            return Err("bridge: no token: set SPAVN_BRIDGE_TOKEN or <dir>/bridge.env".to_string())
+        }
     }
     let hello_ok = json!({
         "v": events::VERSION,
@@ -542,7 +562,11 @@ fn serve(
         let frame: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(err) => {
-                let _ = out.send(error_reply(&Value::Null, "bad_request", format!("bad json: {err}")));
+                let _ = out.send(error_reply(
+                    &Value::Null,
+                    "bad_request",
+                    format!("bad json: {err}"),
+                ));
                 continue;
             }
         };
@@ -577,12 +601,20 @@ fn handle(
         "state.get" => {
             // A turn owns the session lock; the cached snapshot is the answer while it runs.
             if busy {
-                let cache = ctl.snapshot.lock().map(|g| g.clone()).unwrap_or(Value::Null);
+                let cache = ctl
+                    .snapshot
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or(Value::Null);
                 return Ok(cache);
             }
-            let mut guard = lock(shared);
+            let guard = lock(shared);
             *ctl.snapshot.lock().unwrap_or_else(|p| p.into_inner()) = snapshot(&guard);
-            Ok(ctl.snapshot.lock().map(|g| g.clone()).unwrap_or(Value::Null))
+            Ok(ctl
+                .snapshot
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or(Value::Null))
         }
         "prompt.submit" => {
             let text = params
@@ -693,8 +725,7 @@ fn handle(
                 return Err(("busy", "a turn is running".into()));
             }
             let spec = params.get("path").and_then(Value::as_str).unwrap_or("");
-            let path = resolve_session(spec)
-                .ok_or(("not_found", format!("no session {spec}")))?;
+            let path = resolve_session(spec).ok_or(("not_found", format!("no session {spec}")))?;
             {
                 let mut guard = lock(shared);
                 resume_locked(&mut guard, &path)?;
@@ -729,7 +760,7 @@ fn handle(
             }
             let outcome = {
                 let mut guard = lock(shared);
-                let mut guard = &mut *guard;
+                let guard = &mut *guard;
                 dispatch_slash_command(
                     &command,
                     &mut SlashCtx {
@@ -833,18 +864,18 @@ fn resolve_session(spec: &str) -> Option<PathBuf> {
     if direct.exists() {
         return Some(direct);
     }
-    for candidate in [dir.join(spec), dir.join(format!("{spec}.jsonl"))] {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    [dir.join(spec), dir.join(format!("{spec}.jsonl"))]
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 fn resume_locked(shared: &mut Shared, path: &Path) -> Result<(), (&'static str, String)> {
     let loaded = load_session(&path.to_path_buf());
     if loaded.is_empty() {
-        return Err(("not_found", format!("session {} has no messages", path.display())));
+        return Err((
+            "not_found",
+            format!("session {} has no messages", path.display()),
+        ));
     }
     shared.messages = loaded;
     shared.session = path.to_path_buf();
@@ -929,8 +960,8 @@ mod tests {
             snapshot: Mutex::new(json!({ "session": "cached" })),
             session_ok: Mutex::new(HashSet::new()),
         });
-        let err = handle("prompt.submit", &json!({"text": "hi"}), &shared, &ctl, true)
-            .expect_err("busy");
+        let err =
+            handle("prompt.submit", &json!({"text": "hi"}), &shared, &ctl, true).expect_err("busy");
         assert_eq!(err.0, "busy");
         let err = handle("nope", &Value::Null, &shared, &ctl, false).expect_err("unknown");
         assert_eq!(err.0, "unknown_method");
@@ -951,8 +982,22 @@ mod tests {
             snapshot: Mutex::new(Value::Null),
             session_ok: Mutex::new(HashSet::new()),
         });
-        handle("prompt.submit", &json!({"text": "one"}), &shared, &ctl, false).expect("ok");
-        handle("prompt.submit", &json!({"text": "two"}), &shared, &ctl, false).expect("ok");
+        handle(
+            "prompt.submit",
+            &json!({"text": "one"}),
+            &shared,
+            &ctl,
+            false,
+        )
+        .expect("ok");
+        handle(
+            "prompt.submit",
+            &json!({"text": "two"}),
+            &shared,
+            &ctl,
+            false,
+        )
+        .expect("ok");
         let mut q = ctl.prompt_queue.lock().unwrap();
         assert_eq!(q.pop_front().unwrap().text, "one");
         assert_eq!(q.pop_front().unwrap().turn, 2);
@@ -971,10 +1016,24 @@ mod tests {
             session_ok: Mutex::new(HashSet::new()),
         });
         handle("phase.set", &json!({"phase": "plan"}), &shared, &ctl, false).expect("ok");
-        handle("access.set", &json!({"access": "sovereign"}), &shared, &ctl, false).expect("ok");
+        handle(
+            "access.set",
+            &json!({"access": "sovereign"}),
+            &shared,
+            &ctl,
+            false,
+        )
+        .expect("ok");
         let guard = shared.lock().unwrap();
         assert_eq!(guard.phase, AgentPhase::Plan);
         assert_eq!(guard.ctx.access, AccessMode::Sovereign);
-        assert!(handle("access.set", &json!({"access": "root"}), &shared, &ctl, false).is_err());
+        assert!(handle(
+            "access.set",
+            &json!({"access": "root"}),
+            &shared,
+            &ctl,
+            false
+        )
+        .is_err());
     }
 }

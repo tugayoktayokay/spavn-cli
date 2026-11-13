@@ -27,8 +27,11 @@
 
 pub mod ansi;
 pub mod approval;
+#[cfg(unix)]
+pub mod bridge;
 pub mod clipboard;
 pub mod config;
+pub mod events;
 pub mod guard;
 pub mod harness;
 pub mod http;

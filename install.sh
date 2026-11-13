@@ -80,7 +80,33 @@ TARBALL_URL="https://github.com/${REPO}/releases/latest/download/spavn-${TARGET}
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# Checks the archive against the SHA-256 sidecar the release workflow publishes next to it. A
+# mismatch is fatal; a missing sidecar or hashing tool only warns, so minimal images still install.
+verify_checksum() {
+  _file="$1"
+  _want="$(curl -fsSL "${TARBALL_URL}.sha256" 2>/dev/null | awk '{print $1}')"
+  if [ -z "$_want" ]; then
+    echo "Warning: no checksum published for $TARGET; skipping verification." >&2
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    _got="$(sha256sum "$_file" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    _got="$(shasum -a 256 "$_file" | awk '{print $1}')"
+  else
+    echo "Warning: neither sha256sum nor shasum found; skipping verification." >&2
+    return 0
+  fi
+  if [ "$_got" != "$_want" ]; then
+    echo "Error: checksum mismatch for spavn-${TARGET}.tar.gz" >&2
+    echo "       expected $_want" >&2
+    echo "       got      $_got" >&2
+    exit 1
+  fi
+}
+
 if curl -fsSL "$TARBALL_URL" -o "$TMP_DIR/spavn.tar.gz" 2>/dev/null; then
+  verify_checksum "$TMP_DIR/spavn.tar.gz"
   tar -xzf "$TMP_DIR/spavn.tar.gz" -C "$TMP_DIR"
   install_binary "$TMP_DIR/spavn"
 elif command -v cargo >/dev/null 2>&1; then

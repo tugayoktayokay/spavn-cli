@@ -57,6 +57,12 @@ pub fn current_turn() -> u64 {
     TURN.load(Ordering::Relaxed)
 }
 
+/// `seq` of the last event published, `0` before the first one. `ping` reports it so a host can
+/// tell a quiet turn from lost frames.
+pub fn current_seq() -> u64 {
+    SEQ.load(Ordering::Relaxed).saturating_sub(1)
+}
+
 /// One fact about the turn. `data` shapes are the wire contract; renaming a key breaks the shell,
 /// so the JSON is spelled out by hand instead of derived from Rust field names.
 #[derive(Debug, Clone)]
@@ -457,6 +463,19 @@ mod tests {
     }
 
     #[test]
+    fn current_seq_reports_the_last_published_frame() {
+        let line = Event::Notice {
+            level: "info",
+            text: "x".into(),
+        }
+        .line()
+        .expect("serialises");
+        let value: Value = serde_json::from_str(&line).expect("json line");
+        // Other tests publish in parallel, so the counter may already be past this frame.
+        assert!(current_seq() >= value["seq"].as_u64().unwrap());
+    }
+
+    #[test]
     fn envelope_matches_the_wire_contract() {
         let line = Event::ToolFinished {
             id: "1".into(),
@@ -481,7 +500,27 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_has_a_dotted_name() {
+    fn every_kind_is_in_the_protocol_catalogue() {
+        // `PROTOCOL.md` §2.1 in the desktop repo. `usage`, `notice` and `error` are undotted there.
+        const CATALOGUE: [&str; 17] = [
+            "session.ready",
+            "turn.started",
+            "thinking.delta",
+            "message.delta",
+            "message.final",
+            "tool.started",
+            "tool.output",
+            "tool.finished",
+            "approval.request",
+            "approval.resolved",
+            "tasks.updated",
+            "phase.changed",
+            "usage",
+            "notice",
+            "error",
+            "turn.finished",
+            "bridge.closed",
+        ];
         let events = [
             Event::SessionReady {
                 session: "/tmp/s.jsonl".into(),
@@ -513,6 +552,15 @@ mod tests {
                 chunk: "x".into(),
                 truncated: false,
             },
+            Event::ToolFinished {
+                id: "1".into(),
+                ok: true,
+                exit_code: Some(0),
+                duration_ms: 3,
+                added: None,
+                removed: None,
+                rows: None,
+            },
             Event::ApprovalRequest {
                 id: "a".into(),
                 action: "bash".into(),
@@ -539,6 +587,10 @@ mod tests {
                 ctx_pct: 1,
                 quota: None,
             },
+            Event::Notice {
+                level: "info",
+                text: "n".into(),
+            },
             Event::Error {
                 message: "boom".into(),
                 retryable: true,
@@ -554,8 +606,9 @@ mod tests {
                 code: Some(0),
             },
         ];
+        assert_eq!(events.len(), CATALOGUE.len(), "one sample per variant");
         for event in events {
-            assert!(event.kind().contains('.'), "{}", event.kind());
+            assert!(CATALOGUE.contains(&event.kind()), "{}", event.kind());
             serde_json::to_string(&event.data()).expect("data serialises");
         }
     }
@@ -604,7 +657,7 @@ mod tests {
     #[test]
     fn rfc3339_carries_local_offset_and_civil_date() {
         // 2026-11-06T00:14:03+03:00 is 2026-11-05T21:14:03Z.
-        let stamped = rfc3339_from_unix(1_762_386_843, 3 * 3600);
+        let stamped = rfc3339_from_unix(1_793_913_243, 3 * 3600);
         assert!(stamped.starts_with("2026-11-06T00:14:03."), "{stamped}");
         assert!(stamped.ends_with("+03:00"), "{stamped}");
         assert_eq!(parse_offset("+0300"), Some(180));

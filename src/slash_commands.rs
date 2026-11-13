@@ -90,6 +90,15 @@ pub(crate) fn stage_binary(src: &Path, dest: &Path) -> bool {
 /// `~/bin/spavn` and `~/bin/spvn` symlinked to the canonical `~/.local/bin/spavn` binary
 /// if `~/bin` exists on `PATH`, preventing stale copies with invalidated macOS kernel vnode signatures.
 pub(crate) fn link_alias(binary: &Path) {
+    let user_bin = std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join("bin"));
+    link_alias_in(binary, user_bin.as_deref());
+}
+
+/// [`link_alias`] with the `~/bin` directory passed in. Tests hand over their own directory (or
+/// `None`), so a test run can never repoint the entries in the real `~/bin`.
+fn link_alias_in(binary: &Path, user_bin: Option<&Path>) {
     let Some(parent) = binary.parent() else {
         return;
     };
@@ -101,18 +110,17 @@ pub(crate) fn link_alias(binary: &Path) {
     let _ = std::fs::copy(binary, &alias);
 
     #[cfg(unix)]
-    if let Ok(home) = std::env::var("HOME") {
-        let user_bin = PathBuf::from(home).join("bin");
-        if user_bin.is_dir() && user_bin != parent {
-            for name in ["spavn", "spvn"] {
-                let target = user_bin.join(name);
-                if target.exists() || target.symlink_metadata().is_ok() {
-                    let _ = std::fs::remove_file(&target);
-                    let _ = std::os::unix::fs::symlink(binary, &target);
-                }
+    if let Some(user_bin) = user_bin.filter(|dir| dir.is_dir() && *dir != parent) {
+        for name in ["spavn", "spvn"] {
+            let target = user_bin.join(name);
+            if target.exists() || target.symlink_metadata().is_ok() {
+                let _ = std::fs::remove_file(&target);
+                let _ = std::os::unix::fs::symlink(binary, &target);
             }
         }
     }
+    #[cfg(not(unix))]
+    let _ = user_bin;
 }
 
 /// True when `path` really execs, checked with `--version`.
@@ -2225,10 +2233,28 @@ mod slash_tests {
         std::fs::write(&bin, "x").unwrap();
         let alias = dir.join("spvn");
         std::fs::write(&alias, "stale copy").unwrap();
-        link_alias(&bin);
+        // `None`: the real `~/bin` must stay out of a test run.
+        link_alias_in(&bin, None);
         let meta = std::fs::symlink_metadata(&alias).unwrap();
         assert!(meta.file_type().is_symlink(), "spvn must become a symlink");
         assert_eq!(std::fs::read_link(&alias).unwrap(), bin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_alias_repoints_only_existing_entries_in_the_given_user_bin() {
+        let dir = scratch("alias-userbin");
+        let bin = dir.join("spavn");
+        std::fs::write(&bin, "x").unwrap();
+        let user_bin = dir.join("userbin");
+        std::fs::create_dir_all(&user_bin).unwrap();
+        std::fs::write(user_bin.join("spavn"), "stale copy").unwrap();
+        link_alias_in(&bin, Some(&user_bin));
+        assert_eq!(std::fs::read_link(user_bin.join("spavn")).unwrap(), bin);
+        assert!(
+            user_bin.join("spvn").symlink_metadata().is_err(),
+            "an entry that was not there must not be created"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

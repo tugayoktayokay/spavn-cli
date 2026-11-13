@@ -25,7 +25,7 @@ $ spavn "refactor the spill module, then run the suite"
 
 <div align="center">
 
-**[Docs](https://spavn.dev/docs/)** · **[Screenshots](#-screenshots)** · **[Why](#-why-another-coding-agent)** · **[Harness Intelligence](#-autonomous-harness-intelligence)** · **[Install](#-install)** · **[First run](#-first-run)** · **[Tools](#-the-tool-surface)** · **[JSON-RPC](#-headless-json-rpc-20-bridge)** · **[Slash commands](#-slash-commands)** · **[Security](#-permissions-and-path-policy)** · **[Architecture](#-architecture)**
+**[Docs](https://spavn.dev/docs/)** · **[Screenshots](#-screenshots)** · **[Why](#-why-another-coding-agent)** · **[Harness Intelligence](#-autonomous-harness-intelligence)** · **[Install](#-install)** · **[First run](#-first-run)** · **[Tools](#-the-tool-surface)** · **[Desktop bridge](#-desktop-bridge-not-shipped-yet)** · **[Slash commands](#-slash-commands)** · **[Security](#-permissions-and-path-policy)** · **[Architecture](#-architecture)**
 
 </div>
 
@@ -44,7 +44,7 @@ $ spavn "refactor the spill module, then run the suite"
 | [⚙️ Requirements](#-requirements) | Rust version, OS support, network |
 | [⬇️ Install](#-install) | One-liner, Cargo, prebuilt, from source |
 | [🚀 First run](#-first-run) | Zero-config start, local models, BYOK, Claude 5.5 |
-| [🔌 Headless JSON-RPC 2.0 bridge](#-headless-json-rpc-20-bridge) | `spavn --rpc` stdio protocol for desktop/IDE hosts |
+| [🔌 Desktop bridge (not shipped yet)](#-desktop-bridge-not-shipped-yet) | Status of the headless bridge for desktop/IDE hosts |
 | [🧰 The tool surface](#-the-tool-surface) | 11 builtins + anything MCP |
 | [⌨️ Slash commands](#-slash-commands) | 37 entries, all aliases |
 | [🔐 Permissions and path policy](#-permissions-and-path-policy) | 3 access modes, 6 gates |
@@ -231,7 +231,7 @@ spavn --model ollama:qwen2.5-coder "refactor the spill module"
 # then set SPAVN_LOCAL_BASE_URL / SPAVN_LOCAL_MODELS_URL, or edit providers in config.json
 ```
 
-Every flag: `-m/--model`, `-a/--access`, `-P/--phase`, `-H/--host`, `-s/--session`, `-c/--continue`, `-r/--resume`, `-i/--interactive`, `-p/--prompt`, `-t/--think`, `-q/--quiet`, `-j/--json`, `--rpc`, `-V/--version`, `-h/--help`.
+Every flag: `-m/--model`, `-a/--access`, `-P/--phase`, `-H/--host`, `-s/--session`, `-c/--continue`, `-r/--resume`, `-i/--interactive`, `-p/--prompt`, `-t/--think`, `-q/--quiet`, `-j/--json`, `-V/--version`, `-h/--help`.
 
 ### Against a cloud provider (BYOK)
 
@@ -253,12 +253,12 @@ cargo build --release
 
 Compare two models, or one model before and after a harness change, by running both with `-o` and diffing the JSONL files. A task whose `verify` already passes before the agent starts is reported as `broken-fixture` and left out of the rate. `-f` matches a substring of the task name or tag, so `-f x-` also picks `bugfix-…`. Add a task by creating `evals/tasks/<name>/task.json` and a `repo/` folder.
 
-## 🔌 Headless JSON-RPC 2.0 bridge
+## 🔌 Desktop bridge (not shipped yet)
 
-`spavn --rpc` runs the agent as a headless NDJSON JSON-RPC 2.0 server over `stdin` / `stdout` — the exact protocol used by [`spavn-desktop`](https://github.com/tugayoktayokay/spavn-desktop) and external IDE integrations:
+This release has no `--rpc` or `--bridge` flag; passing one is read as prompt text. A headless bridge for desktop and IDE hosts is in progress:
 
-- **Requests (`stdin`)**: `prompt`, `abort`, `set_phase`, `set_model`, `get_state`
-- **Streaming notifications (`stdout`)**: `turn_start`, `text_delta`, `thinking_delta`, `tool_start`, `tool_end`, `turn_end`, `state`
+- **In the tree**: `src/bridge.rs` and `src/events.rs` hold the Unix-socket NDJSON transport, token handshake, request handling and event envelope. They are compiled and unit-tested on Unix.
+- **Missing**: a flag that starts the bridge, and the turn loop publishing its events. Until then, script the CLI with `-q` / `-j`.
 
 ---
 
@@ -342,6 +342,8 @@ Streamable-HTTP servers use `url` instead of `command`. Stdio servers get a scru
 | `/exit` | `/quit`, `/x`, `:q`, `:wq`, `q!`, `exit`, `quit` | Leave |
 | `/stop` | `/cancel` | Interrupt a running turn |
 | `/diff` | `/d` | Working-tree diff |
+| `/copy` | — | List copyable output regions; `/copy <number>` copies one to the clipboard |
+| `/jobs` | `/ps` | Background `bash` jobs started by the agent |
 | `/commit` | `/cm` | Commit helper |
 | `/undo` | `/u` | Transactional rollback of the last `N` file edits/writes (`/undo [N]`) |
 | `/janitor` | `/j` | Dead code / stray artifact sweep |
@@ -573,48 +575,56 @@ Oversized tool output is **never** silently truncated. It spills to `tool-output
 
 ```
 src/
-├── main.rs            CLI parsing, first-run, TUI & --rpc entry point
-├── lib.rs             module wiring and shared constants
-├── rpc.rs             headless JSON-RPC 2.0 stdio bridge (spavn --rpc)
-├── config.rs          config load/save, provider catalog (Claude 5.5, etc.), ~/.spavn layout
-├── guard.rs           access modes, path policy, shell AST risk & egress classification
+├── main.rs            CLI parsing, first-run setup, headless prompt and TUI entry point
+├── turn.rs            agentic turn loop: streaming, tool batches, compaction, repeat-tool breaker
+├── lib.rs             module wiring
+├── bin/
+│   └── spavn_eval.rs  `spavn-eval`: runs the agent on a task directory and reports a pass rate
+├── config.rs          config load/save (atomic, locked), provider catalog, ~/.spavn layout
+├── guard.rs           access modes, path policy, shell risk & egress classification
+├── approval.rs        the seam the access gate asks its question through
+├── harness.rs         orchestration constants and the pure decision logic behind the turn loop
 ├── http.rs            blocking HTTP on ureq, no async runtime
 ├── router/
 │   ├── mod.rs         provider/model resolution, quota & fallback routing
-│   ├── catalog.rs     dynamic & built-in model catalogs
-│   ├── oauth.rs       OAuth / token helpers
-│   └── stream.rs      SSE streaming decode & stall watchdog
-├── turn/
-│   ├── mod.rs         agentic turn loop, Zero-Stop compiler gate, repeat-tool breaker
-│   └── verdict.rs     tool verdict classification & formatting
+│   ├── openai.rs      OpenAI-compatible streaming and tool-call dialect parsing
+│   ├── anthropic.rs   Anthropic Messages streaming
+│   └── vision.rs      dragged / pasted image handling
 ├── tools/
-│   ├── mod.rs         tool dispatch, timeout & detached TTY execution
+│   ├── mod.rs         tool dispatch
 │   ├── schema.rs      turn-aware tool schema generation
-│   ├── edit.rs        fuzzy self-heal edit, stale-file guard (FS_STALE_VERSION), UndoStack
-│   ├── search.rs      ripgrep search, BM25+AST fallback, live signature & arity extractor
-│   ├── shell.rs       local/remote bash, background jobs, zero-quoting py/js execution
-│   ├── mcp_web.rs     MCP stdio/HTTP client, web search/fetch
-│   └── subagent.rs    bounded parallel read-only sub-agents
+│   ├── read.rs        file reads and `path:N-M` line-range selectors
+│   ├── edit.rs        fuzzy self-heal edit, stale-file guard (FS_STALE_VERSION), undo
+│   ├── search.rs      ripgrep search with a semantic fallback
+│   ├── shell.rs       local/remote bash, background jobs
+│   ├── lsp.rs         LSP client (Content-Length framed JSON-RPC)
+│   ├── mcp_subagent.rs  stdio MCP exchange
+│   ├── subagent.rs    bounded sub-agents, git-worktree isolation for workers
+│   ├── web.rs         `web` tool over a configured MCP backend
+│   └── web_search.rs  built-in web search provider chain with fallback
 ├── hud/
-│   ├── mod.rs         dock, transcript render, panels
+│   ├── mod.rs         shared HUD state: context usage, idle recap, completion popup
 │   ├── dock.rs        live status dock & context pressure bar
 │   ├── input.rs       line editor, queue/steer handling
 │   ├── keys.rs        key decoding
 │   ├── menus.rs       interactive ↑/↓ menu engine
 │   ├── pickers.rs     /model, /byok, /resume, /todo done pickers
-│   ├── panels.rs      /bench, /fleet, /quota panels
-│   ├── toolcard.rs    collapsible tool result cards & spill markers
-│   └── edit.rs        inline diff preview
-├── session/
-│   ├── mod.rs         session lifecycle, fork, resume
-│   ├── compactor.rs   budget-relative context compaction & supersede pruning
-│   └── store.rs       JSONL persistence
+│   ├── cards.rs       welcome header, update notice, quota line
+│   ├── toolcard.rs    inline tool result cards
+│   ├── edit.rs        buffer-editing primitives for the dock prompt editor
+│   └── title.rs       terminal window title (OSC 0)
+├── session.rs         JSONL sessions, fork/resume, compaction, per-session model
+├── session_title.rs   auto session title
 ├── slash_commands.rs  command dispatch + /help
+├── bridge.rs          desktop bridge transport (Unix only; no flag starts it yet)
+├── events.rs          structured turn events for the bridge
+├── update.rs          release check and in-place upgrade
+├── clipboard.rs       clipboard write via the platform CLI tool
 ├── memory.rs          recall/remember bridge & repo map builder
 ├── skills.rs          skill discovery and injection
 ├── spill.rs           oversized-output spill files
 ├── markdown.rs        streaming Markdown renderer
-├── ansi.rs            colour, OSC-52 clipboard and escape handling
+├── ansi.rs            ANSI geometry and escape handling
 ├── state.rs           global runtime state
 └── spavn_engine.rs    audit chain, secret scrubbing, janitor, goals, pins, wiki
 ```

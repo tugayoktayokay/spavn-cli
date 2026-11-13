@@ -11,7 +11,7 @@ use spavn::session::{
 };
 use spavn::state::{
     advance_live_tasks_on_tool, clear_finished_live_tasks, clear_interrupted, is_interrupted,
-    pop_steer_messages, sync_live_tasks_from_text,
+    pop_steer_messages, sync_live_tasks_from_text, take_soft_stop,
 };
 use spavn::tools::{execute_tool, AccessMode, ToolContext};
 use spavn::{hud, tools};
@@ -398,6 +398,8 @@ pub(crate) fn run_agent_turn(
     // falls back to the static glyph on every exit path, including the `?` early returns.
     let _title = hud::WorkingGuard::new();
     clear_interrupted();
+    // A soft stop requested while idle must not end the next turn before it starts.
+    let _ = take_soft_stop();
     // A bar left at `[3/3]` from the previous request describes finished work; keeping it up
     // made the next, unrelated turn look like it was still mid-plan.
     clear_finished_live_tasks();
@@ -467,6 +469,10 @@ pub(crate) fn run_agent_turn(
             if !quiet {
                 println!("\n{}⚡ [Interrupted via Esc/Ctrl+C]{}", YELLOW, RESET);
             }
+            return Ok(());
+        }
+        // Soft stop: the previous tool batch is already recorded, so the history is consistent.
+        if take_soft_stop() {
             return Ok(());
         }
 

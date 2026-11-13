@@ -11,6 +11,13 @@
 - **Tests**: `SPAVN_LANG` / `SPAVN_HOME` tests moved to `tests/` (own process) so they stop racing parallel unit tests. New tests cover the heredoc cases, `last_model` and 8 concurrent config updates.
 - **CI**: `cargo fmt` and the `type TapHandles` clippy warning fixed; `data/`, `evals/` and `src/bin/` are now tracked (`data/byok_catalog.json` is embedded with `include_str!`, so a clean checkout did not build without it).
 
+### Desktop Bridge Compiled, Installer Checksum, Docs Corrected (`src/lib.rs`, `src/bridge.rs`, `src/events.rs`, `src/state.rs`, `src/turn.rs`, `src/slash_commands.rs`, `install.sh`, `README.md`, `docs/index.html`)
+- **Fix, dead code**: `src/bridge.rs` and `src/events.rs` were never declared in `lib.rs`, so they had not been compiled or tested since v0.2.0. They are now modules (`bridge` on Unix only). Two functions they called did not exist and were added: `events::current_seq` and `state::request_soft_stop`, which the turn loop honours between tool batches.
+- **Docs**: No `--rpc` flag has ever existed, but the README and the docs site described one. Both now say the desktop bridge is not shipped: no flag starts it and the turn loop does not publish events yet. The module trees match the real files, and `/copy` and `/jobs` are listed.
+- **Security (`install.sh`)**: The downloaded archive is checked against its published `.sha256`. A mismatch aborts the install; a missing sidecar or hashing tool only warns.
+- **Fix, tests touching the real home**: The `link_alias` test repointed the real `~/bin/spavn` and `~/bin/spvn` at a deleted temp directory on every `cargo test`. The `~/bin` directory is now a parameter and tests pass their own.
+- **Tests**: The event-name test required a dot in every name, which `usage`, `notice` and `error` do not have; it now checks against the protocol catalogue and covers every variant. A wrong timestamp constant in the RFC 3339 test is fixed.
+
 ### `/model` No Longer Leaks Across Terminals (`src/session.rs`, `src/slash_commands.rs`, `src/main.rs`, `src/bridge.rs`, `src/hud/dock.rs`)
 - **Bug**: Every `/model` switch overwrote `default_model` in `~/.spavn/config.json`, so whichever model you picked last in any terminal became the model for every new terminal.
 - **Fix**: Model switches made with `/model`, `/model <key>`, `/local` and `/byok` now apply only to the current session. The choice is saved in a `session-X.model` file next to the session's `.jsonl`. `--resume`, `--continue`, `/resume` and the bridge `session.load` reopen a session on its own saved model. An explicit `-m` or `SPAVN_MODEL` still takes priority. `/new` and `/fork` start with the active model.

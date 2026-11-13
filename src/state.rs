@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static SOFT_STOP: AtomicBool = AtomicBool::new(false);
 static RESIZED: AtomicBool = AtomicBool::new(false);
 static STEER_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static PROMPT_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
@@ -467,6 +468,17 @@ pub fn clear_interrupted() {
     INTERRUPTED.store(false, Ordering::SeqCst);
 }
 
+/// Asks the running turn to end once the tool batch in flight has finished. Unlike
+/// [`trigger_interrupt`] it never cancels a stream or a tool mid-way.
+pub fn request_soft_stop() {
+    SOFT_STOP.store(true, Ordering::SeqCst);
+}
+
+/// Consumes a pending soft stop; the turn loop calls it between tool batches.
+pub fn take_soft_stop() -> bool {
+    SOFT_STOP.swap(false, Ordering::SeqCst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +492,14 @@ mod tests {
             .into_iter()
             .map(|i| (i.title, i.status))
             .collect()
+    }
+
+    #[test]
+    fn soft_stop_is_consumed_exactly_once() {
+        assert!(!take_soft_stop());
+        request_soft_stop();
+        assert!(take_soft_stop());
+        assert!(!take_soft_stop());
     }
 
     #[test]
