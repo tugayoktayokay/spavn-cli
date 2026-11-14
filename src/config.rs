@@ -553,7 +553,7 @@ pub fn shell_bin() -> String {
                 return candidate.to_string();
             }
         }
-        return "powershell.exe".to_string();
+        "powershell.exe".to_string()
     }
     #[cfg(not(windows))]
     {

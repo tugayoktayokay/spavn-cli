@@ -75,13 +75,9 @@ pub(crate) fn is_structural_outline_line(line: &str) -> bool {
         "override ",
         "@objc ",
     ];
-    if OO_MODIFIERS.iter().any(|m| trimmed.starts_with(m))
+    OO_MODIFIERS.iter().any(|m| trimmed.starts_with(m))
         && (trimmed.contains('(') || trimmed.contains("class ") || trimmed.contains("interface "))
         && !trimmed.ends_with(';')
-    {
-        return true;
-    }
-    false
 }
 
 /// One `N-M` (or bare `N`) span from a `path:N-M,K-L` selector.

@@ -2143,6 +2143,7 @@ mod slash_tests {
         )
     }
 
+    #[cfg(unix)]
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "spavn-stage-{}-{}-{}",

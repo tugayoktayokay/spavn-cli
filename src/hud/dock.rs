@@ -14,6 +14,7 @@ pub(crate) fn enter_raw_mode(orig_termios: &Termios, vtime: u8) {
     }
 }
 
+#[cfg(unix)]
 #[repr(C)]
 pub(crate) struct WinSize {
     ws_row: u16,
@@ -217,7 +218,7 @@ pub(crate) type TcFlag = u32;
 
 #[cfg(target_os = "macos")]
 pub(crate) const TIOCGWINSZ: u64 = 0x4008_7468;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) const TIOCGWINSZ: u64 = 0x5413;
 
 #[cfg(target_os = "macos")]
