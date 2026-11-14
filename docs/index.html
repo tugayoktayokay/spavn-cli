@@ -235,6 +235,11 @@
     background: color-mix(in srgb, var(--fg) 7%, transparent);
     border: 1px solid var(--line); color: var(--fg); white-space: nowrap;
   }
+  p code, li code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
   td.wrap code { white-space: normal; }
 
   /* ── code ─────────────────────────────────────────────── */
@@ -331,11 +336,20 @@
       border-bottom: 1px solid transparent; transition: max-height .2s ease;
     }
     nav.side.open { max-height: 72vh; overflow-y: auto; padding: 14px 16px 20px; border-bottom-color: var(--line); }
-    #menu-btn { display: inline-flex; }
-    .searchbox { flex: 1 1 auto; }
+    #menu-btn { display: inline-flex; flex-shrink: 0; }
+    .grow { display: none; }
+    .searchbox { flex: 1 1 0%; min-width: 0; }
+    .searchbox input { min-width: 0; padding: 7px 10px 7px 30px; font-size: 13px; }
     .searchbox .hintk { display: none; }
-    .top-inner { gap: 9px; padding: 9px 14px; }
+    .top-inner { gap: 8px; padding: 9px 12px; }
+    .brand { flex-shrink: 0; }
     .brand small { display: none; }
+  }
+  @media (max-width: 640px) {
+    .top-inner .pill,
+    .top-inner a.btn { display: none; }
+    .gate { grid-template-columns: 26px minmax(0, 1fr); gap: 8px 10px; }
+    .gate .loc { grid-column: 2; }
   }
   @media print {
     header.top, nav.side, #progress, .copy, #results { display: none !important; }
@@ -412,8 +426,8 @@
         <span class="chip"><b>v0.2.16</b></span>
         <span class="chip"><b>11</b> tools</span>
         <span class="chip"><b>37</b> commands</span>
+        <span class="chip"><b>30</b> providers</span>
         <span class="chip"><b>6</b> gates</span>
-        <span class="chip"><b>JSON-RPC 2.0</b></span>
         <span class="chip"><b>3</b> direct deps</span>
         <span class="chip">MIT</span>
       </div>
@@ -442,7 +456,19 @@
         </table>
       </div>
 
-      <h3>Autonomous harness intelligence (v0.2.10)</h3>
+      <h3>Live terminal captures</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px;margin:14px 0 22px">
+        <figure style="margin:0;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px">
+          <img src="/assets/shots/spavn-live-session.gif" alt="SPAVN live session: autonomous read, inline word-diff edit, and unit test verification" width="1240" height="799" loading="lazy" style="width:100%;height:auto;display:block;border-radius:8px" />
+          <figcaption style="margin-top:8px;font-size:12.5px;color:var(--muted)">Autonomous bugfix turn: <code>read</code> → inline word-diff <code>edit</code> → <code>unittest</code> verification and pinned HUD dock.</figcaption>
+        </figure>
+        <figure style="margin:0;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px">
+          <img src="/assets/shots/spavn-live-menus.gif" alt="SPAVN live menus: slash command palette, /model switcher, and /diff viewer" width="1240" height="799" loading="lazy" style="width:100%;height:auto;display:block;border-radius:8px" />
+          <figcaption style="margin-top:8px;font-size:12.5px;color:var(--muted)">Interactive <code>/</code> command palette, session-scoped <code>/model</code> picker, and inline <code>/diff</code> inspection.</figcaption>
+        </figure>
+      </div>
+
+      <h3>Autonomous harness intelligence</h3>
       <div class="tw">
         <table>
           <thead><tr><th>Layer</th><th>Module</th><th>How it works</th></tr></thead>
@@ -463,8 +489,9 @@
       <div class="tw">
         <table>
           <tbody>
-            <tr><th>Version</th><td>0.2.10 · MIT</td></tr>
-            <tr><th>Rust</th><td>1.80+ (uses <code>LazyLock</code>)</td></tr>
+            <tr><th>Version</th><td>0.2.16 · MIT</td></tr>
+            <tr><th>Binary footprint</th><td><code>5.2 MiB</code> uncompressed (<code>5,413,888 B</code> macOS arm64) · <code>2.4–2.7 MiB</code> compressed release archive · <code>~90 KiB</code> source crate</td></tr>
+            <tr><th>Rust</th><td>1.80+ (uses <code>LazyLock</code>) · 3 direct crates (<code>serde</code>, <code>serde_json</code>, <code>ureq</code>)</td></tr>
             <tr><th>State</th><td><code>~/.spavn</code> · mode <code>0700</code>, secrets <code>0600</code></td></tr>
             <tr><th>External tools</th><td><code>ripgrep</code> for the <code>search</code> tool · <code>ssh</code> for remote hosts</td></tr>
             <tr><th>Bridge</th><td>Not shipped yet: the desktop bridge transport is compiled and unit-tested, but no flag starts it</td></tr>

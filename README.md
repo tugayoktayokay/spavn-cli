@@ -10,6 +10,7 @@ No async runtime. No Electron. No plugin tree. Three direct dependencies, one `c
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/tugayoktayokay/spavn-cli?color=7c5cff)](https://github.com/tugayoktayokay/spavn-cli/releases)
+[![Binary](https://img.shields.io/badge/binary-5.2%20MiB%20(2.4%20MiB%20.tar.gz)-06b6d4.svg)](https://github.com/tugayoktayokay/spavn-cli/releases)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![Tests](https://img.shields.io/badge/tests-381%20passing-success.svg)](#development)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#install)
@@ -18,6 +19,14 @@ No async runtime. No Electron. No plugin tree. Three direct dependencies, one `c
 ```
 $ spavn "refactor the spill module, then run the suite"
 ```
+
+<p align="center">
+  <a href="https://spavn.dev">
+    <img src="https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/assets/shots/spavn-live-session.gif" alt="SPAVN Live In-App Autonomous Coding Session" width="92%" />
+  </a>
+  <br />
+  <sub><b>Real PTY capture</b> — SPAVN inspects <code>retry.py</code>, applies a surgical word-level diff via <code>edit</code>, runs <code>unittest</code> verification, and keeps the bottom dock pinned throughout streaming.</sub>
+</p>
 
 </div>
 
@@ -38,7 +47,7 @@ $ spavn "refactor the spill module, then run the suite"
 
 | Section | What is inside |
 | :--- | :--- |
-| [🖼️ Screenshots](#-screenshots) | Live HUD, `/model`, `/bench`, `/fleet` |
+| [🖼️ Screenshots](#-screenshots) | Live animated PTY GIFs (`read` → `edit` → `unittest`, `/` palette, `/model`, `/diff`), HUD dock, `/bench`, `/fleet` |
 | [🎯 Why another coding agent](#-why-another-coding-agent) | The four bets behind the design |
 | [🧠 Autonomous harness intelligence](#-autonomous-harness-intelligence) | Zero-Stop compiler gate, signature map, fuzzy self-heal edits, stale-file guard |
 | [⚙️ Requirements](#-requirements) | Rust version, OS support, network |
@@ -64,7 +73,32 @@ $ spavn "refactor the spill module, then run the suite"
 
 ## 🖼️ Screenshots
 
-> Captured from the running TUI, also published at <https://spavn.dev>. Exact HUD wording moves between releases, so each frame below states **what it demonstrates** and, where current source differs, says so.
+> Captured directly from the compiled `spavn` binary inside a real PTY, also published at <https://spavn.dev>. Exact HUD wording moves between releases, so each capture below documents the exact workflow it demonstrates.
+
+### 🎬 1. Live autonomous bugfix loop (animated GIF)
+
+<img src="https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/assets/shots/spavn-live-session.gif" alt="SPAVN live autonomous bugfix turn: read, inline word-diff edit, and unit test verification" width="100%">
+
+Every mutating turn runs through deterministic tool cards and a real verification gate before yielding:
+
+| Phase in capture | What happens under the hood |
+| :--- | :--- |
+| **`01 · read`** | Reads targeted line spans (`retry.py`), recording the file's `SystemTime` and `FNV-1a` content digest for `FS_STALE_VERSION` protection. |
+| **`02 · edit` (word-level diff)** | Applies an exact surgical replacement and renders character/word-level inline diffs directly inside the scroll region without clearing or flickering the terminal. |
+| **`03 · bash` (`unittest`)** | Executes the test suite non-interactively, promoting the turn's verification depth to `Test` so completion claims are backed by green execution. |
+| **`04 · Pinned HUD dock`** | Keeps active model, role, phase (`💻 CODE`), access tier, host latency, and context pressure anchored at the bottom row via DEC synchronized output (`?2026h`). |
+
+### 🎬 2. Interactive `/` command palette, session-scoped `/model` & inline `/diff` (animated GIF)
+
+<img src="https://raw.githubusercontent.com/tugayoktayokay/spavn-cli/main/assets/shots/spavn-live-menus.gif" alt="SPAVN live slash command palette, session-scoped /model switcher, and inline /diff viewer" width="100%">
+
+Keyboard-first menus render inline without leaving your scrollback or losing input state:
+
+| Workflow in capture | Behavior |
+| :--- | :--- |
+| **Live `/` palette** | Typing `/` opens instant UTF-8 fuzzy filtering across all **37 built-in commands** and aliases (`/plan`, `/code`, `/undo`, `/compact`, `/bench`, `/fleet`, `/doctor`, …). |
+| **Session-scoped `/model`** | Switches between local GPUs (`llama-swap`, `llama.cpp`, Ollama) and **30 BYOK cloud providers**. Model changes stay isolated to the current terminal session, seed `~/.spavn/last_model` for the next new terminal, and write `config.json` atomically (`0600` temp + rename under lockfile). |
+| **Inline `/diff`** | Renders syntax-colored working-tree diffs directly inside the TUI so every agent edit can be audited in two keystrokes before committing. |
 
 ### The dock, live
 
@@ -134,7 +168,7 @@ New in **`v0.2.10`**: deterministic Rust harness layers that catch model mistake
 | Item | Value |
 | :--- | :--- |
 | **Rust** | `1.80+` (`rust-version`; `LazyLock` in `state.rs` is the floor) — only to build from source |
-| **Binary** | Self-contained; no runtime, no interpreter, no Node |
+| **Binary** | Self-contained **`5.2 MiB`** native binary (`2.4–2.7 MiB` compressed release archive); no async runtime, no interpreter, no Node |
 | **OS** | macOS (arm64, x64), Linux (arm64, x64), Windows (x64, MSVC) |
 | **`ripgrep`** | Required for the `search` tool; CI installs it explicitly |
 | **Network** | Only to the provider endpoint **you** configure |
