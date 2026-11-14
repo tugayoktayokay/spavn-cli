@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "job.py", line 6, in <module>
+    print(summarize(load_rows()))
+  File "stats.py", line 9, in summarize
+    return {"mean": mean(values), "p50": percentile(values, 50)}
+  File "stats.py", line 4, in percentile
+    return ordered[k]
+IndexError: list index out of range

@@ -183,4 +183,12 @@ fn session_files_and_dir_are_private() {
     assert_eq!(file_mode, 0o600, "session file must be 0600");
     assert_eq!(dir_mode, 0o700, "sessions dir must be 0700");
     let _ = std::fs::remove_file(&path);
+
+    spavn::config::upsert_spavn_secret("TEST_SECRET_KEY", "sk-test-value").unwrap();
+    let secret_mode = std::fs::metadata(home().join("secrets.env"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(secret_mode, 0o600, "secrets.env must be 0600");
 }

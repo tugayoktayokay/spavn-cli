@@ -11,7 +11,7 @@ No async runtime. No Electron. No plugin tree. Three direct dependencies, one `c
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/tugayoktayokay/spavn-cli?color=7c5cff)](https://github.com/tugayoktayokay/spavn-cli/releases)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-338%20passing-success.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-381%20passing-success.svg)](#development)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#install)
 [![Docs](https://img.shields.io/badge/docs-spavn.dev%2Fdocs-black.svg)](https://spavn.dev/docs/)
 
@@ -151,9 +151,10 @@ New in **`v0.2.10`**: deterministic Rust harness layers that catch model mistake
 | **crates.io** | `cargo install spavn` (pending the first publish) | `cargo install --force spavn` |
 | **Archive / source** | release tarball, or `cargo build --release` | manual |
 
-`spavn --version` answers `spavn v0.2.10 (macos/aarch64)`. `/update` then tells you when a newer tag
-exists and prints the upgrade command that matches **the channel you installed from** — `brew upgrade`
-for a Homebrew install, `cargo install --force` for a cargo one, the script otherwise.
+`spavn --version` answers `spavn v0.2.16 (macos/aarch64)`. `/update` (or `spavn update`) checks for
+a newer tag, verifies the SHA-256 sidecar and upgrades in place for script installs, or prints the
+upgrade command that matches **the channel you installed from** (`brew upgrade` for Homebrew,
+`cargo install --force` for Cargo).
 
 The crate name `spavn` is reserved and `cargo publish --dry-run` is clean; until the first publish
 lands, use the git channel above — it builds the same source.
@@ -244,7 +245,7 @@ Run `/provider` inside the TUI (aliases `/login`, `/byok`, `/keys`, `/connect`) 
 `spavn-eval` runs the agent against the tasks in `evals/tasks/` and prints a pass rate. Each task is a small repo with a failing test; the agent gets a prompt, then the task's `verify` command decides pass or fail from the files on disk.
 
 ```bash
-cargo build --release
+cargo build --release --features eval
 ./target/release/spavn-eval --list                       # show the tasks
 ./target/release/spavn-eval -m local -o runs/local.jsonl # run all with one model
 ./target/release/spavn-eval -n 3 -o runs/a.jsonl         # 3 attempts per task, per-task pass rate
@@ -338,7 +339,7 @@ Streamable-HTTP servers use `url` instead of `command`. Stdio servers get a scru
 | `/compact` | `/c` | Compact context |
 | `/clear` | — | Clear the transcript |
 | `/reload` | `/r`, `/reload bin`, `/rb` | Rebuild + re-exec, session preserved |
-| `/update` | `/upgrade`, `/upd` | Check for a newer release; prints the exact upgrade command |
+| `/update` | `/upgrade`, `/upd` | Verify and install a newer release in place (or print the channel command) |
 | `/exit` | `/quit`, `/x`, `:q`, `:wq`, `q!`, `exit`, `quit` | Leave |
 | `/stop` | `/cancel` | Interrupt a running turn |
 | `/diff` | `/d` | Working-tree diff |
@@ -557,15 +558,16 @@ Everything lives under `~/.spavn` (or `SPAVN_HOME`), mode `0700`:
 ```
 ~/.spavn/
 ├── config.json         providers, paths, MCP servers
+├── last_model          most recently selected session model (seeds new terminals)
 ├── secrets.env         BYOK keys (0600); flagged as secret material by the path policy
 ├── PROFILE.md          user profile injected into the system prompt
-├── sessions/           transcripts, one file per session
+├── sessions/           transcripts, one file per session (+ .model sidecar)
 ├── skills/             on-demand domain instructions
-├── tool-output/        spilled tool output, newest 40 kept
+├── tool-output/        spilled tool output, kept 7 days (256 MB cap)
 └── audit.key           HMAC key for the audit chain
 ```
 
-Oversized tool output is **never** silently truncated. It spills to `tool-output/`, capped at 8 MiB per file, `0600`, oldest pruned past 40.
+Oversized tool output is **never** silently truncated. It spills to `tool-output/`, capped at 8 MiB per file, `0600`, retained for 7 days under a 256 MB directory cap.
 
 ---
 
@@ -670,8 +672,8 @@ sequenceDiagram
 
 ```sh
 cargo build --release
-cargo test                       # 242 lib + 5 bin; 1 network test is #[ignore]
-cargo clippy --all-targets       # clean, zero warnings
+cargo test --all-targets --all-features   # 360 lib + 13 bin + 8 integration; 3 live-server tests #[ignore]
+cargo clippy --all-targets --all-features # clean, zero warnings
 cargo fmt --check
 ```
 
@@ -679,10 +681,10 @@ Current status on `main`:
 
 | Check | Result |
 | :--- | :--- |
-| `cargo check --all-targets` | ✅ ok |
-| `cargo clippy --all-targets` | ✅ 0 warnings |
-| `cargo test --lib` | ✅ 242 passed, 0 failed, 1 ignored |
-| `cargo test --bins` | ✅ 5 passed |
+| `cargo check --all-targets --all-features` | ✅ ok |
+| `cargo clippy --all-targets --all-features` | ✅ 0 warnings |
+| `cargo test --lib` | ✅ 360 passed, 0 failed, 3 ignored |
+| `cargo test --bins --tests` | ✅ 21 passed |
 
 The single ignored test (`real_open_computer_use_lists_tools`) needs a live MCP server from your own config; run it with `cargo test -- --ignored`.
 

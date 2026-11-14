@@ -351,7 +351,7 @@
 <header class="top">
   <div class="top-inner">
     <a class="brand" href="https://spavn.dev/"><span class="mark"><svg width="20" height="20" viewBox="0 0 256 256" fill="none" aria-hidden="true"><defs><linearGradient id="spavn-doc-base" x1="24" y1="24" x2="232" y2="232" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#B95CFF"/><stop offset="0.55" stop-color="#8B63FF"/><stop offset="1" stop-color="#6366FF"/></linearGradient><radialGradient id="spavn-doc-core" cx="128" cy="128" r="92" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#84F2FF" stop-opacity="0.95"/><stop offset="0.45" stop-color="#76C8FF" stop-opacity="0.55"/><stop offset="1" stop-color="#8B63FF" stop-opacity="0"/></radialGradient></defs><g fill="url(#spavn-doc-base)"><path d="M24 24H87L151 88L178 61H191V75L151 115L80 44H44V78L73 107L59 121L24 86Z"/><path d="M232 24V87L168 151L195 178V191H181L141 151L212 80V44H178L149 73L135 59L170 24Z"/><path d="M232 232H169L105 168L78 195H65V181L105 141L176 212H212V178L183 149L197 135L232 170Z"/><path d="M24 232V169L88 105L61 78V65H75L115 105L44 176V212H78L107 183L121 197L86 232Z"/></g><g fill="url(#spavn-doc-core)"><path d="M24 24H87L151 88L178 61H191V75L151 115L80 44H44V78L73 107L59 121L24 86Z"/><path d="M232 24V87L168 151L195 178V191H181L141 151L212 80V44H178L149 73L135 59L170 24Z"/><path d="M232 232H169L105 168L78 195H65V181L105 141L176 212H212V178L183 149L197 135L232 170Z"/><path d="M24 232V169L88 105L61 78V65H75L115 105L44 176V212H78L107 183L121 197L86 232Z"/></g><path d="M128 106C131 120 136 125 150 128C136 131 131 136 128 150C125 136 120 131 106 128C120 125 125 120 128 106Z" fill="#78EDFF"/></svg></span>SPAVN <small>docs</small></a>
-    <span class="pill">v0.2.10</span>
+    <span class="pill">v0.2.16</span>
     <span class="grow"></span>
     <div class="searchbox">
       <span class="lens" aria-hidden="true">⌕</span>
@@ -409,7 +409,7 @@
         that stand between a model and your filesystem. Press <kbd>/</kbd> or <kbd>⌘K</kbd> to search.
       </p>
       <div class="chips">
-        <span class="chip"><b>v0.2.10</b></span>
+        <span class="chip"><b>v0.2.16</b></span>
         <span class="chip"><b>11</b> tools</span>
         <span class="chip"><b>37</b> commands</span>
         <span class="chip"><b>6</b> gates</span>
@@ -529,7 +529,7 @@ cargo install spavn                                             # once published
       </div>
 
       <h3>Verify a download</h3>
-      <div class="cb"><button class="copy" type="button">copy</button><pre><code>gh release download v0.2.10 --pattern '*aarch64-apple-darwin*'
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>gh release download v0.2.16 --pattern '*aarch64-apple-darwin*'
 shasum -a 256 -c ./*.sha256</code></pre></div>
     </section>
 
@@ -956,7 +956,7 @@ export SPAVN_LOCAL_BASE_URL=http://localhost:8080/v1</code></pre></div>
 ├── PROFILE.md            user profile injected into the prompt
 ├── sessions/             transcripts
 ├── skills/               on-demand domain instructions
-├── tool-output/          spilled tool output, newest 40 kept
+├── tool-output/          spilled tool output, kept 7 days (256 MB cap)
 └── audit.key             HMAC key for the audit chain</code></pre></div>
     </section>
 
@@ -1062,7 +1062,7 @@ export SPAVN_LOCAL_BASE_URL=http://localhost:8080/v1</code></pre></div>
         <li><strong>Background check</strong> — once per <code>updateCheckIntervalHours</code> (default 24), a single GET. Nothing is downloaded and nothing is executed.</li>
         <li><strong>Banner notice</strong> — when a newer release is known, the welcome output carries a box with both versions and the upgrade command.</li>
         <li><strong>Mid-session notice</strong> — if the check finishes later, the notice is parked and printed once the prompt is idle. It is never shown twice.</li>
-        <li><strong><code>/update</code></strong> — check on demand and print the exact command.</li>
+        <li><strong><code>/update</code></strong> (or <code>spavn update</code>) — verify SHA-256 and upgrade in place for script installs, or print the package-manager command for Homebrew/Cargo.</li>
       </ul>
 
       <div class="cb"><button class="copy" type="button">copy</button><pre><code>/update

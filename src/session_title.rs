@@ -29,6 +29,14 @@ pub fn session_title() -> Option<String> {
     SESSION_TITLE.lock().ok()?.clone()
 }
 
+/// Clears the sticky title when switching to a different session (`/new`, `/resume`).
+pub fn reset_session_title() {
+    TITLING.store(false, Ordering::Relaxed);
+    if let Ok(mut slot) = SESSION_TITLE.lock() {
+        *slot = None;
+    }
+}
+
 /// True when a session should be auto-titled from this prompt candidate.
 fn wants_title_request(request: &str) -> bool {
     let trimmed = request.trim();
@@ -169,5 +177,14 @@ mod tests {
     #[test]
     fn clean_title_empty_reply_is_none() {
         assert_eq!(clean_model_title("   \n"), None);
+    }
+
+    #[test]
+    fn reset_clears_sticky_title_and_rearms_guard() {
+        *SESSION_TITLE.lock().unwrap() = Some("old session".to_string());
+        TITLING.store(true, Ordering::Relaxed);
+        reset_session_title();
+        assert_eq!(session_title(), None);
+        assert!(!TITLING.load(Ordering::Relaxed));
     }
 }

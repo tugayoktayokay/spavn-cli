@@ -1,6 +1,6 @@
 {
   "prompt": "`count_pairs` is too slow for large inputs and the test suite times out. Make it fast without changing what it returns. Do not edit the tests.",
-  "verify": "timeout 60 python3 -m unittest -q",
+  "verify": "python3 -c \"import subprocess,sys; sys.exit(subprocess.call([sys.executable,'-m','unittest','-q'], timeout=60))\"",
   "tags": [
     "perf"
   ]

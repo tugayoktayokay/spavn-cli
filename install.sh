@@ -112,8 +112,13 @@ if curl -fsSL "$TARBALL_URL" -o "$TMP_DIR/spavn.tar.gz" 2>/dev/null; then
 elif command -v cargo >/dev/null 2>&1; then
   echo "📦 Building from source with Cargo..."
   _src="$(mktemp -d)"
-  git clone --depth 1 "https://github.com/${REPO}.git" "$_src" >/dev/null 2>&1
-  ( cd "$_src" && cargo build --release --locked ) >/dev/null 2>&1
+  _log="$TMP_DIR/build.log"
+  if ! git clone --depth 1 "https://github.com/${REPO}.git" "$_src" >"$_log" 2>&1 \
+     || ! ( cd "$_src" && cargo build --release --locked --bin spavn ) >>"$_log" 2>&1; then
+    cat "$_log" >&2
+    rm -rf "$_src"
+    exit 1
+  fi
   install_binary "$_src/target/release/spavn"
   rm -rf "$_src"
 else

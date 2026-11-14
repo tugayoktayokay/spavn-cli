@@ -825,6 +825,7 @@ mod security_tests {
         assert!(out.contains("Host Policy"), "{out}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn background_logs_do_not_land_in_world_writable_tmp() {
         // A background `bash` used to write its log and stderr into $TMPDIR, which is shared and
@@ -1055,8 +1056,9 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
+        let py = if cfg!(windows) { "python" } else { "python3" };
         let srv = crate::config::McpServerConfig {
-            command: Some("python3".to_string()),
+            command: Some(py.to_string()),
             args: vec![server.display().to_string()],
             env: Default::default(),
             headers: Default::default(),
@@ -1425,6 +1427,7 @@ mod harness_intelligence_tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn bash_lang_py_stdin_execution_without_quote_hell() {
         let mut c = ToolContext::new(

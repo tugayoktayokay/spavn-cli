@@ -1544,6 +1544,14 @@ fn cmd_resume(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
                         *endpoint = resolve_endpoint(&key);
                     }
                 }
+                crate::session_title::reset_session_title();
+                let topic = messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .and_then(|m| m.content.as_deref())
+                    .unwrap_or("");
+                hud::set_window_topic(topic);
                 refresh_system_prompt(cwd, endpoint, session_file, messages);
                 render_session_resume_preview(session_file, messages);
             }
@@ -1563,6 +1571,8 @@ fn cmd_new(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/new" || input == "/n" {
         crate::clear_live_tasks();
         crate::clear_queued_messages();
+        crate::session_title::reset_session_title();
+        hud::set_window_topic("");
         *session_file = new_session_path();
         *session_name = session_file
             .file_name()
@@ -1898,12 +1908,22 @@ fn cmd_update(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
         // into it — no manual command. Falls back to status/advice for cargo/brew/custom installs.
         match crate::update::check_now() {
             Ok(Some(info)) => {
-                let Some(bin_src) = crate::update::fetch_asset_binary() else {
+                if crate::update::is_externally_managed() {
                     render_update_notice(&info);
                     return Some(SlashOutcome::Handled);
+                }
+                let bin_src = match crate::update::fetch_verified_asset_binary() {
+                    Ok(path) => path,
+                    Err(crate::update::AssetError::Unavailable) => {
+                        render_update_notice(&info);
+                        return Some(SlashOutcome::Handled);
+                    }
+                    Err(crate::update::AssetError::ChecksumMismatch(reason)) => {
+                        eprintln!("\n{}✗ {}{}", RED, reason, RESET);
+                        return Some(SlashOutcome::Handled);
+                    }
                 };
-                let home = std::env::var("HOME").unwrap_or_default();
-                let home_bin = PathBuf::from(&home).join(".local/bin/spavn");
+                let home_bin = crate::update::install_target_binary();
                 println!(
                     "\n{}⬇️  v{} → v{} ...{}",
                     GREEN, info.current, info.latest, RESET
@@ -1985,8 +2005,10 @@ fn cmd_update(c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
 fn cmd_help(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
     if input == "/help" {
         println!(
-            "\n{}╭─ ⚡ SPAVN v0.1 COMMANDS, BYOK & ENGINE FEATURES ──────────────────────────{}",
-            CYAN, RESET
+            "\n{}╭─ ⚡ SPAVN v{} COMMANDS, BYOK & ENGINE FEATURES ───────────────────────{}",
+            CYAN,
+            env!("CARGO_PKG_VERSION"),
+            RESET
         );
         println!(
             "{}│{}  {}/ (veya /menu){}                Interactive arrow-key main command menu",
@@ -2008,6 +2030,10 @@ fn cmd_help(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
             "{}│{}  {}/diff [/yol] · /commit [mesaj]{} Git changes and approved smart commit",
             CYAN, RESET, BOLD, RESET
         );
+        println!(
+            "{}│{}  {}/copy [N] · /jobs (/ps){}        Copy output region to clipboard · Background jobs",
+            CYAN, RESET, BOLD, RESET
+        );
         println!("{}│{}  {}/wiki (/w){}                    Live project module & architecture map (Repo Wiki)", CYAN, RESET, BOLD, RESET);
         println!(
             "{}│{}  {}/pin <not> · /unpin <id>{}      Pin a permanent architectural rule to the project context",
@@ -2018,7 +2044,7 @@ fn cmd_help(_c: &mut SlashCtx<'_>, input: &str) -> Option<SlashOutcome> {
             CYAN, RESET, BOLD, RESET
         );
         println!(
-            "{}│{}  {}/update (/upgrade){}           New version check; print the update command",
+            "{}│{}  {}/update (/upgrade){}            Verify and install the newest release (or show channel command)",
             CYAN, RESET, BOLD, RESET
         );
         println!("{}│{}  {}Shift+Tab · Esc · Ctrl+R{}      Change permission · Cancel action/menu · Live reload", CYAN, RESET, BOLD, RESET);
@@ -2131,6 +2157,7 @@ mod slash_tests {
         dir
     }
 
+    #[cfg(unix)]
     #[test]
     fn probe_binary_rejects_a_path_that_cannot_exec() {
         let dir = scratch("probe");
@@ -2197,6 +2224,7 @@ mod slash_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn stage_binary_leaves_a_runnable_binary_on_a_fresh_inode() {
         let dir = scratch("stage");
@@ -2226,6 +2254,7 @@ mod slash_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn link_alias_replaces_a_stale_copy_with_a_symlink() {
         let dir = scratch("alias");
@@ -2241,6 +2270,7 @@ mod slash_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn link_alias_repoints_only_existing_entries_in_the_given_user_bin() {
         let dir = scratch("alias-userbin");
@@ -2258,6 +2288,7 @@ mod slash_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
 
     #[test]

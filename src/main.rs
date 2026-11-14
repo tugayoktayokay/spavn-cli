@@ -165,6 +165,18 @@ fn main() {
                             "up to date — no newer release."
                         )
                     ),
+                    spavn::update::UpgradeOutcome::ManagedExternally(info) => {
+                        println!(
+                            "spavn v{} → v{} ({})",
+                            info.current,
+                            info.latest,
+                            tr_en(
+                                "paket yöneticisi kurulumu; güncellemek için çalıştırın:",
+                                "package-manager install; upgrade with:"
+                            )
+                        );
+                        println!("  {}", info.command);
+                    }
                     spavn::update::UpgradeOutcome::NoAsset(latest) => {
                         println!(
                             "v{latest} {}. ({}/{})",
@@ -224,7 +236,8 @@ fn main() {
                      \x20 spavn \"explain src/router.rs\"           One headless turn, then exit\n\
                      \x20 spavn -a safe -m local \"fix the tests\"  Explicit mode, model, prompt\n\
                      \x20 spavn -c                               Continue the latest session\n\
-                     \x20 spavn -s fork:session-17938104.jsonl    Fork a session and keep history\n\n\
+                     \x20 spavn -s fork:session-17938104.jsonl    Fork a session and keep history\n\
+                     \x20 spavn update                           Verify and install the latest release\n\n\
                      Paths:\n\
                      \x20 config    ~/.spavn/config.json      (override the root with SPAVN_HOME)\n\
                      \x20 sessions  ~/.spavn/sessions/         resumable JSONL, mode 0600\n\
@@ -241,7 +254,7 @@ fn main() {
                      \x20 ~/.spavn/tool-output/             spilled tool output, kept 7 days (256 MB cap)\n\
                      \x20 ~/.spavn/audit.key                HMAC key for the audit chain\n\n\
                      Inside the TUI: /help lists every slash command, / lists the menu.\n\
-                     /update checks for a newer release and prints the upgrade command.\n\
+                     /update checks for a newer release and upgrades in place (or prints the channel command).\n\
                      Docs: https://github.com/tugayoktayokay/spavn-cli#readme",
                     env!("CARGO_PKG_VERSION"),
                     std::env::consts::OS,
@@ -800,7 +813,7 @@ fn main() {
         if let Some(title) = spavn::session_title::session_title() {
             hud::set_window_topic(&title);
         } else {
-            if messages.is_empty() {
+            if !messages.iter().any(|m| m.role == "user") {
                 spavn::session_title::spawn_auto_title(&endpoint, &input);
             }
             hud::set_window_topic(&input);
