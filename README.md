@@ -185,7 +185,7 @@ New in **`v0.2.10`**: deterministic Rust harness layers that catch model mistake
 | **crates.io** | `cargo install spavn` (pending the first publish) | `cargo install --force spavn` |
 | **Archive / source** | release tarball, or `cargo build --release` | manual |
 
-`spavn --version` answers `spavn v0.2.16 (macos/aarch64)`. `/update` (or `spavn update`) checks for
+`spavn --version` answers `spavn v0.2.17 (macos/aarch64)`. `/update` (or `spavn update`) checks for
 a newer tag, verifies the SHA-256 sidecar and upgrades in place for script installs, or prints the
 upgrade command that matches **the channel you installed from** (`brew upgrade` for Homebrew,
 `cargo install --force` for Cargo).
@@ -287,6 +287,14 @@ cargo build --release --features eval
 ```
 
 Compare two models, or one model before and after a harness change, by running both with `-o` and diffing the JSONL files. A task whose `verify` already passes before the agent starts is reported as `broken-fixture` and left out of the rate. `-f` matches a substring of the task name or tag, so `-f x-` also picks `bugfix-…`. Add a task by creating `evals/tasks/<name>/task.json` and a `repo/` folder.
+
+**Recorded baseline (`26/26` tasks):**
+
+| Subset | Scope | Result |
+| :--- | :--- | :--- |
+| Core 10 (`bugfix-*`, `feature-*`, `refactor-*`, `rename-*`) | Python multi-file fixes, LRU cache, CLI flag, parser edge cases | **10 / 10** (`~6s` / task on `claude-sonnet-5-5-medium`) |
+| Hard 6 (`hard-*`) | Semver spec, toposort cycle, 5-site keyword migration, atomic rollback, `O(n²)` → `O(n)`, mutant-killing tests | **6 / 6** (`claude-sonnet-5-5-medium`) |
+| Extended 10 (`x-*`, 3 repeats) | JS (`node --test`), Rust (`cargo test`), failure-log triage, 60-function file edit, non-ASCII report | **30 / 30** across 3 repeats (`26 / 26` suite total) |
 
 ## 🔌 Desktop bridge (not shipped yet)
 

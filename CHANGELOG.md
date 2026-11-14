@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Session-Scoped Model Selection
+## v0.2.17 (2026-11-15) — Session-Scoped Model Selection, Verified Self-Update & Eval Harness
 
 ### Last Model Seeds New Terminals, Safer Config Writes, Heredoc Guard Fix (`src/config.rs`, `src/session.rs`, `src/main.rs`, `src/guard.rs`)
 - **New**: The model picked in any terminal is remembered in `~/.spavn/last_model` and starts the next new terminal. Start-up order is `SPAVN_MODEL`, then the last model, then the `/default` pin. Only real sessions (inside the sessions directory) update it.
