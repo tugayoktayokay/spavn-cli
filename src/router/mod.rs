@@ -14,8 +14,9 @@ pub use vision::{
 use crate::config::{byok_catalog, load_user_config, resolve_api_key};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -698,7 +699,24 @@ impl ModelEndpoint {
         !self.is_local() && self.has_quota_pool
     }
 
+    /// True when the endpoint targets an Ollama server (`:11434`, `ollama` host/key).
+    pub fn is_ollama(&self) -> bool {
+        let base = self.base_url.to_lowercase();
+        let key = self.key.to_lowercase();
+        base.contains(":11434")
+            || base.contains("ollama")
+            || key.starts_with("ollama:")
+            || key == "ollama"
+    }
+
     pub fn context_window_tokens(&self) -> usize {
+        if self.is_ollama() {
+            if let Some(live) = cached_ollama_context_window(&self.base_url, &self.model) {
+                if live > 0 {
+                    return live;
+                }
+            }
+        }
         if let Some(cw) = self.configured_context_window {
             if cw > 0 {
                 return cw;
@@ -714,6 +732,9 @@ impl ModelEndpoint {
             }
             if k.contains("64k") {
                 return 65_536;
+            }
+            if self.is_ollama() {
+                return 32_768;
             }
             return 131_072;
         }
@@ -752,6 +773,146 @@ impl ModelEndpoint {
             128_000
         }
     }
+}
+
+fn ollama_ctx_cache() -> &'static Mutex<HashMap<String, usize>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(not(test))]
+fn ollama_probed_once() -> &'static Mutex<std::collections::HashSet<String>> {
+    static SET: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+fn ollama_root_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/v1")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub(crate) fn parse_ollama_num_ctx(parameters: &str) -> Option<usize> {
+    for line in parameters.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+            if k.eq_ignore_ascii_case("num_ctx") {
+                if let Ok(n) = v.parse::<usize>() {
+                    if n >= 512 {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn parse_ollama_ps_context(body: &str, model: &str) -> Option<usize> {
+    let root: Value = serde_json::from_str(body).ok()?;
+    let models = root.get("models")?.as_array()?;
+    let target = model.trim().to_lowercase();
+    let target_base = target.split(':').next().unwrap_or(&target);
+    for entry in models {
+        let name = entry
+            .get("name")
+            .or_else(|| entry.get("model"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        let name_base = name.split(':').next().unwrap_or(&name);
+        if name == target || (!target.contains(':') && name_base == target_base) {
+            if let Some(ctx) = entry.get("context_length").and_then(|v| v.as_u64()) {
+                if ctx >= 512 {
+                    return Some(ctx as usize);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(test))]
+fn probe_ollama_context_window(base_url: &str, model: &str) -> Option<usize> {
+    let root = ollama_root_url(base_url);
+    if root.is_empty() || model.trim().is_empty() {
+        return None;
+    }
+    // 1. Prefer `/api/ps` — returns the actual KV cache context_length currently allocated in VRAM.
+    let ps_url = format!("{}/api/ps", root);
+    if let Ok((status, body)) = crate::http::get_text(&ps_url, &[], 1) {
+        if (200..300).contains(&status) {
+            if let Some(ctx) = parse_ollama_ps_context(&body, model) {
+                return Some(ctx);
+            }
+        }
+    }
+    // 2. Fallback to `/api/show` — reads explicit `PARAMETER num_ctx` from the Modelfile if defined.
+    let show_url = format!("{}/api/show", root);
+    let payload = json!({ "model": model }).to_string();
+    if let Ok((status, body)) = crate::http::post_json(&show_url, &payload, &[], 1) {
+        if (200..300).contains(&status) {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                if let Some(params) = v.get("parameters").and_then(|p| p.as_str()) {
+                    if let Some(ctx) = parse_ollama_num_ctx(params) {
+                        return Some(ctx);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn cached_ollama_context_window(base_url: &str, model: &str) -> Option<usize> {
+    let key = format!(
+        "{}|{}",
+        ollama_root_url(base_url),
+        model.trim().to_lowercase()
+    );
+    if let Ok(guard) = ollama_ctx_cache().lock() {
+        if let Some(&ctx) = guard.get(&key) {
+            return Some(ctx);
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let should_probe = ollama_probed_once()
+            .lock()
+            .map(|mut s| s.insert(key))
+            .unwrap_or(false);
+        if should_probe {
+            refresh_ollama_context_window_async(base_url.to_string(), model.to_string());
+        }
+    }
+    None
+}
+
+pub fn refresh_ollama_context_window_async(base_url: String, model: String) {
+    #[cfg(test)]
+    {
+        let _ = (base_url, model);
+    }
+    #[cfg(not(test))]
+    std::thread::spawn(move || {
+        if let Some(ctx) = probe_ollama_context_window(&base_url, &model) {
+            let key = format!(
+                "{}|{}",
+                ollama_root_url(&base_url),
+                model.trim().to_lowercase()
+            );
+            if let Ok(mut guard) = ollama_ctx_cache().lock() {
+                guard.insert(key, ctx);
+            }
+        }
+    });
 }
 
 #[allow(dead_code)]
@@ -1077,5 +1238,34 @@ mod tests {
                 "dense model `{dense_id}` should not get MoE badge, got `{badge}`"
             );
         }
+    }
+
+    #[test]
+    fn ollama_endpoint_defaults_to_safe_32k_context_window() {
+        let ep = resolve_endpoint("ollama:qwen2.5-coder:32b");
+        assert!(ep.is_ollama());
+        assert_eq!(ep.context_window_tokens(), 32_768);
+    }
+
+    #[test]
+    fn parse_ollama_ps_and_show_context_extracts_live_values() {
+        let ps_json = r#"{
+            "models": [
+                {
+                    "name": "qwen2.5-coder:32b",
+                    "model": "qwen2.5-coder:32b",
+                    "context_length": 16384
+                }
+            ]
+        }"#;
+        assert_eq!(
+            parse_ollama_ps_context(ps_json, "qwen2.5-coder:32b"),
+            Some(16_384)
+        );
+        assert_eq!(parse_ollama_ps_context(ps_json, "llama3:8b"), None);
+
+        let show_params = "temperature 0.2\nnum_ctx 8192\nstop <|endoftext|>\n";
+        assert_eq!(parse_ollama_num_ctx(show_params), Some(8_192));
+        assert_eq!(parse_ollama_num_ctx("temperature 0.2\n"), None);
     }
 }

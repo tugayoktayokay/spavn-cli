@@ -52,7 +52,15 @@ where
             stream_openai(endpoint, messages, tools, &mut on_thinking, &mut on_content)
         };
         match res {
-            Ok(ok) => return Ok(ok),
+            Ok(ok) => {
+                if endpoint.is_ollama() {
+                    crate::router::refresh_ollama_context_window_async(
+                        endpoint.base_url.clone(),
+                        endpoint.model.clone(),
+                    );
+                }
+                return Ok(ok);
+            }
             Err(err) => {
                 if attempt < delays_ms.len()
                     && !crate::is_interrupted()
@@ -100,6 +108,9 @@ where
 
     if endpoint.is_local() {
         payload["cache_prompt"] = json!(true);
+        if endpoint.is_ollama() {
+            payload["num_ctx"] = json!(endpoint.context_window_tokens());
+        }
     }
     if endpoint.base_url.contains("minimax") {
         payload["reasoning_split"] = json!(true);

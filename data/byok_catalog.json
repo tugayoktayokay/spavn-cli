@@ -831,7 +831,7 @@
     "base_url": "http://127.0.0.1:11434/v1",
     "api_key_env": "OLLAMA_API_KEY",
     "is_local": true,
-    "context_window": 65536,
+    "context_window": 32768,
     "models": [
       {
         "key": "qwen2.5-coder:32b",
@@ -839,7 +839,7 @@
         "label": "Ollama Qwen 2.5 Coder 32B",
         "badge": "🟢 Local",
         "desc": "Local Ollama (127.0.0.1:11434)",
-        "context_window": 65536
+        "context_window": 32768
       },
       {
         "key": "deepseek-r1:32b",
@@ -847,7 +847,7 @@
         "label": "Ollama DeepSeek R1 32B",
         "badge": "🟢 Local R1",
         "desc": "Local Ollama Reasoning (127.0.0.1:11434)",
-        "context_window": 65536
+        "context_window": 32768
       }
     ]
   },

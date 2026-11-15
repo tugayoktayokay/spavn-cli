@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.18 (2026-11-15) — Zero-Config Ollama Context Safety & Live Sync
+
+### Ollama VRAM-Safe Context Window, `num_ctx` Negotiation & Live Sync (`data/byok_catalog.json`, `src/router/mod.rs`, `src/router/openai.rs`)
+- **Fix**: Re-anchored the built-in Ollama catalog and local Ollama fallback context budget from `65536` / `131072` to a VRAM-safe **`32768` (32k)** ceiling so 24 GiB GPUs no longer face silent truncation or CPU offloading out of the box.
+- **New**: Spavn now explicitly sends `"num_ctx"` in OpenAI-compatible request payloads targeting Ollama endpoints (`:11434` / `ollama`).
+- **New**: Added non-blocking live context probing (`GET /api/ps` for actual VRAM-allocated `context_length`, falling back to `POST /api/show` Modelfile `PARAMETER num_ctx`) with an in-memory cache refreshed after each Ollama response, keeping Spavn's context budget and compactor in sync with the server's real allocation.
+
 ## v0.2.17 (2026-11-15) — Session-Scoped Model Selection, Verified Self-Update & Eval Harness
 
 ### Last Model Seeds New Terminals, Safer Config Writes, Heredoc Guard Fix (`src/config.rs`, `src/session.rs`, `src/main.rs`, `src/guard.rs`)
