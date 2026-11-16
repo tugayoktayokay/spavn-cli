@@ -324,7 +324,9 @@ pub fn build_live_project_signatures(cwd: &str) -> String {
 fn is_test_or_fixture_path(path: &Path) -> bool {
     let lossy = path.to_string_lossy().replace('\\', "/").to_lowercase();
     if lossy.contains("/tests/")
+        || lossy.contains("/test/")
         || lossy.contains("/__tests__/")
+        || lossy.contains("/__mocks__/")
         || lossy.contains("/fixtures/")
         || lossy.contains("/mocks/")
         || lossy.contains("/testdata/")
@@ -340,11 +342,20 @@ fn is_test_or_fixture_path(path: &Path) -> bool {
         || fname.ends_with("_test.rs")
         || fname.ends_with("_test.go")
         || fname.ends_with("_test.py")
+        || fname.ends_with("_test.dart")
+        || fname.ends_with("_spec.rb")
         || fname.ends_with(".test.ts")
         || fname.ends_with(".test.tsx")
         || fname.ends_with(".test.js")
+        || fname.ends_with(".test.jsx")
         || fname.ends_with(".spec.ts")
+        || fname.ends_with(".spec.tsx")
         || fname.ends_with(".spec.js")
+        || fname.ends_with(".spec.jsx")
+        || fname.ends_with("test.kt")
+        || fname.ends_with("test.java")
+        || fname.ends_with("tests.swift")
+        || fname.ends_with("tests.cs")
         || fname == "tests.rs"
 }
 
@@ -359,7 +370,7 @@ fn is_checked_code_or_build_path(path: &Path) -> bool {
         .to_lowercase();
     if matches!(
         fname.as_str(),
-        "makefile" | "gnumakefile" | "justfile" | "dockerfile"
+        "makefile" | "gnumakefile" | "justfile" | "dockerfile" | "cmakelists.txt"
     ) {
         return true;
     }
@@ -376,23 +387,72 @@ fn is_checked_code_or_build_path(path: &Path) -> bool {
             | "go"
             | "js"
             | "jsx"
+            | "vue"
+            | "svelte"
+            | "dart"
+            | "swift"
+            | "kt"
+            | "kts"
+            | "java"
+            | "cs"
+            | "rb"
+            | "php"
+            | "lua"
+            | "ex"
+            | "exs"
+            | "scala"
+            | "sql"
             | "c"
             | "cc"
             | "cpp"
             | "h"
             | "hpp"
+            | "s"
+            | "asm"
             | "zig"
             | "sh"
             | "bash"
             | "zsh"
+            | "ps1"
     )
+}
+
+fn is_binary_or_media_artifact_target(raw_target: &str) -> bool {
+    let clean = raw_target
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c| c == '"' || c == '\'' || c == ';');
+    if clean.is_empty() || clean.starts_with("/dev/") || clean.starts_with('&') {
+        return false;
+    }
+    let low = clean.to_lowercase();
+    const BINARY_SUFFIXES: &[&str] = &[
+        "vmlinux", "bzimage", "zimage", ".elf", ".bin", ".img", ".iso", ".ko", ".o", ".a", ".so",
+        ".dylib", ".dll", ".exe", ".wasm", ".apk", ".ipa", ".aab", ".jar", ".whl", ".pdf", ".mp4",
+        ".mov", ".mkv", ".mp3", ".wav", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".zip",
+        ".tar.gz", ".tgz", ".sqlite", ".sqlite3", ".db",
+    ];
+    BINARY_SUFFIXES.iter().any(|suf| {
+        if suf.starts_with('.') {
+            low.ends_with(suf)
+        } else {
+            low == *suf || low.ends_with(&format!("/{suf}"))
+        }
+    })
 }
 
 fn is_shell_fake_artifact_line(trimmed: &str) -> bool {
     let cmd = trimmed.trim_start_matches('@').trim_start();
     let low = cmd.to_lowercase();
-    // Catch `@echo "dummy" > kernel/vmlinux` / `echo 'placeholder' > out.bin`
-    if (low.starts_with("echo ") || low.contains("&& echo ") || low.contains("; echo "))
+    // 1. Plain-text echo/printf redirected into a binary/media/DB/archive artifact OR carrying fake tokens
+    let is_text_emit = low.starts_with("echo ")
+        || low.starts_with("printf ")
+        || low.contains("&& echo ")
+        || low.contains("; echo ")
+        || low.contains("&& printf ")
+        || low.contains("; printf ");
+    if is_text_emit
         && low.contains('>')
         && !low.contains(">/dev/null")
         && !low.contains("> /dev/null")
@@ -411,16 +471,16 @@ fn is_shell_fake_artifact_line(trimmed: &str) -> bool {
         if has_fake_token {
             return true;
         }
+        if let Some((_, rhs)) = low.rsplit_once('>') {
+            if is_binary_or_media_artifact_target(rhs) {
+                return true;
+            }
+        }
     }
-    // Catch `touch kernel/vmlinux` or `touch dist/app.elf` faking binary outputs
+    // 2. `touch` creating an empty binary/media/DB/archive output to fake build success
     if low.starts_with("touch ") {
         let target = low.trim_start_matches("touch ").trim();
-        if target.ends_with("vmlinux")
-            || target.ends_with("bzimage")
-            || target.ends_with(".elf")
-            || target.ends_with(".bin")
-            || target.ends_with(".img")
-        {
+        if is_binary_or_media_artifact_target(target) {
             return true;
         }
     }
@@ -431,6 +491,11 @@ pub fn find_unfinished_or_dummy_line(path: &Path, content: &str) -> Option<(usiz
     if !is_checked_code_or_build_path(path) {
         return None;
     }
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     for (idx, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -438,25 +503,40 @@ pub fn find_unfinished_or_dummy_line(path: &Path, content: &str) -> Option<(usiz
         }
         let low = trimmed.to_lowercase();
 
-        // 1. Explicit placeholder/dummy admissions in comments
-        if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("/*") {
-            if low.contains("todo: implement")
-                || low.contains("fixme: implement")
-                || low.contains("placeholder implementation")
-                || low.contains("dummy implementation")
-                || low.contains("for now, we use a dummy")
-            {
+        // 1. Explicit placeholder/dummy/mock admissions in comments (EN + TR)
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with("--")
+        {
+            const COMMENT_ADMISSIONS: &[&str] = &[
+                "todo: implement",
+                "fixme: implement",
+                "placeholder implementation",
+                "dummy implementation",
+                "mock implementation",
+                "for now, we use a dummy",
+                "mock response for now",
+                "mock data for now",
+                "dummy data for now",
+                "hardcoded dummy",
+                "oluştur (dummy)",
+                "olustur (dummy)",
+                "sahte çıktı",
+                "gecici dummy",
+            ];
+            if COMMENT_ADMISSIONS.iter().any(|pat| low.contains(pat)) {
                 return Some((idx + 1, trimmed.to_string()));
             }
             continue;
         }
 
-        // 2. Shell / Makefile fake binary/output redirection (`@echo "dummy" > kernel/vmlinux`)
+        // 2. Shell / Makefile fake binary, media, archive, or DB output redirection
         if is_shell_fake_artifact_line(trimmed) {
             return Some((idx + 1, trimmed.to_string()));
         }
 
-        // 3. Unfinished code-level stub panics/exceptions
+        // 3. Unfinished code-level stub panics/exceptions across systems, web, backend & mobile languages
         if (trimmed.contains("todo!()") || trimmed.contains("unimplemented!()"))
             && !trimmed.contains('"')
             && !trimmed.contains('\'')
@@ -466,14 +546,55 @@ pub fn find_unfinished_or_dummy_line(path: &Path, content: &str) -> Option<(usiz
         if trimmed.starts_with("todo!(\"")
             || trimmed.starts_with("unimplemented!(\"")
             || trimmed.starts_with("raise NotImplementedError")
+            || trimmed.starts_with("throw UnimplementedError(")
+            || trimmed.starts_with("throw new NotImplementedException(")
             || low.starts_with("throw new error(\"not implemented")
             || low.starts_with("throw new error('not implemented")
+            || low.starts_with("throw new error(\"unimplemented")
+            || low.starts_with("throw new error('unimplemented")
             || low.starts_with("throw new error(\"todo")
             || low.starts_with("throw new error('todo")
+            || low.starts_with("throw unsupportederror(\"todo")
+            || low.starts_with("throw unsupportederror('todo")
+            || low.starts_with("throw new unsupportedoperationexception(\"todo")
+            || low.starts_with("throw new unsupportedoperationexception(\"not implemented")
+            || low.starts_with("throw notimplementederror(")
+            || low.starts_with("fatalerror(\"not implemented")
+            || low.starts_with("fatalerror(\"unimplemented")
+            || low.starts_with("fatalerror(\"todo")
             || low.starts_with("panic(\"not implemented")
+            || low.starts_with("panic(\"unimplemented")
             || low.starts_with("panic(\"todo")
         {
             return Some((idx + 1, trimmed.to_string()));
+        }
+
+        // 4. Kotlin `TODO(...)` builtin & Python inline `pass # TODO` / `return None # placeholder`
+        if matches!(ext.as_str(), "kt" | "kts")
+            && (trimmed.starts_with("TODO(")
+                || trimmed.contains("= TODO(")
+                || trimmed.contains("return TODO("))
+        {
+            return Some((idx + 1, trimmed.to_string()));
+        }
+        if ext == "py" {
+            if let Some((code_lhs, comment_rhs)) = low.split_once('#') {
+                let lhs = code_lhs.trim();
+                let rhs = comment_rhs.trim();
+                let is_noop_body = matches!(
+                    lhs,
+                    "pass" | "..." | "return none" | "return {}" | "return []"
+                );
+                let has_stub_tag = rhs.starts_with("todo")
+                    || rhs.starts_with("fixme")
+                    || rhs.starts_with("placeholder")
+                    || rhs.starts_with("dummy")
+                    || rhs.starts_with("mock")
+                    || rhs.starts_with("unimplemented");
+                if is_noop_body && has_stub_tag {
+                    return Some((idx + 1, trimmed.to_string()));
+                }
+            }
         }
     }
     None

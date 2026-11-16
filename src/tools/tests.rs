@@ -1607,7 +1607,7 @@ mod harness_intelligence_tests {
         fs::write(&makefile, "build:\n\tcargo build --release\n").unwrap();
         assert!(check_unfinished_placeholders(std::slice::from_ref(&makefile_str)).is_none());
 
-        // Python NotImplementedError stub caught; test files ignored
+        // Python NotImplementedError & `pass # TODO` stubs caught; legitimate `except: pass` & test files ignored
         let py_prod = dir.join("service.py");
         fs::write(
             &py_prod,
@@ -1615,15 +1615,105 @@ mod harness_intelligence_tests {
         )
         .unwrap();
         assert!(check_unfinished_placeholders(&[py_prod.to_string_lossy().to_string()]).is_some());
+        fs::write(
+            &py_prod,
+            "def charge_card():\n    pass  # TODO wire stripe\n",
+        )
+        .unwrap();
+        assert!(check_unfinished_placeholders(&[py_prod.to_string_lossy().to_string()]).is_some());
+        fs::write(
+            &py_prod,
+            "def parse(x):\n    try:\n        return int(x)\n    except ValueError:\n        pass\n",
+        )
+        .unwrap();
+        assert!(check_unfinished_placeholders(&[py_prod.to_string_lossy().to_string()]).is_none());
+
         let py_test = dir.join("test_service.py");
         fs::write(&py_test, "def test_x():\n    raise NotImplementedError()\n").unwrap();
         assert!(check_unfinished_placeholders(&[py_test.to_string_lossy().to_string()]).is_none());
 
-        // Self-check: our own production edit.rs must not trigger false positives
-        let own_edit_rs =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tools/edit.rs");
-        let own_src = fs::read_to_string(&own_edit_rs).unwrap();
-        assert_eq!(find_unfinished_or_dummy_line(&own_edit_rs, &own_src), None);
+        // Mobile / Web / Backend ecosystems: Flutter Dart, Swift, Kotlin, C#, Vue mock comment, and binary echo fakes
+        let dart_file = dir.join("payment_repo.dart");
+        fs::write(
+            &dart_file,
+            "Future<void> pay() async {\n  throw UnimplementedError('pay');\n}\n",
+        )
+        .unwrap();
+        assert!(
+            check_unfinished_placeholders(&[dart_file.to_string_lossy().to_string()]).is_some()
+        );
+
+        let swift_file = dir.join("AuthManager.swift");
+        fs::write(
+            &swift_file,
+            "func login() {\n    fatalError(\"TODO: OAuth\")\n}\n",
+        )
+        .unwrap();
+        assert!(
+            check_unfinished_placeholders(&[swift_file.to_string_lossy().to_string()]).is_some()
+        );
+
+        let kt_file = dir.join("UserService.kt");
+        fs::write(
+            &kt_file,
+            "fun fetchUser(): User = TODO(\"fetch from db\")\n",
+        )
+        .unwrap();
+        assert!(check_unfinished_placeholders(&[kt_file.to_string_lossy().to_string()]).is_some());
+
+        let vue_file = dir.join("Dashboard.vue");
+        fs::write(
+            &vue_file,
+            "<script setup>\n// mock data for now\nconst rows = [];\n</script>\n",
+        )
+        .unwrap();
+        assert!(check_unfinished_placeholders(&[vue_file.to_string_lossy().to_string()]).is_some());
+
+        // Plain-text echo into PDF / SQLite / WASM / kernel binary without the word "dummy" is caught,
+        // while legitimate text config redirects (`.env`, `.gitignore`) pass cleanly
+        let sh_file = dir.join("generate_report.sh");
+        fs::write(
+            &sh_file,
+            "#!/bin/sh\necho \"PDF_HEADER\" > output/report.pdf\n",
+        )
+        .unwrap();
+        assert!(check_unfinished_placeholders(&[sh_file.to_string_lossy().to_string()]).is_some());
+        fs::write(
+            &sh_file,
+            "#!/bin/sh\necho \"NOOSPIRE_6.6\" > kernel/vmlinux\n",
+        )
+        .unwrap();
+        assert!(check_unfinished_placeholders(&[sh_file.to_string_lossy().to_string()]).is_some());
+        fs::write(&sh_file, "#!/bin/sh\necho \"PORT=8080\" > .env\n").unwrap();
+        assert!(check_unfinished_placeholders(&[sh_file.to_string_lossy().to_string()]).is_none());
+
+        // Full-repo self-check: every non-test production source file in spavn-cli/src must have 0 false positives
+        fn walk_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk_rs(&p, out);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut prod_files = Vec::new();
+        walk_rs(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut prod_files,
+        );
+        for pf in prod_files {
+            let src = fs::read_to_string(&pf).unwrap();
+            // Note: edit.rs itself contains test-free string constants; strip inline `#[cfg(test)]` tail before checking
+            let prod_slice = src.split("\n#[cfg(test)]").next().unwrap_or(&src);
+            assert_eq!(
+                find_unfinished_or_dummy_line(&pf, prod_slice),
+                None,
+                "false positive in production file {}",
+                pf.display()
+            );
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }
