@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.20 (2026-11-16) — Universal Multi-Language & Binary-Artifact Reality Gate
+
+### Expanded Anti-Dummy & Stub Detection Across Mobile, Web, Backend & Media (`src/tools/edit.rs`)
+- **New, mobile & full-stack ecosystem coverage**: Extended `check_unfinished_placeholders` to `.dart` (`throw UnimplementedError`), `.swift` (`fatalError("TODO")`), `.kt`/`.kts` (`TODO(...)`), `.java` (`UnsupportedOperationException`), `.cs` (`NotImplementedException`), `.vue`, `.svelte`, `.rb`, `.php`, `.sql`, `.lua`, `.ex`, `.scala`, and `CMakeLists.txt` while exempting ecosystem test directories and filenames (`/test/`, `/__mocks__/`, `*_test.dart`, `*Test.kt`, `*Test.java`, `*Tests.swift`, `*Tests.cs`, `*_spec.rb`).
+- **New, Python & web mock shortcut detection**: Flags inline Python stub bodies (`pass # TODO`, `return None # placeholder`, `return {} # mock`) without false-positiving on legitimate `except ...: pass` handlers, plus EN/TR lazy mock comment admissions (`mock data for now`, `hardcoded dummy`, `oluştur (dummy)`, `sahte çıktı`).
+- **New, universal fake binary/media/DB artifact guard**: Catches plain-text `echo`/`printf` redirects and `touch` commands targeting compiled, document, media, archive, or database outputs (`.pdf`, `.mp4`, `.png`, `.jpg`, `.webp`, `.zip`, `.tar.gz`, `.sqlite`, `.db`, `.wasm`, `.apk`, `.ipa`, `.jar`, `.whl`, `.so`, `.dylib`, `.dll`, `.exe`, `vmlinux`) even when the string does not contain `"dummy"`.
+
 ## v0.2.19 (2026-11-16) — Local LLM Precision Harness, Anti-Dummy Reality Gate & Mutation-Aware Loop Guard
 
 ### Local Model Exact-Anchor Schema, Anti-Dummy Detection & Loop Guard Hardening (`src/tools/schema.rs`, `src/tools/edit.rs`, `src/turn.rs`, `src/memory.rs`)

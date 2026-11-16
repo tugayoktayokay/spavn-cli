@@ -185,7 +185,7 @@ New in **`v0.2.10`**: deterministic Rust harness layers that catch model mistake
 | **crates.io** | `cargo install spavn` (pending the first publish) | `cargo install --force spavn` |
 | **Archive / source** | release tarball, or `cargo build --release` | manual |
 
-`spavn --version` answers `spavn v0.2.19 (macos/aarch64)`. `/update` (or `spavn update`) checks for
+`spavn --version` answers `spavn v0.2.20 (macos/aarch64)`. `/update` (or `spavn update`) checks for
 a newer tag, verifies the SHA-256 sidecar and upgrades in place for script installs, or prints the
 upgrade command that matches **the channel you installed from** (`brew upgrade` for Homebrew,
 `cargo install --force` for Cargo).
