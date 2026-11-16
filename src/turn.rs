@@ -39,6 +39,33 @@ pub(crate) fn is_read_tool_name(name: &str) -> bool {
     )
 }
 
+pub(crate) fn is_mutation_tool_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_lowercase().as_str(),
+        "edit" | "edit_file" | "replace" | "patch" | "write" | "write_file"
+    )
+}
+
+/// Clears cached read/search/inspection signatures referencing a mutated path so a
+/// post-edit re-read is never treated as a loop, while preserving `edit`/`write`
+/// mutation signatures so identical or ping-pong (`A -> B -> A -> B`) edit loops
+/// still trip `LoopGuard` and local escalation.
+pub(crate) fn reset_stale_sigs_after_mutation(
+    canonical_sig_counts: &mut std::collections::HashMap<String, usize>,
+    p_str: &str,
+    resolved_p: &str,
+) {
+    canonical_sig_counts.retain(|k, _| {
+        let tool_prefix = k.split_once(':').map(|(t, _)| t).unwrap_or("");
+        if is_mutation_tool_name(tool_prefix) {
+            return true;
+        }
+        let matches_raw = !p_str.is_empty() && k.contains(p_str);
+        let matches_resolved = !resolved_p.is_empty() && k.contains(resolved_p);
+        !matches_raw && !matches_resolved
+    });
+}
+
 pub(crate) fn is_fast_inline_tool(name: &str) -> bool {
     matches!(
         name.trim().to_lowercase().as_str(),
@@ -429,6 +456,8 @@ pub(crate) fn run_agent_turn(
     let mut claim_gate_rounds = 0usize;
     let mut verification_nudged = false;
     let mut modified_files_in_turn: Vec<String> = Vec::new();
+    let mut unverified_edits_per_file: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut auto_verify_rounds = 0usize;
     // Last diagnostic handed to the model by the zero-stop gate; a repeat means the previous
     // round changed nothing relevant and re-sending it only costs an API turn.
@@ -900,7 +929,7 @@ pub(crate) fn run_agent_turn(
                     repeat_count += 1;
                 } else {
                     last_tool_sig = turn_batch_sig;
-                    repeat_count = max_sig_seen_in_turn.saturating_sub(1);
+                    repeat_count = max_sig_seen_in_turn;
                 }
             }
             // stay exactly as they were in the serial path.
@@ -1240,19 +1269,35 @@ pub(crate) fn run_agent_turn(
                                     }
                                 }
                             }
+                            let mut hit_unverified_streak = false;
                             for p_str in touched {
                                 file_read_spans.remove(&p_str);
                                 let resolved_p = ctx.resolve_target_arg(&p_str);
                                 file_read_spans.remove(&resolved_p);
-                                if !resolved_p.is_empty()
-                                    && !modified_files_in_turn.contains(&resolved_p)
-                                {
-                                    modified_files_in_turn.push(resolved_p.clone());
+                                if !resolved_p.is_empty() {
+                                    if !modified_files_in_turn.contains(&resolved_p) {
+                                        modified_files_in_turn.push(resolved_p.clone());
+                                    }
+                                    let streak = unverified_edits_per_file
+                                        .entry(resolved_p.clone())
+                                        .or_insert(0);
+                                    *streak += 1;
+                                    if *streak >= 3 {
+                                        hit_unverified_streak = true;
+                                    }
                                 }
-                                canonical_sig_counts
-                                    .retain(|k, _| !k.contains(&p_str) && !k.contains(&resolved_p));
+                                reset_stale_sigs_after_mutation(
+                                    &mut canonical_sig_counts,
+                                    &p_str,
+                                    &resolved_p,
+                                );
                                 tool_failure_counts
                                     .retain(|k, _| !k.contains(&p_str) && !k.contains(&resolved_p));
+                            }
+                            if hit_unverified_streak {
+                                tool_output.push_str(
+                                    "\n\n[SPAVN EDIT DISCIPLINE]: You modified this file 3+ times in a row without running a verification check. Run a real build/test command via `bash` now before editing it again.",
+                                );
                             }
                         }
                     }
@@ -1260,6 +1305,7 @@ pub(crate) fn run_agent_turn(
                     tool_name.as_str(),
                     "bash" | "run_command" | "shell" | "exec"
                 ) {
+                    unverified_edits_per_file.clear();
                     let succeeded = !tool_output.contains("(exit code ")
                         && !tool_output.contains("<auto_error_context>")
                         && !tools::has_compiler_or_test_error_signature(&tool_output);
@@ -2165,9 +2211,9 @@ mod premature_stop_tests {
         assert_eq!(c1, 1);
         assert_eq!(evaluate_loop_guard(c1), LoopGuardDecision::Allow);
 
-        // 2. Intervening edit on calc.py -> resets canonical_sig_counts for calc.py
+        // 2. Intervening edit on calc.py -> resets non-mutation sigs for calc.py
         let p_str = "calc.py";
-        canonical_sig_counts.retain(|k, _| !k.contains(p_str));
+        super::reset_stale_sigs_after_mutation(&mut canonical_sig_counts, p_str, p_str);
         assert!(!canonical_sig_counts.contains_key("read:calc.py"));
 
         // 3. Read on test_calc.py
@@ -2191,6 +2237,97 @@ mod premature_stop_tests {
         // Count must be 1, NOT 4!
         assert_eq!(c2, 1);
         assert_eq!(evaluate_loop_guard(c2), LoopGuardDecision::Allow);
+    }
+
+    #[test]
+    fn regression_loop_guard_catches_identical_and_ping_pong_mutation_loops() {
+        use spavn::harness::{evaluate_loop_guard, LoopGuardDecision};
+
+        let mut canonical_sig_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut last_tool_sig = String::new();
+        let mut repeat_count = 0usize;
+
+        let edit_a = super::canonical_tool_call_sig(
+            "edit",
+            r##"{"path":"/repo/Makefile","start_line":1,"end_line":20,"new_text":"all: build"}"##,
+        )
+        .unwrap();
+        let edit_b = super::canonical_tool_call_sig(
+            "edit",
+            r##"{"path":"/repo/README.md","start_line":1,"end_line":20,"new_text":"# OS"}"##,
+        )
+        .unwrap();
+
+        let mut step = |sig: &str, path: &str| -> (usize, usize, LoopGuardDecision) {
+            let seen = canonical_sig_counts.get(sig).copied().unwrap_or(0);
+            if sig == last_tool_sig {
+                repeat_count += 1;
+            } else {
+                last_tool_sig = sig.to_string();
+                repeat_count = seen;
+            }
+            let count = {
+                let entry = canonical_sig_counts.entry(sig.to_string()).or_insert(0);
+                *entry += 1;
+                *entry
+            };
+            let decision = evaluate_loop_guard(count);
+            if matches!(decision, LoopGuardDecision::Allow | LoopGuardDecision::Warn) {
+                super::reset_stale_sigs_after_mutation(&mut canonical_sig_counts, path, path);
+            }
+            (count, repeat_count, decision)
+        };
+
+        // Ping-pong round 1: A -> B
+        assert_eq!(
+            step(&edit_a, "/repo/Makefile"),
+            (1, 0, LoopGuardDecision::Allow)
+        );
+        assert_eq!(
+            step(&edit_b, "/repo/README.md"),
+            (1, 0, LoopGuardDecision::Allow)
+        );
+
+        // Ping-pong round 2: A -> B (1st repeat)
+        assert_eq!(
+            step(&edit_a, "/repo/Makefile"),
+            (2, 1, LoopGuardDecision::Allow)
+        );
+        assert_eq!(
+            step(&edit_b, "/repo/README.md"),
+            (2, 1, LoopGuardDecision::Allow)
+        );
+
+        // Ping-pong round 3: A -> B (2nd repeat -> escalation threshold + Warn)
+        assert_eq!(
+            step(&edit_a, "/repo/Makefile"),
+            (3, 2, LoopGuardDecision::Warn)
+        );
+        assert_eq!(
+            step(&edit_b, "/repo/README.md"),
+            (3, 2, LoopGuardDecision::Warn)
+        );
+
+        // Ping-pong round 4: A -> B (blocked!)
+        assert_eq!(
+            step(&edit_a, "/repo/Makefile"),
+            (4, 3, LoopGuardDecision::Block)
+        );
+        assert_eq!(
+            step(&edit_b, "/repo/README.md"),
+            (4, 3, LoopGuardDecision::Block)
+        );
+
+        // Continued attempts hit StopTurn at 6
+        assert_eq!(
+            step(&edit_a, "/repo/Makefile"),
+            (5, 4, LoopGuardDecision::Block)
+        );
+        assert_eq!(
+            step(&edit_a, "/repo/Makefile"),
+            (6, 5, LoopGuardDecision::StopTurn)
+        );
     }
 
     #[test]

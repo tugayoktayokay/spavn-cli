@@ -365,7 +365,7 @@
 <header class="top">
   <div class="top-inner">
     <a class="brand" href="https://spavn.dev/"><span class="mark"><svg width="20" height="20" viewBox="0 0 256 256" fill="none" aria-hidden="true"><defs><linearGradient id="spavn-doc-base" x1="24" y1="24" x2="232" y2="232" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#B95CFF"/><stop offset="0.55" stop-color="#8B63FF"/><stop offset="1" stop-color="#6366FF"/></linearGradient><radialGradient id="spavn-doc-core" cx="128" cy="128" r="92" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#84F2FF" stop-opacity="0.95"/><stop offset="0.45" stop-color="#76C8FF" stop-opacity="0.55"/><stop offset="1" stop-color="#8B63FF" stop-opacity="0"/></radialGradient></defs><g fill="url(#spavn-doc-base)"><path d="M24 24H87L151 88L178 61H191V75L151 115L80 44H44V78L73 107L59 121L24 86Z"/><path d="M232 24V87L168 151L195 178V191H181L141 151L212 80V44H178L149 73L135 59L170 24Z"/><path d="M232 232H169L105 168L78 195H65V181L105 141L176 212H212V178L183 149L197 135L232 170Z"/><path d="M24 232V169L88 105L61 78V65H75L115 105L44 176V212H78L107 183L121 197L86 232Z"/></g><g fill="url(#spavn-doc-core)"><path d="M24 24H87L151 88L178 61H191V75L151 115L80 44H44V78L73 107L59 121L24 86Z"/><path d="M232 24V87L168 151L195 178V191H181L141 151L212 80V44H178L149 73L135 59L170 24Z"/><path d="M232 232H169L105 168L78 195H65V181L105 141L176 212H212V178L183 149L197 135L232 170Z"/><path d="M24 232V169L88 105L61 78V65H75L115 105L44 176V212H78L107 183L121 197L86 232Z"/></g><path d="M128 106C131 120 136 125 150 128C136 131 131 136 128 150C125 136 120 131 106 128C120 125 125 120 128 106Z" fill="#78EDFF"/></svg></span>SPAVN <small>docs</small></a>
-    <span class="pill">v0.2.18</span>
+    <span class="pill">v0.2.19</span>
     <span class="grow"></span>
     <div class="searchbox">
       <span class="lens" aria-hidden="true">⌕</span>
@@ -423,7 +423,7 @@
         that stand between a model and your filesystem. Press <kbd>/</kbd> or <kbd>⌘K</kbd> to search.
       </p>
       <div class="chips">
-        <span class="chip"><b>v0.2.18</b></span>
+        <span class="chip"><b>v0.2.19</b></span>
         <span class="chip"><b>11</b> tools</span>
         <span class="chip"><b>37</b> commands</span>
         <span class="chip"><b>30</b> providers</span>
@@ -473,11 +473,11 @@
         <table>
           <thead><tr><th>Layer</th><th>Module</th><th>How it works</th></tr></thead>
           <tbody>
-            <tr><td><strong>Zero-Stop Verification Gate</strong></td><td><code>src/turn.rs</code></td><td>Automatically runs <code>cargo check --quiet</code>, <code>tsc --noEmit</code>, <code>python3 -m py_compile</code>, or <code>go vet</code> when a turn modifies source files, feeding compiler diagnostics back into the turn loop before stopping.</td></tr>
+            <tr><td><strong>Zero-Stop &amp; Anti-Dummy Reality Gate</strong></td><td><code>src/turn.rs</code>, <code>src/tools/edit.rs</code></td><td>Runs <code>cargo check --quiet</code>, <code>tsc --noEmit</code>, <code>python3 -m py_compile</code>, or <code>go vet</code> on source edits, and flags fake build outputs (<code>echo "dummy" &gt; …</code>) plus unfinished stubs (<code>todo!()</code>, <code>NotImplementedError</code>) before stopping.</td></tr>
             <tr><td><strong>Signature &amp; Arity-Aware Symbol Map</strong></td><td><code>src/tools/search.rs</code></td><td>Extracts exact function, method, struct, and type signatures with 1-based line numbers across modified and neighboring files (<code>[SPAVN LIVE PROJECT SIGNATURES]</code>) so models never hallucinate parameter counts.</td></tr>
-            <tr><td><strong>Fuzzy Self-Heal <code>edit</code> Engine</strong></td><td><code>src/tools/edit.rs</code></td><td>Recovers from intra-line whitespace/indentation drift (<code>fuzzy_find_unique_line_block</code>), auto-expands off-by-N line ranges (±25 lines), and supports multi-hunk <code>edits[]</code> plus cross-file atomic <code>files[]</code> transactions.</td></tr>
+            <tr><td><strong>Fuzzy Self-Heal &amp; Local Exact-Anchor <code>edit</code></strong></td><td><code>src/tools/edit.rs</code>, <code>src/tools/schema.rs</code></td><td>Recovers from whitespace/indentation drift, enforces exact <code>old_text</code>/<code>new_text</code> anchors on local models (hiding line-range parameters at JSON schema level), and supports multi-hunk <code>edits[]</code> plus atomic <code>files[]</code> transactions.</td></tr>
             <tr><td><strong>Stale-File Guard (<code>FS_STALE_VERSION</code>)</strong></td><td><code>src/tools/edit.rs</code></td><td>Tracks per-file <code>SystemTime</code> snapshots on <code>read</code> and refuses <code>edit</code> / <code>write</code> calls when a file was modified externally since it was last read.</td></tr>
-            <tr><td><strong>Canonical Repeat-Tool Breaker</strong></td><td><code>src/turn.rs</code></td><td>Recursively canonicalizes JSON tool arguments (sorted object keys) and injects <code>[SPAVN REPEAT-TOOL BREAKER]</code> after 2 identical read-only calls to break infinite loops.</td></tr>
+            <tr><td><strong>Mutation-Aware Loop Guard &amp; Edit Discipline</strong></td><td><code>src/turn.rs</code>, <code>src/harness.rs</code></td><td>Canonicalizes JSON tool arguments, caps runaway rewrites of the same file without resetting write counters on self-mutation, and requires a compiler/test check after 3 consecutive blind edits.</td></tr>
             <tr><td><strong>Live Verification Loop &amp; Claim Gate</strong></td><td><code>src/harness.rs</code></td><td>Tracks mutated files, normalized test runs (<code>--lib</code>, <code>--nocapture</code>), and enforces verification depth before completion claims.</td></tr>
             <tr><td><strong>OMP-Grade 30+ Provider &amp; Model Hub</strong></td><td><code>src/config.rs</code>, <code>src/hud/pickers.rs</code></td><td>30+ built-in cloud &amp; local providers, live key validation + <code>/v1/models</code> caching, <code>models.dev</code> registry sync, <code>models.yml</code> support, and custom provider wizard.</td></tr>
             <tr><td><strong>Knowledge Distillation</strong></td><td><code>src/knowledge.rs</code></td><td>Distills durable user corrections into local Markdown artifacts (<code>~/.spavn/knowledge/</code>) and injects top-2 relevant lessons per prompt.</td></tr>
@@ -489,7 +489,7 @@
       <div class="tw">
         <table>
           <tbody>
-            <tr><th>Version</th><td>0.2.18 · MIT</td></tr>
+            <tr><th>Version</th><td>0.2.19 · MIT</td></tr>
             <tr><th>Binary footprint</th><td><code>5.2 MiB</code> uncompressed (<code>5,413,888 B</code> macOS arm64) · <code>2.4–2.7 MiB</code> compressed release archive · <code>~90 KiB</code> source crate</td></tr>
             <tr><th>Rust</th><td>1.80+ (uses <code>LazyLock</code>) · 3 direct crates (<code>serde</code>, <code>serde_json</code>, <code>ureq</code>)</td></tr>
             <tr><th>State</th><td><code>~/.spavn</code> · mode <code>0700</code>, secrets <code>0600</code></td></tr>
@@ -556,7 +556,7 @@ cargo install spavn                                             # once published
       </div>
 
       <h3>Verify a download</h3>
-      <div class="cb"><button class="copy" type="button">copy</button><pre><code>gh release download v0.2.18 --pattern '*aarch64-apple-darwin*'
+      <div class="cb"><button class="copy" type="button">copy</button><pre><code>gh release download v0.2.19 --pattern '*aarch64-apple-darwin*'
 shasum -a 256 -c ./*.sha256</code></pre></div>
     </section>
 

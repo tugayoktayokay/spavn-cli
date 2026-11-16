@@ -324,13 +324,13 @@ pub fn tool_definitions_for_turn(
     if let Value::Array(items) = base {
         let filtered: Vec<Value> = items
             .into_iter()
-            .filter(|item| {
+            .filter_map(|item| {
                 let name = item
                     .get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                match name {
+                let keep = match name {
                     "read" | "edit" | "write" | "bash" | "search" | "glob" | "web" | "memory" => {
                         true
                     }
@@ -338,7 +338,33 @@ pub fn tool_definitions_for_turn(
                     "subagent" => want_subagent,
                     "lsp" => want_lsp,
                     _ => true,
+                };
+                if !keep {
+                    return None;
                 }
+                if name == "edit" {
+                    // Small/local models miscount 1-based line spans (`start_line`..`end_line`),
+                    // causing tail duplication on repeated edits. Expose only exact anchor
+                    // replacement (`path` + `old_text` + `new_text`) so `llama-server` grammar
+                    // enforces unique anchors backed by fuzzy self-healing.
+                    return Some(json!({
+                        "type": "function",
+                        "function": {
+                            "name": "edit",
+                            "description": "Replace exact `old_text` with `new_text` in `path`. Include 2-4 unchanged surrounding lines in `old_text` so the match is unique. Never include line-number prefixes.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string", "description": "File to edit (`<host>:/path` for a remote host)" },
+                                    "old_text": { "type": "string", "description": "Exact existing snippet to replace (include 2-4 unchanged context lines)" },
+                                    "new_text": { "type": "string", "description": "Replacement snippet" }
+                                },
+                                "required": ["path", "old_text", "new_text"]
+                            }
+                        }
+                    }));
+                }
+                Some(item)
             })
             .collect();
         Value::Array(filtered)

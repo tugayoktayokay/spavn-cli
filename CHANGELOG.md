@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.19 (2026-11-16) — Local LLM Precision Harness, Anti-Dummy Reality Gate & Mutation-Aware Loop Guard
+
+### Local Model Exact-Anchor Schema, Anti-Dummy Detection & Loop Guard Hardening (`src/tools/schema.rs`, `src/tools/edit.rs`, `src/turn.rs`, `src/memory.rs`)
+- **Fix, mutation-aware Loop Guard (`src/turn.rs`)**: `reset_stale_sigs_after_mutation` previously wiped the mutated tool's own repeat counter after every successful `write`/`edit`, allowing local models to rewrite or drift-edit the same file indefinitely without hitting `Warn=3` / `Block=4` / `StopTurn=6`. Only read-only signatures targeting that path are cleared on mutation, and a new path-level mutation cap escalates at 8 (`Warn`), 10 (`Block`), and 12 (`StopTurn`) unverified rewrites of the same file.
+- **New, blind-edit discipline (`src/turn.rs`)**: Editing the same file 3+ times consecutively without running a `bash` build or test check injects `[SPAVN EDIT DISCIPLINE]` requiring compiler/test verification before further rewrites; running `bash` resets the per-path streak.
+- **New, local exact-anchor `edit` schema (`src/tools/schema.rs`)**: When targeting a local model (`is_local`), `start_line` and `end_line` are omitted from the `edit` tool schema and `required: ["path", "old_text", "new_text"]` is enforced at the JSON grammar level, eliminating small-model line-number arithmetic drift and duplicated file tails.
+- **New, dual-layer Anti-Dummy & Stub Reality Gate (`src/tools/edit.rs`)**: Expanded `check_unfinished_placeholders` across source and build files (`Makefile`, `Dockerfile`, `.sh`, `.rs`, `.py`, `.go`, `.ts`, `.c`, etc., skipping test files) to catch fake build artifacts (`echo "dummy" > ...`, `touch *.bin/vmlinux`), `todo!()`, `unimplemented!()`, `raise NotImplementedError`, `panic("TODO")`, and `TODO: implement` both inline on `edit`/`write` and at the turn-end Zero-Stop Gate.
+- **Prompt (`src/memory.rs`)**: Added an explicit missing-toolchain rule to `COMPACT_CONSTITUTION` instructing local models to report missing compilers/emulators instead of fabricating placeholder outputs.
+
 ## v0.2.18 (2026-11-15) — Zero-Config Ollama Context Safety & Live Sync
 
 ### Ollama VRAM-Safe Context Window, `num_ctx` Negotiation & Live Sync (`data/byok_catalog.json`, `src/router/mod.rs`, `src/router/openai.rs`)

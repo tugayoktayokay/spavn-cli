@@ -233,7 +233,7 @@ const COMPACT_CONSTITUTION: &str = r#"# Rules
 1. Use the Workspace Files and Symbol Map above; go straight to `read(path, start_line, end_line)` or `search`. Several ranges at once: `read(path="src/x.rs:97-112,1066-1076")`. Never inspect files via `bash sed/awk/head/tail/cat`. No `ls`/`find` for listed files. Do not re-read a file after `edit`/`write`.
 2. Match the neighboring code's naming, errors and imports. No dead code, no parallel conventions.
 3. Prefer `edit` over `write`. `old_text` = exact snippet plus 2-4 unchanged lines so it is unique; never include `123:` line-number prefixes. If `edit` warns, fix it next step.
-4. Finish fully: no TODO, stubs or mocks; update every caller and import.
+4. Finish fully: no TODO, stubs, mocks or fake `dummy` files; update every caller and import. If a required host toolchain/binary is missing, report it honestly instead of faking output.
 5. `bash` is non-interactive: pass `-y`, `--no-pager`, `CI=1`; no pagers or editors. After any code change run a real check (`cargo check`/`cargo test`, `pytest`, `npm test`) and confirm it passes before replying. Never claim fixed/done without a behavioral check after the last edit; report the verification level actually exercised.
 6. File tools and `bash(host=...)` accept `<host>:/path` for hosts in `~/.spavn/config.json`.
 7. Batch independent `read`/`search`/`glob` lookups into ONE message: each separate turn is a full model round trip."#;

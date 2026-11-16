@@ -1530,4 +1530,101 @@ mod harness_intelligence_tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn local_edit_schema_enforces_exact_anchors_and_hides_line_numbers() {
+        let local_tools = tool_definitions_for_turn(AgentPhase::Code, true, "fix bug in parser.rs");
+        let local_edit = local_tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["function"]["name"] == "edit")
+            .expect("local edit tool");
+        let props = local_edit["function"]["parameters"]["properties"]
+            .as_object()
+            .unwrap();
+        assert!(props.contains_key("path"));
+        assert!(props.contains_key("old_text"));
+        assert!(props.contains_key("new_text"));
+        assert!(
+            !props.contains_key("start_line") && !props.contains_key("end_line"),
+            "local models must not see line-range properties that cause tail duplication"
+        );
+        let req: Vec<&str> = local_edit["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(req, vec!["path", "old_text", "new_text"]);
+
+        let cloud_tools =
+            tool_definitions_for_turn(AgentPhase::Code, false, "fix bug in parser.rs");
+        let cloud_edit = cloud_tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["function"]["name"] == "edit")
+            .expect("cloud edit tool");
+        let cloud_props = cloud_edit["function"]["parameters"]["properties"]
+            .as_object()
+            .unwrap();
+        assert!(cloud_props.contains_key("start_line") && cloud_props.contains_key("edits"));
+    }
+
+    #[test]
+    fn anti_dummy_gate_catches_fake_makefile_artifacts_and_stubs_without_false_positives() {
+        let dir = std::env::temp_dir().join(format!("spavn-antidummy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        let makefile = dir.join("Makefile");
+        let makefile_str = makefile.to_string_lossy().to_string();
+        let write_out = execute_tool(
+            &mut c,
+            "write",
+            &serde_json::to_string(&json!({
+                "path": makefile_str,
+                "content": "build:\n\t@echo \"dummy\" > kernel/vmlinux\n"
+            }))
+            .unwrap(),
+        );
+        assert!(
+            write_out.contains("Stub/Dummy Warning"),
+            "write should emit instant warning on fake artifact: {write_out}"
+        );
+        let gate_err = check_unfinished_placeholders(std::slice::from_ref(&makefile_str))
+            .expect("zero-stop gate must catch fake Makefile vmlinux");
+        assert!(gate_err.contains("Makefile") && gate_err.contains("dummy"));
+
+        // Real Makefile must pass cleanly
+        fs::write(&makefile, "build:\n\tcargo build --release\n").unwrap();
+        assert!(check_unfinished_placeholders(std::slice::from_ref(&makefile_str)).is_none());
+
+        // Python NotImplementedError stub caught; test files ignored
+        let py_prod = dir.join("service.py");
+        fs::write(
+            &py_prod,
+            "def run():\n    raise NotImplementedError('soon')\n",
+        )
+        .unwrap();
+        assert!(check_unfinished_placeholders(&[py_prod.to_string_lossy().to_string()]).is_some());
+        let py_test = dir.join("test_service.py");
+        fs::write(&py_test, "def test_x():\n    raise NotImplementedError()\n").unwrap();
+        assert!(check_unfinished_placeholders(&[py_test.to_string_lossy().to_string()]).is_none());
+
+        // Self-check: our own production edit.rs must not trigger false positives
+        let own_edit_rs =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tools/edit.rs");
+        let own_src = fs::read_to_string(&own_edit_rs).unwrap();
+        assert_eq!(find_unfinished_or_dummy_line(&own_edit_rs, &own_src), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

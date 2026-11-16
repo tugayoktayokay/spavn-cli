@@ -321,33 +321,191 @@ pub fn build_live_project_signatures(cwd: &str) -> String {
     summary
 }
 
+fn is_test_or_fixture_path(path: &Path) -> bool {
+    let lossy = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    if lossy.contains("/tests/")
+        || lossy.contains("/__tests__/")
+        || lossy.contains("/fixtures/")
+        || lossy.contains("/mocks/")
+        || lossy.contains("/testdata/")
+    {
+        return true;
+    }
+    let fname = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    fname.starts_with("test_")
+        || fname.ends_with("_test.rs")
+        || fname.ends_with("_test.go")
+        || fname.ends_with("_test.py")
+        || fname.ends_with(".test.ts")
+        || fname.ends_with(".test.tsx")
+        || fname.ends_with(".test.js")
+        || fname.ends_with(".spec.ts")
+        || fname.ends_with(".spec.js")
+        || fname == "tests.rs"
+}
+
+fn is_checked_code_or_build_path(path: &Path) -> bool {
+    if is_test_or_fixture_path(path) {
+        return false;
+    }
+    let fname = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if matches!(
+        fname.as_str(),
+        "makefile" | "gnumakefile" | "justfile" | "dockerfile"
+    ) {
+        return true;
+    }
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        ext.as_str(),
+        "rs" | "ts"
+            | "tsx"
+            | "py"
+            | "go"
+            | "js"
+            | "jsx"
+            | "c"
+            | "cc"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "zig"
+            | "sh"
+            | "bash"
+            | "zsh"
+    )
+}
+
+fn is_shell_fake_artifact_line(trimmed: &str) -> bool {
+    let cmd = trimmed.trim_start_matches('@').trim_start();
+    let low = cmd.to_lowercase();
+    // Catch `@echo "dummy" > kernel/vmlinux` / `echo 'placeholder' > out.bin`
+    if (low.starts_with("echo ") || low.contains("&& echo ") || low.contains("; echo "))
+        && low.contains('>')
+        && !low.contains(">/dev/null")
+        && !low.contains("> /dev/null")
+    {
+        let has_fake_token = [
+            "\"dummy\"",
+            "'dummy'",
+            " dummy ",
+            "\"placeholder\"",
+            "'placeholder'",
+            "\"fake\"",
+            "'fake'",
+        ]
+        .iter()
+        .any(|tok| low.contains(tok));
+        if has_fake_token {
+            return true;
+        }
+    }
+    // Catch `touch kernel/vmlinux` or `touch dist/app.elf` faking binary outputs
+    if low.starts_with("touch ") {
+        let target = low.trim_start_matches("touch ").trim();
+        if target.ends_with("vmlinux")
+            || target.ends_with("bzimage")
+            || target.ends_with(".elf")
+            || target.ends_with(".bin")
+            || target.ends_with(".img")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn find_unfinished_or_dummy_line(path: &Path, content: &str) -> Option<(usize, String)> {
+    if !is_checked_code_or_build_path(path) {
+        return None;
+    }
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let low = trimmed.to_lowercase();
+
+        // 1. Explicit placeholder/dummy admissions in comments
+        if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("/*") {
+            if low.contains("todo: implement")
+                || low.contains("fixme: implement")
+                || low.contains("placeholder implementation")
+                || low.contains("dummy implementation")
+                || low.contains("for now, we use a dummy")
+            {
+                return Some((idx + 1, trimmed.to_string()));
+            }
+            continue;
+        }
+
+        // 2. Shell / Makefile fake binary/output redirection (`@echo "dummy" > kernel/vmlinux`)
+        if is_shell_fake_artifact_line(trimmed) {
+            return Some((idx + 1, trimmed.to_string()));
+        }
+
+        // 3. Unfinished code-level stub panics/exceptions
+        if (trimmed.contains("todo!()") || trimmed.contains("unimplemented!()"))
+            && !trimmed.contains('"')
+            && !trimmed.contains('\'')
+        {
+            return Some((idx + 1, trimmed.to_string()));
+        }
+        if trimmed.starts_with("todo!(\"")
+            || trimmed.starts_with("unimplemented!(\"")
+            || trimmed.starts_with("raise NotImplementedError")
+            || low.starts_with("throw new error(\"not implemented")
+            || low.starts_with("throw new error('not implemented")
+            || low.starts_with("throw new error(\"todo")
+            || low.starts_with("throw new error('todo")
+            || low.starts_with("panic(\"not implemented")
+            || low.starts_with("panic(\"todo")
+        {
+            return Some((idx + 1, trimmed.to_string()));
+        }
+    }
+    None
+}
+
+fn instant_stub_warning(path: &Path, full_content: &str, added_snippet: &str) -> String {
+    if added_snippet.trim().is_empty() {
+        return String::new();
+    }
+    if let Some((line_no, snippet)) = find_unfinished_or_dummy_line(path, full_content) {
+        if added_snippet.contains(snippet.as_str()) {
+            return format!(
+                " [Stub/Dummy Warning: line {} contains placeholder `{}` — implement real logic or honestly report missing host tools]",
+                line_no, snippet
+            );
+        }
+    }
+    String::new()
+}
+
 pub fn check_unfinished_placeholders(modified_files: &[String]) -> Option<String> {
     for raw in modified_files {
         if split_remote_prefix(raw).is_some() {
             continue;
         }
         let path = expand_tilde(raw);
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if !matches!(ext, "rs" | "ts" | "tsx" | "py" | "go" | "js") {
-            continue;
-        }
         if let Ok(content) = fs::read_to_string(&path) {
-            for (idx, line) in content.lines().enumerate() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("//") || trimmed.starts_with('#') {
-                    continue;
-                }
-                if (trimmed.contains("todo!()") || trimmed.contains("unimplemented!()"))
-                    && !trimmed.contains('"')
-                    && !trimmed.contains('\'')
-                {
-                    return Some(format!(
-                        "[SPAVN ZERO-STOP GATE]: File `{}` (line {}) still contains an unfinished placeholder (`{}`). Implement the complete production logic before finishing.",
-                        raw,
-                        idx + 1,
-                        trimmed
-                    ));
-                }
+            if let Some((line_no, snippet)) = find_unfinished_or_dummy_line(&path, &content) {
+                return Some(format!(
+                    "[SPAVN ZERO-STOP GATE]: File `{}` (line {}) still contains an unfinished placeholder or fake/dummy shortcut (`{}`). Implement real working logic, or remove the fake artifact and honestly report any missing host toolchain/dependencies before finishing.",
+                    raw, line_no, snippet
+                ));
             }
         }
     }
@@ -1353,13 +1511,19 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 &ctx.current_prompt,
             );
             let diag = run_instant_syntax_check(&resolved_target, &working);
+            let stub_warn = if split_remote_prefix(raw_path).is_none() {
+                instant_stub_warning(&expand_tilde(raw_path), &working, &combined_new)
+            } else {
+                String::new()
+            };
             let impact = compute_caller_impact_hint(ctx, raw_path, &combined_old, &combined_new);
             return format!(
-                "Successfully edited {} ({} hunks applied in-memory — file state is current in context, no need to re-read){}{}{}",
+                "Successfully edited {} ({} hunks applied in-memory — file state is current in context, no need to re-read){}{}{}{}",
                 raw_path,
                 edits_arr.len(),
                 mtime_warn,
                 diag,
+                stub_warn,
                 impact
             );
         }
@@ -1531,10 +1695,15 @@ fn exec_edit_single_with_range(
                 &ctx.current_prompt,
             );
             let diag = run_instant_syntax_check(&resolved_target, &updated);
+            let stub_warn = if split_remote_prefix(raw_path).is_none() {
+                instant_stub_warning(&expand_tilde(raw_path), &updated, &eff_new)
+            } else {
+                String::new()
+            };
             let impact = compute_caller_impact_hint(ctx, raw_path, &eff_old, &eff_new);
             format!(
-                "Successfully edited {} ({}){}{}{}",
-                raw_path, match_label, mtime_warn, diag, impact
+                "Successfully edited {} ({}){}{}{}{}",
+                raw_path, match_label, mtime_warn, diag, stub_warn, impact
             )
         }
         Err(err_msg) => err_msg,
@@ -2192,11 +2361,17 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
                 &ctx.current_prompt,
             );
             let diag = run_instant_syntax_check(&resolved_target, content);
+            let stub_warn = if split_remote_prefix(&raw_path).is_none() {
+                instant_stub_warning(&expand_tilde(&raw_path), content, content)
+            } else {
+                String::new()
+            };
             format!(
-                "Successfully wrote {} bytes to {} (file state is current in context, no need to re-read){}",
+                "Successfully wrote {} bytes to {} (file state is current in context, no need to re-read){}{}",
                 content.len(),
                 raw_path,
-                diag
+                diag,
+                stub_warn
             )
         }
         Err(e) => e,
