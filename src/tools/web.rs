@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn strip_html_to_clean_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len().min(12_000));
-    let lower = html.to_lowercase();
+    let lower = html.to_ascii_lowercase();
     let bytes = html.as_bytes();
     let lower_bytes = lower.as_bytes();
     let mut i = 0usize;
@@ -57,7 +57,10 @@ pub(crate) fn strip_html_to_clean_text(html: &str) -> String {
             continue;
         }
         if !in_tag {
-            let ch = html[i..].chars().next().unwrap_or(' ');
+            let Some(ch) = html.get(i..).and_then(|s| s.chars().next()) else {
+                i += 1;
+                continue;
+            };
             if ch == '\n' || ch == '\r' {
                 if !out.ends_with("\n\n") {
                     out.push('\n');
@@ -373,4 +376,20 @@ pub(crate) fn exec_web(ctx: &mut ToolContext, args: &Value) -> String {
         limit,
         recency,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_html_to_clean_text;
+
+    #[test]
+    fn strip_html_handles_turkish_capital_i_before_script_and_soft_g() {
+        // 'İ' expands from 2 bytes to 3 bytes under Unicode `to_lowercase()`, which used to shift
+        // byte offsets in `lower` vs `html` and panic when slicing `html[i..]` on 'ğ'.
+        let html = "<html><body><p>İstanbul</p><script>var x = 1;</script><p>bağlantı</p></body></html>";
+        let cleaned = strip_html_to_clean_text(html);
+        assert!(cleaned.contains("İstanbul"));
+        assert!(cleaned.contains("bağlantı"));
+        assert!(!cleaned.contains("var x = 1"));
+    }
 }
