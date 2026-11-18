@@ -12,19 +12,19 @@ pub(crate) fn strip_html_to_clean_text(html: &str) -> String {
     while i < bytes.len() {
         if !in_tag && i + 7 < lower_bytes.len() {
             if lower_bytes[i..].starts_with(b"<script") {
-                if let Some(end) = lower[i..].find("</script>") {
+                if let Some(end) = lower.get(i..).and_then(|s| s.find("</script>")) {
                     i += end + 9;
                     continue;
                 }
             }
             if lower_bytes[i..].starts_with(b"<style") {
-                if let Some(end) = lower[i..].find("</style>") {
+                if let Some(end) = lower.get(i..).and_then(|s| s.find("</style>")) {
                     i += end + 8;
                     continue;
                 }
             }
             if lower_bytes[i..].starts_with(b"<svg") {
-                if let Some(end) = lower[i..].find("</svg>") {
+                if let Some(end) = lower.get(i..).and_then(|s| s.find("</svg>")) {
                     i += end + 6;
                     continue;
                 }

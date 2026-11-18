@@ -749,40 +749,69 @@ pub fn record_knowledge_artifact(cwd: &str, files: &[String], summary: &str) {
     }
 }
 
+fn is_artifact_stopword(w: &str) -> bool {
+    matches!(
+        w,
+        "bir" | "bu" | "şu" | "ve" | "ile" | "için" | "gibi" | "daha" | "çok" | "az"
+            | "var" | "yok" | "varmı" | "mı" | "mi" | "mu" | "mü" | "ne" | "nasıl"
+            | "neden" | "ama" | "fakat" | "veya" | "ya" | "da" | "de" | "ki" | "ben"
+            | "sen" | "biz" | "siz" | "sence" | "bence" | "baksana" | "bak" | "yap"
+            | "yapalım" | "yapabilir" | "olur" | "oldu" | "olsun" | "şuan" | "şimdi"
+            | "artık" | "başka" | "eksik" | "sorun" | "hata" | "tamam" | "evet" | "hayır"
+            | "the" | "and" | "for" | "with" | "this" | "that" | "from" | "are" | "was"
+            | "were" | "have" | "has" | "had" | "not" | "but" | "you" | "can" | "all"
+            | "any" | "our" | "out" | "now" | "yes" | "please" | "thanks" | "continue"
+    )
+}
+
+pub fn extract_artifact_query_terms(query: &str) -> Vec<String> {
+    if query.trim().chars().count() < 16 {
+        return Vec::new();
+    }
+    let mut terms: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.')
+        .map(|s| s.trim_matches('.'))
+        .filter(|s| s.chars().count() >= 3 && !is_artifact_stopword(s))
+        .map(|s| s.to_string())
+        .collect();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
 pub fn retrieve_relevant_artifacts(cwd: &str, query: &str, k: usize) -> Vec<KnowledgeArtifact> {
+    let q_terms = extract_artifact_query_terms(query);
+    if q_terms.is_empty() {
+        return Vec::new();
+    }
     let path = spavn_dir()
         .join("artifacts")
         .join(format!("{}.jsonl", project_slug(cwd)));
     let Ok(f) = fs::File::open(path) else {
         return Vec::new();
     };
-    let q_terms: Vec<String> = query
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| s.len() >= 3)
-        .map(|s| s.to_string())
-        .collect();
     let reader = BufReader::new(f);
-    let mut items: Vec<KnowledgeArtifact> = reader
+    let items: Vec<KnowledgeArtifact> = reader
         .lines()
         .map_while(Result::ok)
         .filter_map(|l| serde_json::from_str::<KnowledgeArtifact>(&l).ok())
         .collect();
 
-    if q_terms.is_empty() {
-        items.reverse();
-        items.truncate(k);
-        return items;
-    }
-
+    let min_hits = if q_terms.len() >= 2 { 2 } else { 1 };
     let mut scored: Vec<(usize, KnowledgeArtifact)> = items
         .into_iter()
-        .map(|art| {
-            let hay = format!("{} {}", art.files.join(" "), art.summary).to_lowercase();
+        .filter_map(|art| {
+            let files_lc = art.files.join(" ").to_lowercase();
+            let hay = format!("{} {}", files_lc, art.summary.to_lowercase());
+            let file_hits = q_terms.iter().filter(|t| files_lc.contains(t.as_str())).count();
             let hits = q_terms.iter().filter(|t| hay.contains(t.as_str())).count();
-            (hits, art)
+            if hits >= min_hits || file_hits >= 1 {
+                Some((hits + file_hits, art))
+            } else {
+                None
+            }
         })
-        .filter(|(hits, _)| *hits > 0)
         .collect();
     scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     scored.into_iter().take(k).map(|(_, a)| a).collect()
@@ -1157,6 +1186,16 @@ pub fn render_goals_panel(cwd: &str) {
 #[cfg(test)]
 mod engine_tests {
     use super::*;
+
+    #[test]
+    fn extract_artifact_query_terms_skips_short_followups_and_stopwords() {
+        assert!(extract_artifact_query_terms("ok").is_empty());
+        assert!(extract_artifact_query_terms("yapalım").is_empty());
+        assert!(extract_artifact_query_terms("başka eksik varmı sence").is_empty());
+        let terms = extract_artifact_query_terms("proxy.mjs içinde thinkingConfig ayarına bak");
+        assert!(terms.contains(&"proxy.mjs".to_string()));
+        assert!(terms.contains(&"thinkingconfig".to_string()));
+    }
 
     #[test]
     fn role_from_str_handles_aliases_and_unknown() {

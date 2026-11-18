@@ -34,6 +34,27 @@ pub const HARD_COMPACT_RATIO_PCT: usize = 80;
 
 /// Token usage that triggers turn-start Context Shaking (spill to recoverable files).
 pub const FIRST_TURN_SHAKE_TOKENS: usize = 24_000;
+pub const LOW_COST_TURN_SHAKE_TOKENS: usize = 32_000;
+pub const STANDARD_CLOUD_TURN_SHAKE_TOKENS: usize = 48_000;
+pub const HIGH_CONTEXT_TURN_SHAKE_TOKENS: usize = 96_000;
+
+/// Token threshold at which turn-start Context Shaking runs.
+/// Large-window cloud models wait until 96k so prefix caches stay intact during normal sessions.
+pub fn turn_start_shake_threshold(
+    is_local: bool,
+    is_low_cost: bool,
+    max_ctx_tokens: usize,
+) -> usize {
+    if is_local {
+        FIRST_TURN_SHAKE_TOKENS
+    } else if is_low_cost {
+        LOW_COST_TURN_SHAKE_TOKENS
+    } else if max_ctx_tokens >= HIGH_CONTEXT_THRESHOLD {
+        HIGH_CONTEXT_TURN_SHAKE_TOKENS
+    } else {
+        STANDARD_CLOUD_TURN_SHAKE_TOKENS
+    }
+}
 
 /// Prune budget for the "compact old tool messages" gate inside `compact_messages_for_model`.
 /// Fallback when context is unknown, otherwise ~25% of the context window clamped to a sane range.
@@ -1485,6 +1506,26 @@ mod tests {
         assert!(!should_escalate_to_cloud(true, 1));
         // Cloud endpoints never re-escalate (already cloud).
         assert!(!should_escalate_to_cloud(false, 99));
+    }
+
+    #[test]
+    fn turn_start_shake_threshold_scales_by_tier_for_prefix_cache() {
+        assert_eq!(
+            turn_start_shake_threshold(true, false, 131_072),
+            FIRST_TURN_SHAKE_TOKENS
+        );
+        assert_eq!(
+            turn_start_shake_threshold(false, true, 1_000_000),
+            LOW_COST_TURN_SHAKE_TOKENS
+        );
+        assert_eq!(
+            turn_start_shake_threshold(false, false, 1_000_000),
+            HIGH_CONTEXT_TURN_SHAKE_TOKENS
+        );
+        assert_eq!(
+            turn_start_shake_threshold(false, false, 200_000),
+            STANDARD_CLOUD_TURN_SHAKE_TOKENS
+        );
     }
 
     #[test]

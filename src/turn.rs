@@ -200,20 +200,19 @@ pub(crate) fn compact_messages_for_model(
     } else {
         0
     };
-    // Keep `messages[0]` static for local models so KV-cache from token 0 is never invalidated.
-    let live_sigs = if !is_local && prune_old_tools {
-        tools::build_live_project_signatures(".")
-    } else {
-        String::new()
-    };
+    // Keep `messages[0]` static across ALL models (local & cloud) so provider KV/prefix
+    // caches from token 0 are never invalidated mid-session.
     let keep_reasoning_from = if is_local { turn_anchor } else { last_user_idx };
-    // Supersede Pruning: identify `read` tool calls before `turn_anchor` whose target
-    // file/region was later re-read or mutated (`edit`/`write`). Anchored to `turn_anchor` so
-    // the KV-cache prefix stays byte-identical between anchor steps.
+    // Supersede Pruning: identify `read` tool calls before `supersede_cutoff` whose target
+    // file/region was later re-read or mutated (`edit`/`write`).
+    // On cloud models under the prune budget (`!prune_old_tools`), skip mutating earlier tool
+    // messages so provider prefix caches remain 100% byte-identical across turns.
     let supersede_cutoff = if is_local {
         turn_anchor
+    } else if prune_old_tools {
+        cutoff
     } else {
-        turn_anchor.max(cutoff)
+        0
     };
     let mut read_calls: Vec<(usize, String, String, String)> = Vec::new();
     let mut latest_full_op: std::collections::HashMap<String, usize> =
@@ -261,16 +260,6 @@ pub(crate) fn compact_messages_for_model(
         .enumerate()
         .map(|(idx, m)| {
             let mut cloned = m.clone();
-            if idx == 0 && m.role == "system" && !live_sigs.is_empty() {
-                if let Some(ref sys_text) = cloned.content {
-                    if !sys_text.contains("[SPAVN LIVE PROJECT SIGNATURES]") {
-                        cloned.content = Some(format!(
-                            "{}\n\n[SPAVN LIVE PROJECT SIGNATURES — Use exact symbol/type names below across files]:\n{}",
-                            sys_text, live_sigs
-                        ));
-                    }
-                }
-            }
 
             if idx < keep_reasoning_from {
                 cloned.reasoning_content = None;
@@ -410,6 +399,109 @@ fn extract_compact_ast_skeleton(content: &str) -> String {
     } else {
         format!(" | AST Signatures: {}", sigs.join(" ; "))
     }
+}
+
+fn maybe_shake_older_tool_outputs(
+    messages: &mut Vec<ChatMessage>,
+    session_file: &std::path::PathBuf,
+) -> bool {
+    let active_u_idx = messages
+        .iter()
+        .rposition(|m| {
+            m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
+        })
+        .unwrap_or(messages.len());
+    let mut shaken_any = false;
+    for (idx, m) in messages.iter_mut().enumerate().skip(1) {
+        if idx >= active_u_idx || m.role != "tool" {
+            continue;
+        }
+        if let Some(c) = &m.content {
+            if c.len() > 3200
+                && !c.contains("[SPAVN Shaken")
+                && !c.contains("...[Compacted")
+            {
+                let est_tok = c.len() / 4 + 1;
+                let head = safe_utf8_prefix(c, 900);
+                let tail = safe_utf8_suffix(c, 500);
+                let spill_note = spavn::spill::spill_output("shaken-turn", c)
+                    .map(|p| format!(" — recover: {}", p.display()))
+                    .unwrap_or_default();
+                m.content = Some(format!(
+                    "{}\n...[SPAVN Shaken ~{} tokens{}]...\n{}",
+                    head, est_tok, spill_note, tail
+                ));
+                shaken_any = true;
+            }
+        }
+    }
+    if shaken_any {
+        rewrite_session(session_file, messages);
+    }
+    shaken_any
+}
+
+fn prepare_context_window(
+    step_endpoint: &ModelEndpoint,
+    messages: &mut Vec<ChatMessage>,
+    session_file: &std::path::PathBuf,
+    max_ctx_tokens: usize,
+    total_turn_steps: usize,
+    last_observed_total_tokens: &mut usize,
+    file_read_spans: &mut std::collections::HashMap<String, Vec<String>>,
+    ctx: &mut ToolContext,
+    quiet: bool,
+) -> (Vec<ChatMessage>, usize) {
+    let mut view_messages =
+        compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
+    let mut view_tok = hud::estimate_messages_tokens(&view_messages);
+    let effective_tok = view_tok.max(*last_observed_total_tokens);
+    let is_low_cost = step_endpoint.is_low_cost_tier();
+    let token_cap = tier_token_cap(is_low_cost, max_ctx_tokens);
+    let compact_threshold = hard_compact_threshold(max_ctx_tokens, token_cap);
+    let shake_threshold =
+        turn_start_shake_threshold(step_endpoint.is_local(), is_low_cost, max_ctx_tokens);
+
+    if total_turn_steps == 0
+        && effective_tok >= shake_threshold
+        && maybe_shake_older_tool_outputs(messages, session_file)
+    {
+        view_messages =
+            compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
+        view_tok = hud::estimate_messages_tokens(&view_messages);
+    }
+
+    if should_full_compact(
+        total_turn_steps,
+        effective_tok,
+        compact_threshold,
+        messages.len(),
+    ) {
+        let raw_before_tok = hud::estimate_messages_tokens(messages).max(effective_tok);
+        perform_manual_compact(step_endpoint, messages, None);
+        rewrite_session(session_file, messages);
+        *last_observed_total_tokens = 0;
+        file_read_spans.clear();
+        ctx.read_ranges.clear();
+        view_messages =
+            compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
+        view_tok = hud::estimate_messages_tokens(&view_messages);
+        if !quiet {
+            println!(
+                "{}╰─ ⚡ {}: {} → {}{}",
+                GREEN,
+                tr_en(
+                    "[SPAVN Auto-Compact sonrası işlem otomatik devam ediyor]",
+                    "[SPAVN Auto-Continuing after context compaction]"
+                ),
+                hud::format_token_short(raw_before_tok),
+                hud::format_token_short(view_tok),
+                RESET
+            );
+        }
+    }
+
+    (view_messages, view_tok)
 }
 
 pub(crate) fn run_agent_turn(
@@ -584,90 +676,17 @@ pub(crate) fn run_agent_turn(
             ctx.read_ranges.clear();
             last_read_cap_anchor = current_read_cap_anchor;
         }
-        let mut view_messages =
-            compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
-        let mut view_tok = hud::estimate_messages_tokens(&view_messages);
-        let effective_tok = view_tok.max(last_observed_total_tokens);
-        let is_free_or_flash = step_endpoint.is_low_cost_tier();
-        let token_cap = if is_free_or_flash {
-            64_000
-        } else if max_ctx_tokens >= 500_000 {
-            240_000
-        } else {
-            120_000
-        };
-        let compact_threshold = ((max_ctx_tokens * 80) / 100).min(token_cap);
-        // Never run destructive full compaction in the middle of an active turn (`total_turn_steps > 0`)
-        // merely because `messages.len()` grew; only compact at turn start (`total_turn_steps == 0`) or
-        // if token usage hits the hard threshold. During turn start, shake older turns' oversized tool
-        // outputs to recoverable spill files first (Context Shaking).
-        if total_turn_steps == 0 && effective_tok >= 24_000 {
-            let active_u_idx = messages
-                .iter()
-                .rposition(|m| {
-                    m.role == "user" && !m.content.as_deref().unwrap_or("").starts_with("[SPAVN ")
-                })
-                .unwrap_or(messages.len());
-            let mut shaken_any = false;
-            for (idx, m) in messages.iter_mut().enumerate().skip(1) {
-                if idx >= active_u_idx || m.role != "tool" {
-                    continue;
-                }
-                if let Some(c) = &m.content {
-                    if c.len() > 3200
-                        && !c.contains("[SPAVN Shaken")
-                        && !c.contains("...[Compacted")
-                    {
-                        let est_tok = c.len() / 4 + 1;
-                        let head = safe_utf8_prefix(c, 900);
-                        let tail = safe_utf8_suffix(c, 500);
-                        let spill_note = spavn::spill::spill_output("shaken-turn", c)
-                            .map(|p| format!(" — recover: {}", p.display()))
-                            .unwrap_or_default();
-                        m.content = Some(format!(
-                            "{}\n...[SPAVN Shaken ~{} tokens{}]...\n{}",
-                            head, est_tok, spill_note, tail
-                        ));
-                        shaken_any = true;
-                    }
-                }
-            }
-            if shaken_any {
-                rewrite_session(session_file, messages);
-                view_messages =
-                    compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
-                view_tok = hud::estimate_messages_tokens(&view_messages);
-            }
-        }
-        let should_full_compact = if total_turn_steps == 0 {
-            (effective_tok >= compact_threshold || messages.len() > 160) && messages.len() > 6
-        } else {
-            effective_tok >= compact_threshold && messages.len() > 6
-        };
-        if should_full_compact {
-            let raw_before_tok = hud::estimate_messages_tokens(messages).max(effective_tok);
-            perform_manual_compact(&step_endpoint, messages, None);
-            rewrite_session(session_file, messages);
-            last_observed_total_tokens = 0;
-            file_read_spans.clear();
-            ctx.read_ranges.clear();
-            view_messages =
-                compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
-            view_tok = hud::estimate_messages_tokens(&view_messages);
-            if !quiet {
-                println!(
-                    "{}╰─ ⚡ {}: {} → {}{}",
-                    GREEN,
-                    tr_en(
-                        "[SPAVN Auto-Compact sonrası işlem otomatik devam ediyor]",
-                        "[SPAVN Auto-Continuing after context compaction]"
-                    ),
-                    hud::format_token_short(raw_before_tok),
-                    hud::format_token_short(view_tok),
-                    RESET
-                );
-            }
-        }
+        let (view_messages, view_tok) = prepare_context_window(
+            &step_endpoint,
+            messages,
+            session_file,
+            max_ctx_tokens,
+            total_turn_steps,
+            &mut last_observed_total_tokens,
+            &mut file_read_spans,
+            ctx,
+            quiet,
+        );
         hud::set_context_window_usage(view_tok.max(last_observed_total_tokens), max_ctx_tokens);
         let mut spinner = if quiet {
             LiveSpinner::silent()
@@ -2087,6 +2106,12 @@ mod premature_stop_tests {
             "expected stale read to be superseded: {:?}",
             compacted[3].content
         );
+
+        // Cloud models under the prune budget must NOT mutate earlier tool reads or messages[0],
+        // keeping provider prefix caches 100% byte-identical.
+        let cloud_view = super::compact_messages_for_model(&msgs, false, 1_000_000);
+        assert_eq!(cloud_view[0].content, msgs[0].content);
+        assert_eq!(cloud_view[3].content, msgs[3].content);
     }
 
     #[test]
