@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.21 (2026-11-19) — Cloud Prefix-Cache Preservation, Artifact Recall Filtering & Safe HTML Stripping
+
+### Harness, Context & Web Tool Hardening (`src/turn.rs`, `src/harness.rs`, `src/spavn_engine.rs`, `src/router/mod.rs`, `src/tools/web.rs`)
+- **Perf, cloud prefix-cache preservation (`src/turn.rs`, `src/harness.rs`)**: Stabilized system/prefix message structure across turns so cloud prompt caches (Anthropic/OpenAI/Gemini) stay warm instead of busting on per-turn volatile injections.
+- **Fix, spurious auto-compaction loop (`src/turn.rs`)**: Fixed swapped `(message_count, compact_threshold)` arguments in `should_full_compact` and refreshed `effective_tok` / `last_observed_total_tokens` after `prune_old_tool_outputs` so normal turns no longer trigger repeated full compactions.
+- **Fix, noisy artifact recall filtering (`src/spavn_engine.rs`)**: Filtered low-signal/noisy artifact recall matches so irrelevant tool outputs do not pollute the active turn context.
+- **New, Neon context limit (`src/router/mod.rs`)**: Added explicit context window metadata for Neon endpoints.
+- **Fix, UTF-8 safe HTML stripping (`src/tools/web.rs`)**: Switched `strip_html_to_clean_text` to `to_ascii_lowercase()` with char-boundary-safe slicing, preventing panics on multi-byte Unicode characters (e.g. Turkish `İ`) during HTML tag stripping.
+
 ## v0.2.20 (2026-11-16) — Universal Multi-Language & Binary-Artifact Reality Gate
 
 ### Expanded Anti-Dummy & Stub Detection Across Mobile, Web, Backend & Media (`src/tools/edit.rs`)
