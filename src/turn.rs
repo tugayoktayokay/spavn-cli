@@ -314,15 +314,19 @@ pub(crate) fn compact_messages_for_model(
                                         .map(|s| safe_utf8_prefix(s, 120).to_string())
                                 })
                                 .unwrap_or_default();
+                                let orig_arg_bytes = tc.function.arguments.len();
                                 tc.function.arguments = match tc.function.name.as_str() {
                                     "edit" => serde_json::json!({
                                         "path": path_hint,
-                                        "old_text": "/* compacted */",
-                                        "new_text": "/* compacted */"
+                                        "old_text": "[SPAVN_HISTORY_OMITTED: already applied]",
+                                        "new_text": "[SPAVN_HISTORY_OMITTED: already applied]"
                                     }),
                                     "write" => serde_json::json!({
                                         "path": path_hint,
-                                        "content": "/* compacted */"
+                                        "content": format!(
+                                            "[SPAVN_HISTORY_OMITTED: {} bytes already written to disk]",
+                                            orig_arg_bytes
+                                        )
                                     }),
                                     "bash" => serde_json::json!({
                                         "command": path_hint
@@ -1545,6 +1549,27 @@ pub(crate) fn run_agent_turn(
             .as_deref()
             .unwrap_or("")
             .trim();
+        if text_trimmed.is_empty() && empty_stop_retries < 2 {
+            empty_stop_retries += 1;
+            if !quiet {
+                println!(
+                    "\n{}⚡ [SPAVN Turn Recovery: Empty response detected ({}/2) → process continuing automatically...]{}",
+                    YELLOW, empty_stop_retries, RESET
+                );
+            }
+            let empty_nudge = if !reasoning_trimmed.is_empty() {
+                ChatMessage::user(
+                    "[SPAVN EMPTY-STOP RECOVERY]: You only emitted internal reasoning with no tool call and no visible response. Call the next required tool or provide the final answer now.",
+                )
+            } else {
+                ChatMessage::user(
+                    "[SPAVN EMPTY-STOP RECOVERY]: You returned an empty response with no tool call and no text. Call the next required tool or provide the final answer now.",
+                )
+            };
+            append_message(session_file, &empty_nudge);
+            messages.push(empty_nudge);
+            continue;
+        }
         if text_trimmed.is_empty() && !reasoning_trimmed.is_empty() {
             let recovered_from_reasoning = hud::strip_internal_tags_for_display(reasoning_trimmed);
             if !recovered_from_reasoning.is_empty() {
@@ -1571,21 +1596,6 @@ pub(crate) fn run_agent_turn(
                 }
                 break;
             }
-        }
-        if text_trimmed.is_empty() && empty_stop_retries < 2 {
-            empty_stop_retries += 1;
-            if !quiet {
-                println!(
-                    "\n{}⚡ [SPAVN Turn Recovery: Empty response detected ({}/2) → process continuing automatically...]{}",
-                    YELLOW, empty_stop_retries, RESET
-                );
-            }
-            let empty_nudge = ChatMessage::user(
-                "[SPAVN EMPTY-STOP RECOVERY]: You returned an empty response with no tool call and no text. Call the next required tool or provide the final answer now.",
-            );
-            append_message(session_file, &empty_nudge);
-            messages.push(empty_nudge);
-            continue;
         }
 
         // 3. Premature Action-Announcement Stop Recovery

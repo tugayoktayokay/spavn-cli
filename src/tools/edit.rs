@@ -1713,6 +1713,14 @@ pub(crate) fn exec_edit_single(ctx: &mut ToolContext, args: &Value) -> String {
     exec_edit_single_with_range(ctx, args, raw_path, inline_range)
 }
 
+/// Detects when a model accidentally imitates SPAVN's history-pruning sentinel
+/// (e.g. `/* compacted */` or `[SPAVN_HISTORY_OMITTED: ...]`) as literal file content.
+pub(crate) fn is_compacted_placeholder(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed == "/* compacted */"
+        || (trimmed.starts_with("[SPAVN_HISTORY_OMITTED:") && trimmed.ends_with(']'))
+}
+
 fn exec_edit_single_with_range(
     ctx: &mut ToolContext,
     args: &Value,
@@ -1731,6 +1739,12 @@ fn exec_edit_single_with_range(
         .or_else(|| args.get("replacement"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    if is_compacted_placeholder(old_text) || is_compacted_placeholder(new_text) {
+        return format!(
+            "Edit error [COMPACTED_PLACEHOLDER_REJECTED]: Refused to apply history-compaction placeholder to {}. Provide the real code snippet instead.",
+            raw_path
+        );
+    }
     let line_range = extract_hunk_line_range(args, inline_range);
     let insert_after = extract_insert_after_line(args);
     if old_text.is_empty() && line_range.is_none() && insert_after.is_none() {
@@ -1840,6 +1854,12 @@ pub(crate) fn apply_edit_hunk_in_memory(
     insert_after: Option<usize>,
     line_delta: &mut isize,
 ) -> Result<(String, String, String, String), String> {
+    if is_compacted_placeholder(old_text) || is_compacted_placeholder(new_text) {
+        return Err(format!(
+            "Edit error [COMPACTED_PLACEHOLDER_REJECTED]: Refused to apply history-compaction placeholder to {}. Provide the real code snippet instead.",
+            raw_path
+        ));
+    }
     let use_crlf = content.contains("\r\n") && !old_text.contains("\r\n");
     let line_sep = if content.contains("\r\n") {
         "\r\n"
@@ -2429,6 +2449,12 @@ pub(crate) fn exec_write(ctx: &mut ToolContext, args: &Value) -> String {
         return blocked;
     }
     let content = get_str_alias(args, &["content", "text", "body", "code"]);
+    if is_compacted_placeholder(content) {
+        return format!(
+            "Write error [COMPACTED_PLACEHOLDER_REJECTED]: Refused to write history-compaction placeholder to {}. You imitated a pruned past tool argument — send the complete, real file content instead.",
+            raw_path
+        );
+    }
 
     let leaked_secrets = crate::spavn_engine::detect_secrets_in_text(content);
     if !leaked_secrets.is_empty() && ctx.access != AccessMode::Sovereign {
@@ -2865,5 +2891,28 @@ replace example.com/auth => ./services/auth
         let new_unindented = "do_work();";
         let res3 = reindent_replacement_lines(&src, old_unindented, new_unindented);
         assert_eq!(res3, vec!["        do_work();"]); // Re-anchored to matched block base indent (8 spaces)
+    }
+
+    #[test]
+    fn rejects_compacted_placeholder_in_write_and_edit() {
+        assert!(is_compacted_placeholder("/* compacted */"));
+        assert!(is_compacted_placeholder("  /* compacted */\n"));
+        assert!(is_compacted_placeholder(
+            "[SPAVN_HISTORY_OMITTED: 4200 bytes already written to disk]"
+        ));
+        assert!(!is_compacted_placeholder("fn main() {}\n"));
+
+        let mut delta = 0isize;
+        let err = apply_edit_hunk_in_memory(
+            "fn main() {}\n",
+            "src/main.rs",
+            "fn main() {}",
+            "/* compacted */",
+            None,
+            None,
+            &mut delta,
+        )
+        .unwrap_err();
+        assert!(err.contains("COMPACTED_PLACEHOLDER_REJECTED"), "got: {}", err);
     }
 }
