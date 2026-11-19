@@ -455,7 +455,7 @@ fn prepare_context_window(
     let mut view_messages =
         compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
     let mut view_tok = hud::estimate_messages_tokens(&view_messages);
-    let effective_tok = view_tok.max(*last_observed_total_tokens);
+    let mut effective_tok = view_tok.max(*last_observed_total_tokens);
     let is_low_cost = step_endpoint.is_low_cost_tier();
     let token_cap = tier_token_cap(is_low_cost, max_ctx_tokens);
     let compact_threshold = hard_compact_threshold(max_ctx_tokens, token_cap);
@@ -469,13 +469,15 @@ fn prepare_context_window(
         view_messages =
             compact_messages_for_model(messages, step_endpoint.is_local(), max_ctx_tokens);
         view_tok = hud::estimate_messages_tokens(&view_messages);
+        *last_observed_total_tokens = (*last_observed_total_tokens).min(view_tok);
+        effective_tok = view_tok;
     }
 
     if should_full_compact(
         total_turn_steps,
         effective_tok,
-        compact_threshold,
         messages.len(),
+        compact_threshold,
     ) {
         let raw_before_tok = hud::estimate_messages_tokens(messages).max(effective_tok);
         perform_manual_compact(step_endpoint, messages, None);
