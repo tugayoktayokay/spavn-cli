@@ -11,7 +11,7 @@ pub use vision::{
     register_read_image, DraggedImage,
 };
 
-use crate::config::{byok_catalog, load_user_config, resolve_api_key};
+use crate::config::{byok_catalog, load_user_config, resolve_api_key, ModelConfigEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -453,6 +453,276 @@ pub fn fetch_remote_models(
         }
     }
     Vec::new()
+}
+
+/// True only when `base_url`'s host is strictly a loopback address (`127.0.0.1`, `localhost`, `[::1]`).
+pub(crate) fn is_loopback_base_url(base_url: &str) -> bool {
+    matches!(
+        url_host(base_url).as_str(),
+        "127.0.0.1" | "localhost" | "[::1]"
+    )
+}
+
+/// Fetches rich `ModelConfigEntry` items (`id`, `display_name`/`name`, `context_window`)
+/// from a configured `ProviderGroupConfig`'s `/v1/models` endpoint.
+pub fn fetch_remote_model_entries(
+    group: &crate::config::ProviderGroupConfig,
+    timeout_secs: u64,
+) -> Vec<ModelConfigEntry> {
+    let raw_trimmed = group.base_url.trim().trim_end_matches('/');
+    if raw_trimmed.is_empty() {
+        return Vec::new();
+    }
+    let trimmed = raw_trimmed
+        .strip_suffix("/chat/completions")
+        .or_else(|| raw_trimmed.strip_suffix("/messages"))
+        .unwrap_or(raw_trimmed)
+        .trim_end_matches('/');
+    if is_loopback_base_url(trimmed) && !local_tcp_port_reachable(trimmed, 150) {
+        return Vec::new();
+    }
+    let primary_url = if trimmed.ends_with("/models") {
+        trimmed.to_string()
+    } else {
+        format!("{}/models", trimmed)
+    };
+    let resolved_key = resolve_api_key(&group.api_key_env);
+    let clean_key = resolved_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty() && *k != "local");
+    let is_anthropic = group
+        .protocol
+        .as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case("anthropic"))
+        || trimmed.to_ascii_lowercase().contains("anthropic.com");
+    let auth_header = clean_key.map(|k| format!("Bearer {}", k));
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    if let Some(k) = clean_key {
+        if is_anthropic {
+            headers.push(("x-api-key", k));
+            headers.push(("anthropic-version", "2023-06-01"));
+        } else if let Some(ref bearer) = auth_header {
+            headers.push(("Authorization", bearer.as_str()));
+        }
+    }
+
+    let parse_entries = |body: &str| -> Vec<ModelConfigEntry> {
+        let Ok(val) = serde_json::from_str::<Value>(body) else {
+            return Vec::new();
+        };
+        let Some(arr) = val
+            .get("data")
+            .and_then(|d| d.as_array())
+            .or_else(|| val.get("models").and_then(|d| d.as_array()))
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<ModelConfigEntry> = Vec::new();
+        for item in arr {
+            let Some(raw_id) = item
+                .get("id")
+                .or_else(|| item.get("name"))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let clean_id = raw_id.trim().strip_prefix("models/").unwrap_or(raw_id.trim());
+            let low = clean_id.to_ascii_lowercase();
+            if clean_id.is_empty()
+                || low.starts_with("tab_")
+                || low.starts_with("chat_20")
+                || !is_likely_chat_model_id(clean_id)
+                || out.iter().any(|x| x.model_id.eq_ignore_ascii_case(clean_id))
+            {
+                continue;
+            }
+            let label = item
+                .get("display_name")
+                .or_else(|| item.get("name"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(clean_id)
+                .to_string();
+            let ctx = item
+                .get("context_window")
+                .or_else(|| item.get("max_input_tokens"))
+                .or_else(|| item.get("context_length"))
+                .or_else(|| item.get("limit").and_then(|l| l.get("context")))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .filter(|&n| n >= 4096)
+                .or(group.context_window);
+            let ctx_tag = ctx
+                .map(|n| {
+                    if n >= 1_000_000 {
+                        format!("{}M ctx", n / 1_000_000)
+                    } else {
+                        format!("{}K ctx", n / 1000)
+                    }
+                })
+                .unwrap_or_else(|| "auto".to_string());
+            let badge = if ctx.is_some() {
+                format!("🌐 {}", ctx_tag)
+            } else {
+                "🌐 Live".to_string()
+            };
+            out.push(ModelConfigEntry {
+                key: clean_id.to_string(),
+                model_id: clean_id.to_string(),
+                label,
+                badge,
+                desc: clean_id.to_string(),
+                context_window: ctx,
+            });
+        }
+        out
+    };
+
+    if let Ok((status, body)) = crate::http::get_text(&primary_url, &headers, timeout_secs) {
+        if (200..300).contains(&status) {
+            let parsed = parse_entries(&body);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    if !trimmed.ends_with("/v1") && !trimmed.contains("/v1/") && !trimmed.ends_with("/models") {
+        let fallback_url = format!("{}/v1/models", trimmed);
+        if let Ok((status, body)) = crate::http::get_text(&fallback_url, &headers, timeout_secs) {
+            if (200..300).contains(&status) {
+                let parsed = parse_entries(&body);
+                if !parsed.is_empty() {
+                    return parsed;
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn provider_probe_times() -> &'static Mutex<HashMap<String, std::time::Instant>> {
+    static MAP: std::sync::OnceLock<Mutex<HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Refreshes `~/.spavn/provider_models_cache.json` for providers with `"auto_discover": true`.
+/// When `force == false`, skips network completely for each provider whose TTL has not elapsed.
+pub fn refresh_auto_discover_providers(force: bool) -> usize {
+    refresh_auto_discover_providers_inner(force, false)
+}
+
+/// Refreshes only loopback (`127.0.0.1`/`localhost`/`[::1]`) `auto_discover` providers
+/// so interactive UI pickers stay instant without blocking on remote HTTP timeouts.
+pub fn refresh_auto_discover_providers_loopback_only() -> usize {
+    refresh_auto_discover_providers_inner(false, true)
+}
+
+fn refresh_auto_discover_providers_inner(force: bool, loopback_only: bool) -> usize {
+    let cfg = load_user_config();
+    let targets: Vec<_> = cfg
+        .providers
+        .iter()
+        .filter(|p| {
+            p.auto_discover
+                && !p.base_url.trim().is_empty()
+                && (!loopback_only || is_loopback_base_url(&p.base_url))
+        })
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return 0;
+    }
+    let cache_path = crate::config::provider_models_cache_path();
+    let cache_age = std::fs::metadata(&cache_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok());
+    let existing_cache = crate::config::load_auto_discovered_provider_entries();
+    let mut merged = existing_cache.clone();
+    let mut updated_models = 0usize;
+    let mut changed = false;
+    let mut probed_any = false;
+    for group in &targets {
+        let is_loopback = is_loopback_base_url(&group.base_url);
+        let gid = group.id.to_ascii_lowercase();
+        let ttl = std::time::Duration::from_secs(if is_loopback { 5 } else { 3600 });
+        if !force && existing_cache.contains_key(&gid) {
+            let mem_age = provider_probe_times()
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&gid).map(|t| t.elapsed()));
+            let effective_age = mem_age.or(cache_age);
+            if effective_age.is_some_and(|age| age < ttl) {
+                continue;
+            }
+        }
+        probed_any = true;
+        if let Ok(mut map) = provider_probe_times().lock() {
+            map.insert(gid.clone(), std::time::Instant::now());
+        }
+        let entries = fetch_remote_model_entries(group, if is_loopback { 2 } else { 4 });
+        if !entries.is_empty() {
+            updated_models += entries.len();
+            let same = merged.get(&gid).is_some_and(|prev| {
+                prev.len() == entries.len()
+                    && prev.iter().zip(&entries).all(|(a, b)| {
+                        a.model_id == b.model_id
+                            && a.label == b.label
+                            && a.badge == b.badge
+                            && a.desc == b.desc
+                            && a.context_window == b.context_window
+                    })
+            });
+            if !same || force {
+                merged.insert(gid, entries);
+                changed = true;
+            }
+        }
+    }
+    if changed || (probed_any && !merged.is_empty()) {
+        crate::config::save_auto_discovered_provider_entries(&merged);
+    }
+    updated_models
+}
+
+/// Zero-latency background discovery: returns immediately without spawning a thread
+/// if no provider uses `auto_discover` or if `provider_models_cache.json` is < 1h old.
+pub fn spawn_background_provider_discovery() {
+    if std::env::var("SPAVN_UPDATE_CHECK")
+        .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off"))
+    {
+        return;
+    }
+    let cfg = load_user_config();
+    let targets: Vec<String> = cfg
+        .providers
+        .iter()
+        .filter(|p| p.auto_discover && !p.base_url.trim().is_empty())
+        .map(|p| p.id.to_ascii_lowercase())
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let cache_path = crate::config::provider_models_cache_path();
+    let fresh = std::fs::metadata(&cache_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(3600));
+    if fresh {
+        let existing = crate::config::load_auto_discovered_provider_entries();
+        if targets.iter().all(|id| existing.contains_key(id)) {
+            return;
+        }
+    }
+    let _ = std::thread::Builder::new()
+        .name("spavn-model-discover".to_string())
+        .spawn(|| {
+            let _ = refresh_auto_discover_providers(false);
+        });
 }
 
 /// Fetches `https://models.dev/api.json` (like OMP's `mapModelsDevToModels`) and caches
@@ -982,10 +1252,11 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
         }
     }
 
-    // 2. Check user-configured providers in ~/.spavn/config.json
+    // 2. Check user-configured providers in ~/.spavn/config.json (plus cached auto_discover models)
+    let user_providers = crate::config::effective_providers(&cfg);
     // If `provider_id:model_key` is explicitly passed, resolve inside that exact provider first.
     if let Some((prov_prefix, custom_model)) = clean.split_once(':') {
-        for group in &cfg.providers {
+        for group in &user_providers {
             if group.id.eq_ignore_ascii_case(prov_prefix) {
                 let group_has_pool =
                     !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
@@ -1021,7 +1292,7 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
         }
     }
     for match_by_key_only in [true, false] {
-        for group in &cfg.providers {
+        for group in &user_providers {
             let group_has_pool =
                 !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
             for m in &group.models {
@@ -1119,7 +1390,7 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
         }
     }
     if let Some((_, rhs)) = clean.split_once(':') {
-        for group in &cfg.providers {
+        for group in &user_providers {
             let group_has_pool =
                 !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
             for m in &group.models {
@@ -1162,8 +1433,62 @@ pub fn resolve_endpoint(key: &str) -> ModelEndpoint {
         }
     }
 
+    // 4b. Lazy one-time auto-discovery if an unknown model is requested before cache exists
+    if cfg.providers.iter().any(|p| p.auto_discover) && refresh_auto_discover_providers(false) > 0 {
+        let refreshed = crate::config::effective_providers(&cfg);
+        if let Some((prov_prefix, custom_model)) = clean.split_once(':') {
+            for group in &refreshed {
+                if group.id.eq_ignore_ascii_case(prov_prefix) {
+                    let group_has_pool =
+                        !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
+                    for m in &group.models {
+                        if m.key.eq_ignore_ascii_case(clean)
+                            || m.key.eq_ignore_ascii_case(custom_model)
+                            || m.model_id.eq_ignore_ascii_case(custom_model)
+                        {
+                            let api_key = resolve_api_key(&group.api_key_env)
+                                .unwrap_or_else(|| "local".to_string());
+                            return ModelEndpoint {
+                                key: m.key.clone(),
+                                model: m.model_id.clone(),
+                                base_url: group.base_url.clone(),
+                                api_key,
+                                label: m.label.clone(),
+                                is_local_flag: group.is_local,
+                                has_quota_pool: group_has_pool,
+                                configured_context_window: m
+                                    .context_window
+                                    .or(group.context_window),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        for group in &refreshed {
+            let group_has_pool =
+                !group.is_local && group.api_key_env.is_empty() && has_user_quota_script;
+            for m in &group.models {
+                if m.key.eq_ignore_ascii_case(clean) || m.model_id.eq_ignore_ascii_case(clean) {
+                    let api_key =
+                        resolve_api_key(&group.api_key_env).unwrap_or_else(|| "local".to_string());
+                    return ModelEndpoint {
+                        key: m.key.clone(),
+                        model: m.model_id.clone(),
+                        base_url: group.base_url.clone(),
+                        api_key,
+                        label: m.label.clone(),
+                        is_local_flag: group.is_local,
+                        has_quota_pool: group_has_pool,
+                        configured_context_window: m.context_window.or(group.context_window),
+                    };
+                }
+            }
+        }
+    }
+
     // 5. Fallback to first configured provider or environment base URL
-    let fallback_group = cfg.providers.first();
+    let fallback_group = user_providers.first();
     let fallback_base = fallback_group
         .map(|p| p.base_url.clone())
         .or_else(|| std::env::var("SPAVN_BASE_URL").ok())
@@ -1269,5 +1594,15 @@ mod tests {
         let show_params = "temperature 0.2\nnum_ctx 8192\nstop <|endoftext|>\n";
         assert_eq!(parse_ollama_num_ctx(show_params), Some(8_192));
         assert_eq!(parse_ollama_num_ctx("temperature 0.2\n"), None);
+    }
+
+    #[test]
+    fn is_loopback_base_url_rejects_substring_spoofs() {
+        assert!(is_loopback_base_url("http://127.0.0.1:8080/v1"));
+        assert!(is_loopback_base_url("https://localhost:3000/v1"));
+        assert!(is_loopback_base_url("http://[::1]:11434/v1"));
+        assert!(!is_loopback_base_url("https://localhost.example.com/v1"));
+        assert!(!is_loopback_base_url("http://127.0.0.10:8080/v1"));
+        assert!(!is_loopback_base_url("https://api.openai.com/v1"));
     }
 }

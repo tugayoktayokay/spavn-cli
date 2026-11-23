@@ -110,6 +110,10 @@ pub struct ModelConfigEntry {
     pub context_window: Option<usize>,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProviderGroupConfig {
     pub id: String,
@@ -119,6 +123,14 @@ pub struct ProviderGroupConfig {
     pub api_key_env: String,
     #[serde(default)]
     pub is_local: bool,
+    /// Automatically discover and cache live `/v1/models` from `base_url`
+    /// into `~/.spavn/provider_models_cache.json` (stale-while-revalidate, 0ms startup).
+    #[serde(default, alias = "autoDiscover", skip_serializing_if = "is_false")]
+    pub auto_discover: bool,
+    /// Optional `|`-separated case-insensitive filter tokens for `auto_discover`
+    /// when multiple UI groups share one gateway `base_url` (e.g. `"gemini"` vs `"claude|gpt"`).
+    #[serde(default, alias = "discoverFilter", skip_serializing_if = "Option::is_none")]
+    pub discover_filter: Option<String>,
     /// Wire protocol for this provider. `"anthropic"` selects the native
     /// Anthropic Messages API for custom proxies that are not on anthropic.com.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +293,112 @@ mod catalog_tests {
             by_key("fable").map(|m| m.model_id.as_str()),
             Some("claude-fable-5-1")
         );
+    }
+
+    #[test]
+    fn auto_discover_merges_new_models_and_namespaces_cross_provider_collisions() {
+        let mut groups = vec![
+            ProviderGroupConfig {
+                id: "prov-a".to_string(),
+                title: "A".to_string(),
+                base_url: "http://127.0.0.1:9001/v1".to_string(),
+                api_key_env: String::new(),
+                is_local: false,
+                auto_discover: true,
+                discover_filter: None,
+                protocol: None,
+                context_window: Some(1_048_576),
+                models: vec![ModelConfigEntry {
+                    key: "argon".to_string(),
+                    model_id: "gemini-4-argon-medium".to_string(),
+                    label: "Argon".to_string(),
+                    badge: "🧠".to_string(),
+                    desc: "Pinned".to_string(),
+                    context_window: Some(1_048_576),
+                }],
+            },
+            ProviderGroupConfig {
+                id: "prov-b".to_string(),
+                title: "B".to_string(),
+                base_url: "http://127.0.0.1:9002/v1".to_string(),
+                api_key_env: String::new(),
+                is_local: false,
+                auto_discover: true,
+                discover_filter: None,
+                protocol: None,
+                context_window: Some(1_000_000),
+                models: Vec::new(),
+            },
+        ];
+        let mut discovered = HashMap::new();
+        discovered.insert(
+            "prov-a".to_string(),
+            vec![
+                ModelConfigEntry {
+                    key: "gemini-4-argon-medium".to_string(),
+                    model_id: "gemini-4-argon-medium".to_string(),
+                    label: "Duplicate".to_string(),
+                    badge: "🌐 Auto".to_string(),
+                    desc: "Dup".to_string(),
+                    context_window: Some(1_048_576),
+                },
+                ModelConfigEntry {
+                    key: "gemini-4-hydrogen-sonar".to_string(),
+                    model_id: "gemini-4-hydrogen-sonar".to_string(),
+                    label: "Sonar".to_string(),
+                    badge: "🌐 Auto".to_string(),
+                    desc: "New".to_string(),
+                    context_window: None,
+                },
+            ],
+        );
+        discovered.insert(
+            "prov-b".to_string(),
+            vec![ModelConfigEntry {
+                key: "gemini-4-hydrogen-sonar".to_string(),
+                model_id: "gemini-4-hydrogen-sonar".to_string(),
+                label: "Sonar B".to_string(),
+                badge: "🌐 Auto".to_string(),
+                desc: "Colliding ID".to_string(),
+                context_window: Some(500_000),
+            }],
+        );
+
+        merge_discovered_into_providers(&mut groups, &discovered);
+        // Live discovery replaces stale static entries for auto_discover providers,
+        // while preserving any custom user-defined short alias (`key`) for the same `model_id`.
+        assert_eq!(groups[0].models.len(), 2);
+        assert_eq!(groups[0].models[0].key, "argon");
+        assert_eq!(groups[0].models[0].label, "Duplicate");
+        assert_eq!(groups[0].models[1].key, "gemini-4-hydrogen-sonar");
+        assert_eq!(groups[0].models[1].context_window, Some(1_048_576));
+        assert_eq!(groups[1].models.len(), 1);
+        assert_eq!(groups[1].models[0].key, "prov-b:gemini-4-hydrogen-sonar");
+        assert_eq!(groups[1].models[0].context_window, Some(500_000));
+
+        // When live cache is empty for an auto_discover provider, static fallback is preserved
+        let mut offline_groups = vec![ProviderGroupConfig {
+            id: "offline-prov".to_string(),
+            title: "Offline".to_string(),
+            base_url: "http://127.0.0.1:9999/v1".to_string(),
+            api_key_env: String::new(),
+            is_local: false,
+            auto_discover: true,
+            discover_filter: None,
+            protocol: None,
+            context_window: Some(131_072),
+            models: vec![ModelConfigEntry {
+                key: "fallback-model".to_string(),
+                model_id: "fallback-model".to_string(),
+                label: "Fallback Model".to_string(),
+                badge: "⚡".to_string(),
+                desc: "Offline fallback".to_string(),
+                context_window: Some(131_072),
+            }],
+        }];
+        merge_discovered_into_providers(&mut offline_groups, &discovered);
+        assert_eq!(offline_groups[0].models.len(), 1);
+        assert_eq!(offline_groups[0].models[0].key, "fallback-model");
     }
 
     #[test]
@@ -668,6 +786,157 @@ pub fn models_dev_cache_path() -> PathBuf {
     spavn_dir().join("models_dev_cache.json")
 }
 
+pub fn provider_models_cache_path() -> PathBuf {
+    spavn_dir().join("provider_models_cache.json")
+}
+
+type AutoDiscoveredStamp = Option<(std::time::SystemTime, u64)>;
+type AutoDiscoveredCacheMap = HashMap<String, Vec<ModelConfigEntry>>;
+type AutoDiscoveredCacheState = Option<(AutoDiscoveredStamp, AutoDiscoveredCacheMap)>;
+static AUTO_DISCOVERED_CACHE: Mutex<AutoDiscoveredCacheState> = Mutex::new(None);
+
+pub fn load_auto_discovered_provider_entries() -> AutoDiscoveredCacheMap {
+    let path = provider_models_cache_path();
+    let stamp = file_stamp(&path);
+    if let Ok(guard) = AUTO_DISCOVERED_CACHE.lock() {
+        if let Some((cached_stamp, map)) = guard.as_ref() {
+            if *cached_stamp == stamp {
+                return map.clone();
+            }
+        }
+    }
+    let parsed = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<HashMap<String, Vec<ModelConfigEntry>>>(&raw).ok())
+        .unwrap_or_default();
+    if let Ok(mut guard) = AUTO_DISCOVERED_CACHE.lock() {
+        *guard = Some((stamp, parsed.clone()));
+    }
+    parsed
+}
+
+pub fn save_auto_discovered_provider_entries(
+    cache: &HashMap<String, Vec<ModelConfigEntry>>,
+) {
+    if cache.is_empty() {
+        return;
+    }
+    let path = provider_models_cache_path();
+    if let Ok(json_str) = serde_json::to_string_pretty(cache) {
+        let _ = write_atomic(&path, &format!("{}\n", json_str));
+        if let Ok(mut guard) = AUTO_DISCOVERED_CACHE.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// Returns `cfg.providers` enriched in-memory with cached `/v1/models` entries
+/// for any provider that sets `"auto_discover": true` in `~/.spavn/config.json`.
+/// Never mutates `config.json` on disk and preserves all user-defined aliases first.
+pub fn effective_providers(cfg: &SpavnUserConfig) -> Vec<ProviderGroupConfig> {
+    let mut groups = cfg.providers.clone();
+    if !groups.iter().any(|g| g.auto_discover) {
+        return groups;
+    }
+    let discovered = load_auto_discovered_provider_entries();
+    if discovered.is_empty() {
+        return groups;
+    }
+    merge_discovered_into_providers(&mut groups, &discovered);
+    groups
+}
+
+pub(crate) fn merge_discovered_into_providers(
+    groups: &mut [ProviderGroupConfig],
+    discovered: &HashMap<String, Vec<ModelConfigEntry>>,
+) {
+    let mut used_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Pre-reserve keys of non-auto_discover providers (and auto_discover providers
+    // whose live cache is currently empty so their static fallback remains intact).
+    for g in groups.iter() {
+        let gid = g.id.to_ascii_lowercase();
+        let has_live = g.auto_discover
+            && discovered
+                .get(&gid)
+                .is_some_and(|entries| !entries.is_empty());
+        if !has_live {
+            for m in &g.models {
+                used_keys.insert(m.key.to_ascii_lowercase());
+                used_keys.insert(m.model_id.to_ascii_lowercase());
+            }
+        }
+    }
+
+    for group in groups.iter_mut() {
+        if !group.auto_discover {
+            continue;
+        }
+        let gid = group.id.to_ascii_lowercase();
+        let Some(entries) = discovered.get(&gid) else {
+            continue;
+        };
+        if entries.is_empty() {
+            continue;
+        }
+        let filter_tokens: Vec<String> = group
+            .discover_filter
+            .as_deref()
+            .map(|f| {
+                f.split('|')
+                    .map(|t| t.trim().to_ascii_lowercase())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let pinned_keys: HashMap<String, String> = group
+            .models
+            .iter()
+            .filter(|m| !m.key.trim().is_empty())
+            .map(|m| (m.model_id.to_ascii_lowercase(), m.key.clone()))
+            .collect();
+
+        let mut live_models: Vec<ModelConfigEntry> = Vec::new();
+        for entry in entries {
+            let id_low = entry.model_id.to_ascii_lowercase();
+            if !filter_tokens.is_empty() && !filter_tokens.iter().any(|tok| id_low.contains(tok)) {
+                continue;
+            }
+            if live_models
+                .iter()
+                .any(|m| m.model_id.eq_ignore_ascii_case(&entry.model_id))
+            {
+                continue;
+            }
+            let preferred_key = pinned_keys
+                .get(&id_low)
+                .cloned()
+                .unwrap_or_else(|| entry.model_id.clone());
+            let preferred_low = preferred_key.to_ascii_lowercase();
+            let chosen_key = if used_keys.contains(&preferred_low) {
+                format!("{}:{}", group.id, entry.model_id)
+            } else {
+                preferred_key
+            };
+            used_keys.insert(chosen_key.to_ascii_lowercase());
+            used_keys.insert(id_low);
+            let mut merged = entry.clone();
+            merged.key = chosen_key;
+            if merged.context_window.is_none() {
+                merged.context_window = group.context_window;
+            }
+            live_models.push(merged);
+        }
+
+        // Live `/v1/models` is the single source of truth when available;
+        // static `group.models` stays intact only as an offline fallback.
+        if !live_models.is_empty() {
+            group.models = live_models;
+        }
+    }
+}
+
 pub fn load_discovered_provider_models() -> HashMap<String, Vec<String>> {
     let path = models_cache_path();
     let Ok(raw) = fs::read_to_string(&path) else {
@@ -905,6 +1174,8 @@ pub fn load_external_models_yml_providers_opts(include_omp: bool) -> Vec<Provide
                     base_url: String::new(),
                     api_key_env: String::new(),
                     is_local: false,
+                    auto_discover: false,
+                    discover_filter: None,
                     protocol: Some("openai".to_string()),
                     context_window: None,
                     models: Vec::new(),

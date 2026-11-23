@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.23 (2026-11-23) — Live Provider Auto-Discovery & Multi-Token Model Picker
+
+### Provider Discovery & Picker UX (`src/config.rs`, `src/router/mod.rs`, `src/hud/menus.rs`, `src/hud/pickers.rs`, `src/main.rs`)
+- **New, zero-latency provider `/v1/models` auto-discovery (`src/config.rs`, `src/router/mod.rs`, `src/main.rs`)**: Providers with `"auto_discover": true` (and optional `"discover_filter": "gemini|claude"`) automatically discover live models, display names, and context windows into `~/.spavn/provider_models_cache.json` using stale-while-revalidate background refresh (0ms startup), preserving user-defined short aliases (`key`) and namespacing cross-provider collisions.
+- **New, non-blocking model picker with multi-token search (`src/hud/menus.rs`, `src/hud/pickers.rs`)**: Added multi-token filtering across display name, key, badge, and description in `/model`; refreshes loopback providers immediately while keeping remote provider discovery non-blocking in the background.
+- **Fix, per-provider probe TTL & prefix resolution (`src/router/mod.rs`)**: Tracked probe timestamps per provider to prevent loopback refreshes from extending remote provider TTLs or rewriting unchanged cache files, used strict `url_host` loopback detection, and supported `provider:model` prefix matching during lazy auto-discovery fallback.
+
 ## v0.2.21 (2026-11-19) — Cloud Prefix-Cache Preservation, Artifact Recall Filtering & Safe HTML Stripping
 
 ### Harness, Context & Web Tool Hardening (`src/turn.rs`, `src/harness.rs`, `src/spavn_engine.rs`, `src/router/mod.rs`, `src/tools/web.rs`)

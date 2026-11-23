@@ -523,6 +523,7 @@ fn main() {
     // anything this run discovers arrives later through the input loop instead.
     let known_update = spavn::update::cached_notice();
     spavn::update::spawn_background_check();
+    spavn::router::spawn_background_provider_discovery();
     render_welcome_header(
         &endpoint,
         ctx.access,

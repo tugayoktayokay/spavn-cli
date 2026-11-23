@@ -536,10 +536,11 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
 
     if chosen == "sync-catalog" {
         let mut spin = LiveSpinner::start(tr_en(
-            "models.dev kayıt defterinden güncel modeller senkronize ediliyor",
-            "Syncing latest models from models.dev registry",
+            "models.dev ve aktif sağlayıcılardan güncel modeller senkronize ediliyor",
+            "Syncing latest models from models.dev & active providers",
         ));
-        let count = crate::router::sync_models_dev_catalog();
+        let auto_count = crate::router::refresh_auto_discover_providers(true);
+        let count = crate::router::sync_models_dev_catalog() + auto_count;
         spin.stop();
         if count > 0 {
             println!(
@@ -930,6 +931,8 @@ pub fn interactive_provider_login(preselected_provider: Option<&str>) -> Option<
                 String::new()
             },
             is_local: api_key_opt.is_none(),
+            auto_discover: !is_anthropic_proto,
+            discover_filter: None,
             protocol: if is_anthropic_proto {
                 Some("anthropic".to_string())
             } else {

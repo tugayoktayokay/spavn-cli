@@ -64,15 +64,17 @@ pub fn filter_menu_rows(items: &[MenuItem], query: &str) -> Vec<usize> {
 }
 
 /// Row indices of providers whose title matches the query (used by the model picker).
-pub fn filter_provider_rows(providers: &[(String, Vec<MenuItem>)], query: &str) -> Vec<usize> {
+pub fn filter_provider_rows<T>(providers: &[(String, Vec<T>)], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..providers.len()).collect();
+    }
+    let q_low = query.to_lowercase();
     providers
         .iter()
         .enumerate()
         .filter(|(_, (title, _))| {
-            query.is_empty()
-                || strip_ansi(title)
-                    .to_lowercase()
-                    .contains(&query.to_lowercase())
+            let clean = strip_ansi(title).to_lowercase();
+            q_low.split_whitespace().all(|tok| clean.contains(tok))
         })
         .map(|(i, _)| i)
         .collect()
@@ -685,23 +687,68 @@ pub fn interactive_select_slash_command() -> Option<String> {
     )
 }
 
+struct ModelPickerItem {
+    key: String,
+    display: String,
+    badge: String,
+    desc: String,
+}
+
+fn filter_model_picker_rows(items: &[ModelPickerItem], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..items.len()).collect();
+    }
+    let q_low = query.to_lowercase();
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            let haystack = format!(
+                "{} {} {} {}",
+                item.display,
+                item.key,
+                strip_ansi(&item.badge),
+                strip_ansi(&item.desc)
+            )
+            .to_lowercase();
+            q_low.split_whitespace().all(|tok| haystack.contains(tok))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Dual-Column Master-Detail Model Picker (`←`/`→` Provider, `↑`/`↓` Model, `Enter` Select, `Esc` Cancel).
 /// Combines user-configured providers (`~/.spavn/config.json`), dynamically discovered local models,
 /// and the built-in 10-Provider BYOK Catalog!
 pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<String> {
     let cfg = load_user_config();
-    let mut providers: Vec<(String, Vec<MenuItem>)> = Vec::new();
+    let mut providers: Vec<(String, Vec<ModelPickerItem>)> = Vec::new();
     let mut prov_ids: Vec<Option<String>> = Vec::new();
 
-    // 1. User-configured provider groups from ~/.spavn/config.json
-    for group in &cfg.providers {
-        let items: Vec<MenuItem> = group
+    // 1. User-configured provider groups from ~/.spavn/config.json (enriched with auto_discover cache)
+    if cfg.providers.iter().any(|p| p.auto_discover) {
+        let _ = crate::router::refresh_auto_discover_providers_loopback_only();
+        crate::router::spawn_background_provider_discovery();
+    }
+    let user_providers = crate::config::effective_providers(&cfg);
+    for group in &user_providers {
+        let items: Vec<ModelPickerItem> = group
             .models
             .iter()
-            .map(|m| MenuItem {
-                key: m.key.clone(),
-                badge: m.badge.clone(),
-                desc: m.desc.clone(),
+            .map(|m| {
+                let display = if !m.label.trim().is_empty() {
+                    m.label.clone()
+                } else if !m.model_id.trim().is_empty() {
+                    m.model_id.clone()
+                } else {
+                    m.key.clone()
+                };
+                ModelPickerItem {
+                    key: m.key.clone(),
+                    display,
+                    badge: m.badge.clone(),
+                    desc: m.desc.clone(),
+                }
             })
             .collect();
         if !items.is_empty() {
@@ -730,7 +777,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 c.local_discovery_url = Some(disc_url);
             });
         }
-        let mut local_models: Vec<MenuItem> = Vec::new();
+        let mut local_models: Vec<ModelPickerItem> = Vec::new();
         for m in discovered {
             let badge = if m.loaded {
                 format!(
@@ -749,8 +796,9 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 )
             };
             let ctx_label = format_token_short(m.context_window.unwrap_or(131_072));
-            local_models.push(MenuItem {
+            local_models.push(ModelPickerItem {
                 key: format!("local:{}", m.id),
+                display: m.id.clone(),
                 badge,
                 desc: format!(
                     "{} · {} · {} ctx",
@@ -796,17 +844,27 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 RESET
             )
         };
-        let items: Vec<MenuItem> = byok_group
+        let items: Vec<ModelPickerItem> = byok_group
             .models
             .iter()
-            .map(|m| MenuItem {
-                key: if m.key.contains(':') {
-                    m.key.clone()
+            .map(|m| {
+                let display = if !m.label.trim().is_empty() {
+                    m.label.clone()
+                } else if !m.model_id.trim().is_empty() {
+                    m.model_id.clone()
                 } else {
-                    format!("{}:{}", byok_group.id, m.key)
-                },
-                badge: format!("{} · {}", m.badge, key_status),
-                desc: m.desc.clone(),
+                    m.key.clone()
+                };
+                ModelPickerItem {
+                    key: if m.key.contains(':') {
+                        m.key.clone()
+                    } else {
+                        format!("{}:{}", byok_group.id, m.key)
+                    },
+                    display,
+                    badge: format!("{} · {}", m.badge, key_status),
+                    desc: m.desc.clone(),
+                }
             })
             .collect();
         providers.push((format!("{} ({})", byok_group.title, items.len()), items));
@@ -889,7 +947,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 prov_idx = vis_provs[0];
             }
             let cur_models = &providers[prov_idx].1;
-            let vis_models = filter_menu_rows(cur_models, &model_query);
+            let vis_models = filter_model_picker_rows(cur_models, &model_query);
             if !vis_models.is_empty() && !vis_models.contains(&model_indices[prov_idx]) {
                 model_indices[prov_idx] = vis_models[0];
             }
@@ -1006,10 +1064,10 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                 let m_idx = vis_models.get(m_win_start + r).copied();
                 let right_cell = if let Some(m_idx) = m_idx {
                     let m = &cur_models[m_idx];
-                    let (trunc_k, used_k) = truncate_ansi_to_width(&m.key, 24);
-                    let pad_k = " ".repeat(24usize.saturating_sub(used_k));
-                    let (trunc_b, used_b) = truncate_ansi_to_width(&m.badge, 22);
-                    let pad_b = " ".repeat(22usize.saturating_sub(used_b));
+                    let (trunc_k, used_k) = truncate_ansi_to_width(&m.display, 30);
+                    let pad_k = " ".repeat(30usize.saturating_sub(used_k));
+                    let (trunc_b, used_b) = truncate_ansi_to_width(&m.badge, 18);
+                    let pad_b = " ".repeat(18usize.saturating_sub(used_b));
                     if m_idx == cur_m_idx {
                         if focus_right {
                             format!(
@@ -1128,7 +1186,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                             };
                         }
                     } else {
-                        let vis = filter_menu_rows(&providers[prov_idx].1, &model_query);
+                        let vis = filter_model_picker_rows(&providers[prov_idx].1, &model_query);
                         if !vis.is_empty() {
                             let cur = model_indices[prov_idx];
                             let pos = vis.iter().position(|&i| i == cur).unwrap_or(0);
@@ -1157,7 +1215,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
                     focus_right = true;
                 } else {
                     let cur_models = &providers[prov_idx].1;
-                    let vis = filter_menu_rows(cur_models, &model_query);
+                    let vis = filter_model_picker_rows(cur_models, &model_query);
                     let chosen = if vis.is_empty() {
                         None
                     } else {
@@ -1223,8 +1281,7 @@ pub fn interactive_select_model(current_key: &str, local_first: bool) -> Option<
 
     if result.is_some() {
         if let Some(Some(pid)) = prov_ids.get(prov_idx) {
-            let group_opt = cfg
-                .providers
+            let group_opt = user_providers
                 .iter()
                 .find(|g| g.id.eq_ignore_ascii_case(pid))
                 .cloned()
