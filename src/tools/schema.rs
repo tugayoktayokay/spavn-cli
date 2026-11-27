@@ -17,7 +17,7 @@ pub fn tool_definitions() -> Value {
         "Real Language Server Protocol client (`op=definition|references|hover|symbols|diagnostics|implementation|type_definition|workspace_symbol`) for Rust (rust-analyzer), TS/JS (typescript-language-server), Python (pyright), Go (gopls), C/C++ (clangd), with ripgrep heuristic fallback; also generic MCP client (`op='mcp'`). {}",
         mcp_hint
     );
-    json!([
+    let mut val = json!([
         {
             "type": "function",
             "function": {
@@ -270,8 +270,55 @@ pub fn tool_definitions() -> Value {
                     "required": ["op"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ast_grep",
+                "description": "Structural AST code search and codemod rewrite powered by `sg` (ast-grep). Prefer over regex for syntax-aware multi-file refactors. Omit `rewrite` (or set `apply=false`) for read-only search/preview.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "AST pattern with metavariables, e.g. `foo($A, $B)`" },
+                        "rewrite": { "type": "string", "description": "Optional replacement template, e.g. `bar($B, $A)`" },
+                        "lang": { "type": "string", "description": "Optional language (rust, ts, tsx, js, python, go, cpp)" },
+                        "path": { "type": "string", "description": "Target file or directory (default `.`)" },
+                        "apply": { "type": "boolean", "description": "Apply rewrite in place when `rewrite` is set (default true; false = dry-run preview)" }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ask",
+                "description": "Ask the user a concise clarifying question with optional choices when a materially important tradeoff cannot be resolved from the repo. In non-interactive/headless mode, automatically returns `default`.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "Short, direct question for the user" },
+                        "options": { "type": "array", "items": { "type": "string" }, "description": "2-5 concrete choices" },
+                        "default": { "type": "string", "description": "Recommended default used if the user presses Enter or in headless mode" }
+                    },
+                    "required": ["question"]
+                }
+            }
         }
-    ])
+    ]);
+    if let Some(arr) = val.as_array_mut() {
+        for mcp in discover_configured_mcp_tools() {
+            arr.push(json!({
+                "type": "function",
+                "function": {
+                    "name": mcp.qualified_name,
+                    "description": mcp.description,
+                    "parameters": mcp.input_schema
+                }
+            }));
+        }
+    }
+    val
 }
 
 pub fn tool_definitions_for_phase(phase: crate::spavn_engine::AgentPhase) -> Value {
@@ -321,6 +368,11 @@ pub fn tool_definitions_for_turn(
         || lower.contains("hover")
         || lower.contains("symbols")
         || lower.contains("symbol");
+    let want_ast = lower.contains("ast")
+        || lower.contains("codemod")
+        || lower.contains("refactor")
+        || lower.contains("ast-grep")
+        || lower.contains("ast_grep");
     if let Value::Array(items) = base {
         let filtered: Vec<Value> = items
             .into_iter()
@@ -337,6 +389,9 @@ pub fn tool_definitions_for_turn(
                     "skill" => want_skill,
                     "subagent" => want_subagent,
                     "lsp" => want_lsp,
+                    "ast_grep" => want_ast,
+                    "ask" => false,
+                    other if other.starts_with("mcp__") => want_lsp,
                     _ => true,
                 };
                 if !keep {
@@ -387,7 +442,16 @@ pub(crate) fn build_tool_definitions_for_phase(phase: crate::spavn_engine::Agent
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                !matches!(name, "edit" | "write" | "bash")
+                if matches!(name, "edit" | "write" | "bash") {
+                    return false;
+                }
+                if let Some(mcp) = discover_configured_mcp_tools()
+                    .iter()
+                    .find(|t| t.qualified_name == name)
+                {
+                    return !mcp.mutating;
+                }
+                true
             })
             .collect();
         Value::Array(filtered)

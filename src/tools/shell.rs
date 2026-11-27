@@ -610,8 +610,16 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
         c.args(["-o", "ConnectTimeout=8", &ssh_target, &remote_cmd]);
         c
     } else if let Some(interp) = script_interp {
-        let mut c = Command::new(interp);
-        c.arg("-");
+        let mut c = if ctx.sandbox {
+            match sandboxed_command(&ctx.policy.cwd, interp, &["-"]) {
+                Ok(c) => c,
+                Err(e) => return e,
+            }
+        } else {
+            let mut c = Command::new(interp);
+            c.arg("-");
+            c
+        };
         let home = home_dir();
         let extra_dirs = [
             home.join(".cargo/bin"),
@@ -638,6 +646,9 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
         } else if ctx.policy.cwd.is_dir() {
             c.current_dir(&ctx.policy.cwd);
         }
+        if ctx.sandbox {
+            apply_sandbox_env(&mut c);
+        }
         c
     } else {
         let shell_bin = crate::config::shell_bin();
@@ -655,15 +666,18 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
         } else {
             command.to_string()
         };
-        let mut c = if cfg!(target_os = "macos")
+        let mut c = if ctx.sandbox && is_posix_shell {
+            match sandboxed_command(&ctx.policy.cwd, &shell_bin, &["-c", &wrapped_cmd]) {
+                Ok(c) => c,
+                Err(e) => return e,
+            }
+        } else if ctx.sandbox {
+            return "BLOCKED by --sandbox: only POSIX shells can be sandboxed; set SPAVN_SHELL to bash/zsh/sh.".to_string();
+        } else if cfg!(target_os = "macos")
             && ctx.access == AccessMode::Safe
             && Path::new("/usr/bin/sandbox-exec").exists()
         {
-            let ws = ctx.policy.cwd.to_string_lossy().replace('"', "\\\"");
-            let profile = format!(
-                "(version 1)(allow default)(deny file-write* (subpath \"/\"))(allow file-write* (subpath \"{}\") (subpath \"/tmp\") (subpath \"/private/tmp\") (subpath \"/var/folders\") (subpath \"/private/var/folders\") (literal \"/dev/null\"))",
-                ws
-            );
+            let profile = build_macos_sandbox_profile(&ctx.policy.cwd, false);
             let mut sb = Command::new("/usr/bin/sandbox-exec");
             sb.args(["-p", &profile, &shell_bin, "-c", &wrapped_cmd]);
             sb
@@ -709,6 +723,9 @@ pub(crate) fn exec_bash(ctx: &mut ToolContext, args: &Value) -> String {
             c.current_dir(&effective_local_cwd);
         } else if ctx.policy.cwd.is_dir() {
             c.current_dir(&ctx.policy.cwd);
+        }
+        if ctx.sandbox {
+            apply_sandbox_env(&mut c);
         }
         c
     };
@@ -1402,3 +1419,101 @@ fn collapse_binary_noise_lines(text: &str) -> String {
     }
     out
 }
+
+/// Secret environment variables stripped from sandboxed child shell/script processes
+/// so provider credentials stay strictly on the host.
+pub(crate) const SANDBOX_SCRUBBED_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY",
+    "XAI_API_KEY",
+    "SPAVN_API_KEY",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+];
+
+pub(crate) fn apply_sandbox_env(cmd: &mut Command) {
+    for key in SANDBOX_SCRUBBED_ENV_KEYS {
+        cmd.env_remove(key);
+    }
+}
+
+/// Builds a macOS Seatbelt (`sandbox-exec`) profile restricting writes to the workspace and
+/// temp directories; with `strict_secret_deny` (`--sandbox`) it also denies reading the
+/// [`SANDBOX_HIDDEN_HOME`] secret locations.
+pub(crate) fn build_macos_sandbox_profile(
+    workspace_root: &Path,
+    strict_secret_deny: bool,
+) -> String {
+    let ws = workspace_root.to_string_lossy().replace('"', "\\\"");
+    let mut profile = format!(
+        "(version 1)(allow default)(deny file-write* (subpath \"/\"))(allow file-write* (subpath \"{}\") (subpath \"/tmp\") (subpath \"/private/tmp\") (subpath \"/var/folders\") (subpath \"/private/var/folders\") (literal \"/dev/null\"))",
+        ws
+    );
+    if strict_secret_deny {
+        let home = home_dir();
+        profile.push_str("(deny file-read*");
+        for rel in SANDBOX_HIDDEN_HOME {
+            let p = home.join(rel).to_string_lossy().replace('"', "\\\"");
+            profile.push_str(&format!(" (subpath \"{}\")", p));
+        }
+        profile.push(')');
+    }
+    profile
+}
+
+/// Wraps `program args…` in the OS sandbox `--sandbox` promises: writes confined to the
+/// workspace and temp dirs, host secret paths unreadable. Fails closed: if no sandbox runtime
+/// exists the command is refused rather than silently run unconfined.
+pub(crate) fn sandboxed_command(
+    workspace_root: &Path,
+    program: &str,
+    args: &[&str],
+) -> Result<Command, String> {
+    if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists() {
+        let profile = build_macos_sandbox_profile(workspace_root, true);
+        let mut c = Command::new("/usr/bin/sandbox-exec");
+        c.args(["-p", &profile, program]).args(args);
+        return Ok(c);
+    }
+    if cfg!(target_os = "linux") {
+        if let Some(bwrap) = ["/usr/bin/bwrap", "/bin/bwrap"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+        {
+            let ws = workspace_root.to_string_lossy().to_string();
+            let mut c = Command::new(bwrap);
+            c.args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]);
+            c.args(["--bind", &ws, &ws, "--bind", "/tmp", "/tmp"]);
+            let home = home_dir();
+            for rel in SANDBOX_HIDDEN_HOME {
+                let p = home.join(rel);
+                if p.is_dir() {
+                    c.arg("--tmpfs").arg(&p);
+                } else if p.exists() {
+                    c.arg("--ro-bind").arg("/dev/null").arg(&p);
+                }
+            }
+            c.arg("--chdir").arg(&ws).arg("--").arg(program).args(args);
+            return Ok(c);
+        }
+    }
+    Err("BLOCKED by --sandbox: no sandbox runtime found (macOS needs /usr/bin/sandbox-exec, Linux needs bubblewrap `bwrap`). Refusing to run unconfined.".to_string())
+}
+
+/// Home-relative secret locations hidden from sandboxed commands on both platforms.
+const SANDBOX_HIDDEN_HOME: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".netrc",
+    ".docker/config.json",
+    ".spavn/secrets.env",
+    ".spavn/audit.key",
+];

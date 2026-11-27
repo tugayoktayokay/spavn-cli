@@ -308,10 +308,21 @@ where
 
         match typ {
             "message_start" => {
-                usage.prompt_tokens = v
+                // Prompt-cache reads/writes are billed but reported outside `input_tokens`;
+                // leaving them out undercounts spend by up to 10x on a warm cache.
+                let base = v
                     .pointer("/message/usage/input_tokens")
                     .and_then(|x| x.as_u64())
-                    .unwrap_or(usage.prompt_tokens);
+                    .unwrap_or(0);
+                let cache_read = v
+                    .pointer("/message/usage/cache_read_input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let cache_create = v
+                    .pointer("/message/usage/cache_creation_input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                usage.prompt_tokens = base + cache_read + cache_create;
             }
             "content_block_start" => {
                 let idx = v.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;

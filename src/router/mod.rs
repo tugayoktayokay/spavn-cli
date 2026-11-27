@@ -527,13 +527,18 @@ pub fn fetch_remote_model_entries(
             else {
                 continue;
             };
-            let clean_id = raw_id.trim().strip_prefix("models/").unwrap_or(raw_id.trim());
+            let clean_id = raw_id
+                .trim()
+                .strip_prefix("models/")
+                .unwrap_or(raw_id.trim());
             let low = clean_id.to_ascii_lowercase();
             if clean_id.is_empty()
                 || low.starts_with("tab_")
                 || low.starts_with("chat_20")
                 || !is_likely_chat_model_id(clean_id)
-                || out.iter().any(|x| x.model_id.eq_ignore_ascii_case(clean_id))
+                || out
+                    .iter()
+                    .any(|x| x.model_id.eq_ignore_ascii_case(clean_id))
             {
                 continue;
             }
@@ -691,8 +696,7 @@ fn refresh_auto_discover_providers_inner(force: bool, loopback_only: bool) -> us
 /// Zero-latency background discovery: returns immediately without spawning a thread
 /// if no provider uses `auto_discover` or if `provider_models_cache.json` is < 1h old.
 pub fn spawn_background_provider_discovery() {
-    if std::env::var("SPAVN_UPDATE_CHECK")
-        .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off"))
+    if std::env::var("SPAVN_UPDATE_CHECK").is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off"))
     {
         return;
     }

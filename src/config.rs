@@ -129,7 +129,11 @@ pub struct ProviderGroupConfig {
     pub auto_discover: bool,
     /// Optional `|`-separated case-insensitive filter tokens for `auto_discover`
     /// when multiple UI groups share one gateway `base_url` (e.g. `"gemini"` vs `"claude|gpt"`).
-    #[serde(default, alias = "discoverFilter", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "discoverFilter",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub discover_filter: Option<String>,
     /// Wire protocol for this provider. `"anthropic"` selects the native
     /// Anthropic Messages API for custom proxies that are not on anthropic.com.
@@ -815,9 +819,7 @@ pub fn load_auto_discovered_provider_entries() -> AutoDiscoveredCacheMap {
     parsed
 }
 
-pub fn save_auto_discovered_provider_entries(
-    cache: &HashMap<String, Vec<ModelConfigEntry>>,
-) {
+pub fn save_auto_discovered_provider_entries(cache: &HashMap<String, Vec<ModelConfigEntry>>) {
     if cache.is_empty() {
         return;
     }

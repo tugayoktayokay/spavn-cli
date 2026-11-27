@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.24 (2026-11-28) — Harness Guardrails, First-Class MCP & Desktop Bridge
+
+### Execution & Tools (`src/turn.rs`, `src/tools/mod.rs`, `src/tools/search.rs`, `src/tools/schema.rs`)
+- **New, parallel read batches in AUTO**: workspace `read`/`search`/`glob` and `web`/`skill` calls batch in AUTO too; a call whose path could reach the approval prompt (outside the workspace, secret paths) stays serial.
+- **New, `ast_grep` tool**: structural search and rewrite via the optional `ast-grep` binary. Previews with `apply=false`; a rewrite honors PLAN lock, write path policy, SAFE approval and the stale-file guard, pushes one undo snapshot per file, restores files on failure, and feeds the verification gate. `sg` is only used when it identifies as ast-grep (on Linux it is usually shadow-utils).
+- **New, `ask` tool**: clarifying question with options; returns the default without blocking when no human can answer (headless, bridge, sub-agent, no TTY).
+
+### MCP (`src/tools/mcp_subagent.rs`, `src/tools/schema.rs`)
+- **New, first-class MCP tools** `mcp__<server>__<tool>` with real input schemas, discovered once per process in parallel. Calls are routed by the recorded server/tool names. Servers above 24 tools (or past 48 total) stay behind `lsp op='mcp'`. Mutating tools are hidden from PLAN and refused at call time.
+
+### Cost, Recovery & Isolation (`src/state.rs`, `src/router/openai.rs`, `src/router/anthropic.rs`, `src/session.rs`, `src/tools/shell.rs`)
+- **New, `--warn-cost` / `--max-cost`** (`SPAVN_WARN_COST` / `SPAVN_MAX_COST`): one meter for every model call, recorded in `stream_chat_completion`, so local retries, cloud fallback and sub-agents are all counted.
+- **Fix, Anthropic prompt-cache tokens**: `cache_read_input_tokens` and `cache_creation_input_tokens` now count toward prompt tokens; they were previously dropped.
+- **New, `--restore [session]`**: tool calls left without a result by a crash get a synthetic interrupted result (so providers accept the transcript), then the unfinished turn resumes. Any loaded session is repaired the same way.
+- **New, `--sandbox`** (`SPAVN_SANDBOX=1`): `bash` and `py`/`js` scripts run under macOS `sandbox-exec` or Linux `bwrap`, writes confined to the workspace and temp dirs, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.netrc`, docker credentials and spavn secrets unreadable, provider/cloud API keys removed from the environment. Fails closed when no sandbox runtime exists.
+
+### Desktop Bridge (`src/main.rs`, `src/turn.rs`)
+- **New, `--bridge <unix-socket>`**: drives turns from the desktop host and streams `session.ready`, `turn.started`, thinking/message deltas, `message.final`, `tool.started`, `tool.finished`, `usage`, approvals, `error`, `turn.finished` (with real step count), `bridge.closed`. The session lock is not held across a turn, so `state.get` and `approval.answer` are served mid-turn. Incremental `tool.output` chunks are not streamed yet.
+
 ## v0.2.23 (2026-11-23) — Live Provider Auto-Discovery & Multi-Token Model Picker
 
 ### Provider Discovery & Picker UX (`src/config.rs`, `src/router/mod.rs`, `src/hud/menus.rs`, `src/hud/pickers.rs`, `src/main.rs`)

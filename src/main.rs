@@ -12,7 +12,8 @@ use spavn::memory::{cached_system_prompt, current_workdir};
 use spavn::router::{resolve_endpoint, ChatMessage};
 use spavn::session::{
     append_message, fork_session, latest_session_path, load_session, load_session_model,
-    new_session_path, rewrite_session, save_session_model, sessions_dir,
+    new_session_path, repair_interrupted_session, rewrite_session, save_session_model,
+    sessions_dir,
 };
 use spavn::skills::expand_inline_skills;
 use spavn::slash_commands::{dispatch_slash_command, SlashCtx, SlashOutcome};
@@ -53,11 +54,22 @@ fn main() {
     let mut resume_last = false;
     let mut resume_session_arg: Option<String> = None;
     let mut interactive_resume = false;
+    let mut restore_session = false;
     let mut force_interactive = false;
     let mut show_thinking = true;
     let mut quiet = false;
     let mut json_output = false;
     let mut phase_opt: Option<AgentPhase> = None;
+    let mut warn_cost_usd: Option<f64> = std::env::var("SPAVN_WARN_COST")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok());
+    let mut sandbox_mode = std::env::var("SPAVN_SANDBOX")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let mut bridge_socket: Option<String> = None;
+    let mut max_cost_usd: Option<f64> = std::env::var("SPAVN_MAX_COST")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok());
     let mut prompt_parts: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -119,6 +131,17 @@ fn main() {
                 i += 1;
                 continue;
             }
+            "--restore" => {
+                restore_session = true;
+                resume_last = true;
+                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    resume_session_arg = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
             "-p" | "--prompt" => {
                 if i + 1 < args.len() {
                     prompt_parts.push(args[i + 1].clone());
@@ -141,6 +164,32 @@ fn main() {
                 json_output = true;
                 i += 1;
                 continue;
+            }
+            "--sandbox" => {
+                sandbox_mode = true;
+                i += 1;
+                continue;
+            }
+            "--bridge" => {
+                if i + 1 < args.len() {
+                    bridge_socket = Some(args[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            "--warn-cost" => {
+                if i + 1 < args.len() {
+                    warn_cost_usd = args[i + 1].parse::<f64>().ok();
+                    i += 2;
+                    continue;
+                }
+            }
+            "--max-cost" => {
+                if i + 1 < args.len() {
+                    max_cost_usd = args[i + 1].parse::<f64>().ok();
+                    i += 2;
+                    continue;
+                }
             }
             "-v" | "-V" | "--version" => {
                 println!(
@@ -224,11 +273,16 @@ fn main() {
                      \x20 -s, --session <id|fork:id>  Resume or fork a specific session\n\
                      \x20 -c, --continue              Continue latest session\n\
                      \x20 -r, --resume                Interactive session picker\n\
+                     \x20 --restore [id]              Recover interrupted session & finish pending turn\n\
                      \x20 -i, --interactive           Start interactive TUI after initial prompt\n\
                      \x20 -p, --prompt <text>         Explicit prompt (same as a positional argument)\n\
                      \x20 -t, --think                 Toggle thinking stream display\n\
                      \x20 -q, --quiet                 Quiet/headless output mode\n\
-                     \x20 -j, --json                  Structured JSON output mode\n\
+                    \x20 -j, --json                  Structured JSON output mode\n\
+                    \x20 --warn-cost <usd>           Warn once when estimated session spend reaches USD\n\
+                    \x20 --sandbox                   Run bash/scripts in OS sandbox with API keys scrubbed\n\
+                    \x20 --bridge <unix-socket>      Run headless desktop bridge over Unix socket\n\
+                    \x20 --max-cost <usd>            Stop model requests once session spend reaches USD\n\
                      \x20 -V, --version               Print version and exit\n\
                      \x20 -h, --help                  Print this help message\n\n\
                      Examples:\n\
@@ -269,11 +323,13 @@ fn main() {
         }
         i += 1;
     }
+    spavn::state::set_cost_limits(warn_cost_usd, max_cost_usd);
 
     let cwd = current_workdir();
     let mut endpoint = resolve_endpoint(&model_key);
     let mut active_phase = phase_opt.unwrap_or(AgentPhase::Code);
     let mut ctx = ToolContext::new(access_mode, default_host, PathBuf::from(&cwd), active_phase);
+    ctx.sandbox = sandbox_mode;
 
     let resolve_session_target = |raw_spec: &str| -> Option<(PathBuf, Vec<ChatMessage>)> {
         let (do_fork, spec) = match raw_spec.strip_prefix("fork:") {
@@ -370,6 +426,56 @@ fn main() {
         prompt_parts.clear();
     }
 
+    let restore_report = repair_interrupted_session(&mut messages);
+    if restore_report.orphaned_tool_calls_repaired > 0 {
+        rewrite_session(&session_file, &messages);
+        if !quiet {
+            println!(
+                "{}🩺 [SPAVN RESTORE] {} {}{}",
+                YELLOW,
+                restore_report.orphaned_tool_calls_repaired,
+                tr_en(
+                    "yarım kalan tool çağrısı onarıldı.",
+                    "interrupted tool call(s) repaired."
+                ),
+                RESET
+            );
+        }
+    }
+    if restore_session && restore_report.has_unfinished_turn && prompt_parts.is_empty() {
+        if !quiet {
+            println!(
+                "{}🔄 [SPAVN RESTORE] {}{}",
+                CYAN,
+                tr_en(
+                    "Yarım kalan tur devam ettiriliyor...",
+                    "Continuing unfinished turn..."
+                ),
+                RESET
+            );
+        }
+        ctx.current_model = endpoint.key.clone();
+        if let Err(err) = run_agent_turn(
+            &endpoint,
+            &mut ctx,
+            &mut messages,
+            &session_file,
+            show_thinking,
+            None,
+            quiet,
+        ) {
+            eprintln!("{}✗ {}: {}{}", RED, tr_en("Hata", "Error"), err, RESET);
+            std::process::exit(1);
+        }
+        if !force_interactive {
+            return;
+        }
+    }
+    #[cfg(unix)]
+    if let Some(sock) = &bridge_socket {
+        run_bridge(sock, endpoint, ctx, messages, session_file);
+        return;
+    }
     if !prompt_parts.is_empty() {
         // Same condition as the TUI first-run wizard: without a key the request would go out with
         // the "local" placeholder and come back as an opaque provider 401.

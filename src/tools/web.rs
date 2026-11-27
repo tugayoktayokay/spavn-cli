@@ -386,7 +386,8 @@ mod tests {
     fn strip_html_handles_turkish_capital_i_before_script_and_soft_g() {
         // 'İ' expands from 2 bytes to 3 bytes under Unicode `to_lowercase()`, which used to shift
         // byte offsets in `lower` vs `html` and panic when slicing `html[i..]` on 'ğ'.
-        let html = "<html><body><p>İstanbul</p><script>var x = 1;</script><p>bağlantı</p></body></html>";
+        let html =
+            "<html><body><p>İstanbul</p><script>var x = 1;</script><p>bağlantı</p></body></html>";
         let cleaned = strip_html_to_clean_text(html);
         assert!(cleaned.contains("İstanbul"));
         assert!(cleaned.contains("bağlantı"));

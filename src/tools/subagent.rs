@@ -816,6 +816,15 @@ pub fn run_single_subagent(
             step + 1,
             task_spec.max_steps
         ));
+        if let Some((spent, max_usd)) = crate::state::cost_limit_exceeded() {
+            let msg = format!(
+                "session --max-cost limit reached (${:.4} / ${:.2})",
+                spent, max_usd
+            );
+            status = SubagentStatus::failed(msg.clone());
+            last_error = Some(msg);
+            break;
+        }
 
         let completion_res =
             crate::router::stream_chat_completion(&ep, &msgs, &sub_tools, |_| {}, |_| {});

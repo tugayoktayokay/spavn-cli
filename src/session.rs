@@ -106,6 +106,63 @@ pub fn load_session(path: &PathBuf) -> Vec<ChatMessage> {
     messages
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    pub orphaned_tool_calls_repaired: usize,
+    pub has_unfinished_turn: bool,
+}
+
+/// Repairs a session interrupted mid-turn (e.g. SIGKILL/crash):
+/// - Any `assistant` message with `tool_calls` missing matching `tool` results gets synthetic
+///   interruption `tool_result` entries right after its partial tool results so providers never
+///   reject the resumed transcript with HTTP 400.
+/// - Reports `has_unfinished_turn = true` when orphan tool calls were repaired or the transcript
+///   ends on a `user`/`tool` message (process died while waiting for the model).
+pub fn repair_interrupted_session(messages: &mut Vec<ChatMessage>) -> RestoreReport {
+    let mut report = RestoreReport::default();
+    let mut repaired: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    let mut i = 0;
+    while i < messages.len() {
+        let msg = messages[i].clone();
+        if msg.role == "assistant" {
+            if let Some(calls) = msg.tool_calls.as_ref().filter(|c| !c.is_empty()) {
+                repaired.push(msg.clone());
+                let mut j = i + 1;
+                let mut answered: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                while j < messages.len() && messages[j].role == "tool" {
+                    if let Some(id) = &messages[j].tool_call_id {
+                        answered.insert(id.clone());
+                    }
+                    repaired.push(messages[j].clone());
+                    j += 1;
+                }
+                for tc in calls {
+                    if !answered.contains(&tc.id) {
+                        repaired.push(ChatMessage::tool_result(
+                            tc.id.clone(),
+                            tc.function.name.clone(),
+                            "[SPAVN RESTORE: process exited before this tool call completed. Re-check workspace state before retrying if needed.]".to_string(),
+                        ));
+                        report.orphaned_tool_calls_repaired += 1;
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        repaired.push(msg);
+        i += 1;
+    }
+    *messages = repaired;
+    report.has_unfinished_turn = report.orphaned_tool_calls_repaired > 0
+        || matches!(
+            messages.last().map(|m| m.role.as_str()),
+            Some("user") | Some("tool")
+        );
+    report
+}
+
 pub fn append_message(path: &PathBuf, msg: &ChatMessage) {
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
         secure_file(path);
@@ -1585,5 +1642,69 @@ mod tests {
             clean_user_message(steering),
             Some("revert that commit".to_string())
         );
+    }
+
+    #[test]
+    fn repair_interrupted_session_heals_orphan_tool_calls_and_detects_unfinished_turns() {
+        use crate::router::{ToolCall, ToolFunction};
+
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("fix bug"),
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                reasoning_content: None,
+                thought_signature: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "c1".into(),
+                        call_type: "function".into(),
+                        thought_signature: None,
+                        function: ToolFunction {
+                            name: "read".into(),
+                            arguments: r#"{"path":"a.rs"}"#.into(),
+                        },
+                    },
+                    ToolCall {
+                        id: "c2".into(),
+                        call_type: "function".into(),
+                        thought_signature: None,
+                        function: ToolFunction {
+                            name: "edit".into(),
+                            arguments: r#"{"path":"a.rs"}"#.into(),
+                        },
+                    },
+                ]),
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage::tool_result("c1", "read", "ok"),
+        ];
+
+        let rep = repair_interrupted_session(&mut msgs);
+        assert_eq!(rep.orphaned_tool_calls_repaired, 1);
+        assert!(rep.has_unfinished_turn);
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(msgs[4].tool_call_id.as_deref(), Some("c2"));
+        assert!(msgs[4]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("SPAVN RESTORE"));
+
+        // Once completed with a final assistant message, nothing is unfinished.
+        msgs.push(ChatMessage {
+            role: "assistant".into(),
+            content: Some("done".into()),
+            reasoning_content: None,
+            thought_signature: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+        let rep2 = repair_interrupted_session(&mut msgs);
+        assert_eq!(rep2.orphaned_tool_calls_repaired, 0);
+        assert!(!rep2.has_unfinished_turn);
     }
 }

@@ -10,10 +10,10 @@ use spavn::session::{
     safe_utf8_prefix, safe_utf8_suffix, summarize_tool_args, tool_progress_target,
 };
 use spavn::state::{
-    advance_live_tasks_on_tool, clear_finished_live_tasks, clear_interrupted, is_interrupted,
-    pop_steer_messages, sync_live_tasks_from_text, take_soft_stop,
+    advance_live_tasks_on_tool, clear_finished_live_tasks, clear_interrupted, cost_limit_exceeded,
+    is_interrupted, pop_steer_messages, sync_live_tasks_from_text, take_soft_stop,
 };
-use spavn::tools::{execute_tool, AccessMode, ToolContext};
+use spavn::tools::{execute_tool, ToolContext};
 use spavn::{hud, tools};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -92,8 +92,122 @@ pub(crate) fn is_fast_inline_tool(name: &str) -> bool {
 
 /// A call may join a parallel batch only when it is read-only *and* cannot reach the approval
 /// prompt: two simultaneous prompts read the same stdin and swallow each other's keystrokes.
-pub(crate) fn is_batchable(name: &str, ctx: &ToolContext) -> bool {
-    ctx.access == AccessMode::Sovereign && tools::parallel_safe_tool(name)
+pub(crate) fn is_batchable(name: &str, args_json: &str, ctx: &ToolContext) -> bool {
+    tools::batch_call_safe(ctx, name, args_json)
+}
+
+/// Headless desktop driver: the app sends prompts over the bridge socket, the CLI runs each turn
+/// and streams its events back.
+///
+/// The session lock is never held across a turn. The bridge reader thread answers
+/// `approval.answer`, `slash.exec` and `state.get` while a turn runs, and the turn itself blocks on
+/// approvals, so holding the lock would deadlock the first approval prompt.
+#[cfg(unix)]
+pub(crate) fn run_bridge(
+    sock: &str,
+    endpoint: ModelEndpoint,
+    mut ctx: ToolContext,
+    messages: Vec<ChatMessage>,
+    session_file: PathBuf,
+) {
+    use spavn::events::{self, Event};
+    ctx.can_prompt = true;
+    let bridge = match spavn::bridge::connect(
+        sock,
+        spavn::bridge::Shared::new(endpoint, ctx, messages, session_file),
+    ) {
+        Ok(b) => b,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    };
+    {
+        let mut shared = bridge.lock();
+        shared.ctx.approver = bridge.approver();
+        events::emit(shared.session_ready());
+    }
+    while !bridge.shutdown_requested() {
+        let Some(pending) = bridge.take_prompt() else {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            continue;
+        };
+        bridge.set_busy(true);
+        events::set_turn(pending.turn);
+        let started = std::time::Instant::now();
+        let (expanded, skills) = spavn::skills::expand_inline_skills(&pending.text);
+        events::emit(Event::TurnStarted {
+            prompt: pending.text.clone(),
+            skills,
+        });
+        // Take the turn's state out, run without the lock, then put it back.
+        let (endpoint, mut ctx, mut messages, session, show_thinking) = {
+            let mut shared = bridge.lock();
+            let user_msg = ChatMessage::user(expanded);
+            append_message(&shared.session, &user_msg);
+            shared.messages.push(user_msg);
+            shared.ctx.current_model = shared.endpoint.key.clone();
+            shared.ctx.current_prompt = pending.text.clone();
+            (
+                shared.endpoint.clone(),
+                shared.ctx.clone(),
+                std::mem::take(&mut shared.messages),
+                shared.session.clone(),
+                shared.show_thinking,
+            )
+        };
+        let steps_before = ctx.tool_step_counter;
+        let res = run_agent_turn(
+            &endpoint,
+            &mut ctx,
+            &mut messages,
+            &session,
+            show_thinking,
+            None,
+            true,
+        );
+        let turn_steps = ctx
+            .tool_step_counter
+            .saturating_sub(steps_before)
+            .max(usize::from(res.is_ok()));
+        let reply = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .and_then(|m| m.content.clone());
+        {
+            let mut shared = bridge.lock();
+            shared.ctx = ctx;
+            shared.messages = messages;
+        }
+        bridge.refresh_snapshot();
+        let ok = match res {
+            Ok(()) => {
+                if let Some(text) = reply {
+                    events::emit(Event::MessageFinal { text });
+                }
+                true
+            }
+            Err(message) => {
+                events::emit(Event::Error {
+                    message,
+                    retryable: true,
+                    tool_call_id: None,
+                });
+                false
+            }
+        };
+        events::emit(Event::TurnFinished {
+            ok,
+            steps: turn_steps,
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
+        bridge.set_busy(false);
+    }
+    events::emit(Event::BridgeClosed {
+        reason: "shutdown",
+        code: Some(0),
+    });
 }
 
 /// Extracts `(normalized_path, span_key)` from a `read`, `edit`, or `write` tool call's JSON args
@@ -406,7 +520,7 @@ fn extract_compact_ast_skeleton(content: &str) -> String {
 }
 
 fn maybe_shake_older_tool_outputs(
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut [ChatMessage],
     session_file: &std::path::PathBuf,
 ) -> bool {
     let active_u_idx = messages
@@ -421,10 +535,7 @@ fn maybe_shake_older_tool_outputs(
             continue;
         }
         if let Some(c) = &m.content {
-            if c.len() > 3200
-                && !c.contains("[SPAVN Shaken")
-                && !c.contains("...[Compacted")
-            {
+            if c.len() > 3200 && !c.contains("[SPAVN Shaken") && !c.contains("...[Compacted") {
                 let est_tok = c.len() / 4 + 1;
                 let head = safe_utf8_prefix(c, 900);
                 let tail = safe_utf8_suffix(c, 500);
@@ -445,6 +556,7 @@ fn maybe_shake_older_tool_outputs(
     shaken_any
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_context_window(
     step_endpoint: &ModelEndpoint,
     messages: &mut Vec<ChatMessage>,
@@ -650,6 +762,23 @@ pub(crate) fn run_agent_turn(
             }
         }
 
+        if let Some((spent, max_usd)) = cost_limit_exceeded() {
+            if !quiet {
+                println!(
+                    "\n{}⛔ {} (${:.4} / ${:.2}){}",
+                    RED,
+                    tr_en(
+                        "Oturum maliyet sınırı (--max-cost) aşıldı, yeni model isteği durduruldu",
+                        "Session --max-cost ceiling reached; stopping further model requests"
+                    ),
+                    spent,
+                    max_usd,
+                    RESET
+                );
+            }
+            return Ok(());
+        }
+
         let escalated_cloud = endpoint.is_local() && repeat_count >= 2;
         let step_endpoint = if escalated_cloud {
             if !quiet {
@@ -710,11 +839,21 @@ pub(crate) fn run_agent_turn(
             &view_messages,
             &tools_spec,
             |think_delta| {
+                if spavn::events::is_installed() {
+                    spavn::events::emit(spavn::events::Event::ThinkingDelta {
+                        text: think_delta.to_string(),
+                    });
+                }
                 if !quiet {
                     hud::stream_thinking_delta(think_delta, show_thinking);
                 }
             },
             |content_delta| {
+                if spavn::events::is_installed() {
+                    spavn::events::emit(spavn::events::Event::MessageDelta {
+                        text: content_delta.to_string(),
+                    });
+                }
                 partial_content.borrow_mut().push_str(content_delta);
                 if quiet {
                     return;
@@ -925,6 +1064,36 @@ pub(crate) fn run_agent_turn(
         last_observed_total_tokens = result.usage.total_tokens as usize;
         let actual_used = last_observed_total_tokens.max(est_after);
         hud::set_context_window_usage(actual_used, step_endpoint.context_window_tokens());
+        if spavn::events::is_installed() {
+            let limit = step_endpoint.context_window_tokens();
+            let pct = if limit == 0 {
+                0
+            } else {
+                (((actual_used as f64 / limit as f64) * 100.0).round() as u8).min(100)
+            };
+            spavn::events::emit(spavn::events::Event::Usage {
+                prompt_tokens: result.usage.prompt_tokens as usize,
+                completion_tokens: result.usage.completion_tokens as usize,
+                ctx_tokens: actual_used,
+                ctx_pct: pct,
+                quota: None,
+            });
+        }
+        if let Some((spent, warn_usd)) = spavn::state::take_cost_warning() {
+            if !quiet {
+                println!(
+                    "\n{}⚠️  {} (${:.4} / ${:.2}){}",
+                    YELLOW,
+                    tr_en(
+                        "Oturum tahmini maliyet uyarısı (--warn-cost)",
+                        "Estimated session spend warning (--warn-cost)"
+                    ),
+                    spent,
+                    warn_usd,
+                    RESET
+                );
+            }
+        }
         let secs = (result.elapsed_ms as f64) / 1000.0;
         let decode_secs = (result.elapsed_ms.saturating_sub(result.ttft_ms).max(1) as f64) / 1000.0;
         let tok_s = if decode_secs > 0.0 && result.usage.completion_tokens > 0 {
@@ -972,12 +1141,13 @@ pub(crate) fn run_agent_turn(
             let mut budget_used = 0usize;
             let mut batch_idx = 0usize;
             while batch_idx < batch_calls.len() {
-                if !is_batchable(&batch_calls[batch_idx].0, ctx) {
+                if !is_batchable(&batch_calls[batch_idx].0, &batch_calls[batch_idx].1, ctx) {
                     batch_idx += 1;
                     continue;
                 }
                 let start = batch_idx;
-                while batch_idx < batch_calls.len() && is_batchable(&batch_calls[batch_idx].0, ctx)
+                while batch_idx < batch_calls.len()
+                    && is_batchable(&batch_calls[batch_idx].0, &batch_calls[batch_idx].1, ctx)
                 {
                     if endpoint.is_local()
                         && is_read_tool_name(&batch_calls[batch_idx].0)
@@ -1163,6 +1333,15 @@ pub(crate) fn run_agent_turn(
                     Vec::new()
                 };
                 let mut batched_ms: Option<u128> = None;
+                if spavn::events::is_installed() {
+                    spavn::events::emit(spavn::events::Event::ToolStarted {
+                        id: tc.id.clone(),
+                        name: tool_name.clone(),
+                        target: progress_target.clone(),
+                        host: ctx.default_host.clone(),
+                        args_summary: summary_for_task.clone(),
+                    });
+                }
                 let (mut tool_output, tool_ms) = if quiet {
                     let t0 = std::time::Instant::now();
                     let (out, elapsed) = match prefetched.remove(&idx) {
@@ -1241,6 +1420,26 @@ pub(crate) fn run_agent_turn(
                         batched_ms.unwrap_or_else(|| tool_started.elapsed().as_millis()),
                     )
                 };
+                if spavn::events::is_installed() {
+                    let exit_code = tool_output
+                        .split("(exit code ")
+                        .nth(1)
+                        .and_then(|rest| rest.split(')').next())
+                        .and_then(|n| n.trim().parse::<i32>().ok());
+                    let ok = exit_code.map(|c| c == 0).unwrap_or(true)
+                        && !tool_output.starts_with("BLOCKED")
+                        && !tool_output.starts_with("User rejected")
+                        && !tool_output.starts_with("Tool error:");
+                    spavn::events::emit(spavn::events::Event::ToolFinished {
+                        id: tc.id.clone(),
+                        ok,
+                        exit_code,
+                        duration_ms: tool_ms as u64,
+                        added: None,
+                        removed: None,
+                        rows: None,
+                    });
+                }
 
                 if let Some(err_sig) =
                     extract_tool_error_signature(&tool_name, &tc.function.arguments, &tool_output)
@@ -1259,6 +1458,20 @@ pub(crate) fn run_agent_turn(
                 } else if !target_hint.is_empty() {
                     tool_failure_counts
                         .remove(&format!("err_target:{}:{}", tool_name, target_hint));
+                }
+                // `ast_grep` rewrites report their files through undo snapshots, not their args.
+                if tool_name == "ast_grep" && tool_output.starts_with("Successfully ") {
+                    turn_had_mutations = true;
+                    highest_verification_level = VerificationLevel::None;
+                    claim_gate_rounds = 0;
+                    for snap in ctx.undo_stack.iter().rev() {
+                        if snap.description != "ast_grep" {
+                            break;
+                        }
+                        if !modified_files_in_turn.contains(&snap.target) {
+                            modified_files_in_turn.push(snap.target.clone());
+                        }
+                    }
                 }
 
                 if matches!(

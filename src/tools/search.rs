@@ -1099,3 +1099,199 @@ pub(crate) fn exec_skill(args: &Value) -> String {
         )
     }
 }
+
+/// Structural AST search and rewrite through the optional `ast-grep` CLI.
+///
+/// A rewrite is held to the same contract as `edit`: PLAN lock, write path policy, approval in
+/// SAFE, and one undo snapshot per touched file so `/undo` and the verification gate see it.
+/// `apply=false` (or no `rewrite`) only reports matches and never touches the tree.
+pub(crate) fn exec_ast_grep(ctx: &mut ToolContext, args: &Value) -> String {
+    let pattern = get_str_alias(args, &["pattern", "query", "rule"]).trim();
+    if pattern.is_empty() {
+        return "ast_grep error: missing required 'pattern' parameter.".to_string();
+    }
+    let raw_path = get_str_alias(args, &["path", "dir", "root"]).trim();
+    let target_rel = if raw_path.is_empty() { "." } else { raw_path };
+    let rewrite = get_str_alias(args, &["rewrite", "replacement"]);
+    let has_rewrite = !rewrite.is_empty();
+    let apply = has_rewrite && args.get("apply").and_then(Value::as_bool).unwrap_or(true);
+    let lang = get_str_alias(args, &["lang", "language"]).trim();
+
+    if apply && ctx.phase == crate::spavn_engine::AgentPhase::Plan {
+        return "[SPAVN] READ-ONLY PHASE (PLAN): `ast_grep` rewrite is locked. Omit `rewrite` or set `apply=false` for a preview.".to_string();
+    }
+    if let Err(e) = ctx.enforce_path(target_rel, apply, "ast_grep") {
+        return e;
+    }
+    let Some(bin) = ast_grep_available() else {
+        return "ast_grep unavailable: `ast-grep` is not on PATH (`brew install ast-grep` or `cargo install ast-grep`). Use `search` + `edit` instead.".to_string();
+    };
+    let target_path = ctx.resolve_local_path(target_rel);
+
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "run",
+        "--pattern",
+        pattern,
+        "--json=compact",
+        "--color",
+        "never",
+    ]);
+    if !lang.is_empty() {
+        cmd.args(["--lang", lang]);
+    }
+    if has_rewrite {
+        cmd.args(["--rewrite", rewrite]);
+    }
+    cmd.arg(&target_path);
+    let matches = match run_command_with_timeout(cmd, 60) {
+        Ok((_, _, _, true)) => return "ast_grep error: timed out after 60s.".to_string(),
+        // Exit 1 with empty output is ast-grep's "no matches".
+        Ok((_, out, err, false)) => match serde_json::from_slice::<Vec<Value>>(&out) {
+            Ok(m) => m,
+            Err(_) if out.iter().all(u8::is_ascii_whitespace) && err.is_empty() => Vec::new(),
+            Err(_) => {
+                return format!(
+                    "ast_grep error: {}",
+                    String::from_utf8_lossy(&err)
+                        .trim()
+                        .chars()
+                        .take(2000)
+                        .collect::<String>()
+                )
+            }
+        },
+        Err(e) => return format!("ast_grep failed to run `{}`: {}", bin, e),
+    };
+    if matches.is_empty() {
+        return "(no AST matches)".to_string();
+    }
+
+    let mut files: Vec<String> = matches
+        .iter()
+        .filter_map(|m| m.get("file").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    files.sort();
+    files.dedup();
+
+    let mut report = String::new();
+    for m in matches.iter().take(200) {
+        let file = m.get("file").and_then(Value::as_str).unwrap_or("?");
+        let line = m
+            .pointer("/range/start/line")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            + 1;
+        let text = m.get("text").and_then(Value::as_str).unwrap_or("");
+        let first = text.lines().next().unwrap_or("");
+        match m.get("replacement").and_then(Value::as_str) {
+            Some(rep) => report.push_str(&format!(
+                "{}:{}: {} → {}\n",
+                file,
+                line,
+                first,
+                rep.lines().next().unwrap_or("")
+            )),
+            None => report.push_str(&format!("{}:{}: {}\n", file, line, first)),
+        }
+    }
+    if matches.len() > 200 {
+        report.push_str(&format!("... {} more matches\n", matches.len() - 200));
+    }
+    if !apply {
+        return format!(
+            "{} match(es) in {} file(s){}:\n{}",
+            matches.len(),
+            files.len(),
+            if has_rewrite {
+                " (dry run, nothing written)"
+            } else {
+                ""
+            },
+            report
+        );
+    }
+
+    for f in &files {
+        if ctx.is_external_stale_version(f) {
+            return format!(
+                "ast_grep rewrite refused: {} changed on disk since you last read it. Re-read it, then retry.",
+                f
+            );
+        }
+    }
+    if ctx.access == AccessMode::Safe
+        && !prompt_user_approval(
+            ctx,
+            &format!("AST rewrite (ast_grep): {} file(s)", files.len()),
+            &report,
+        )
+    {
+        return "User rejected ast_grep rewrite in SAFE mode.".to_string();
+    }
+
+    let snapshots: Vec<(String, Option<String>)> = files
+        .iter()
+        .map(|f| (f.clone(), std::fs::read_to_string(f).ok()))
+        .collect();
+    let mut apply_cmd = Command::new(bin);
+    apply_cmd.args([
+        "run",
+        "--pattern",
+        pattern,
+        "--rewrite",
+        rewrite,
+        "--update-all",
+    ]);
+    if !lang.is_empty() {
+        apply_cmd.args(["--lang", lang]);
+    }
+    apply_cmd.arg(&target_path);
+    match run_command_with_timeout(apply_cmd, 60) {
+        Ok((0, _, _, false)) => {}
+        Ok((_, _, err, timed_out)) => {
+            for (f, prev) in &snapshots {
+                if let Some(prev) = prev {
+                    let _ = std::fs::write(f, prev);
+                }
+            }
+            return format!(
+                "ast_grep rewrite failed{}; files restored: {}",
+                if timed_out { " (timeout)" } else { "" },
+                String::from_utf8_lossy(&err).trim()
+            );
+        }
+        Err(e) => return format!("ast_grep failed to run `{}`: {}", bin, e),
+    }
+    for (f, prev) in snapshots {
+        ctx.undo_stack.push(UndoSnapshot {
+            target: f.clone(),
+            previous_content: prev,
+            description: "ast_grep".to_string(),
+        });
+        ctx.record_file_mtime(&f);
+    }
+    format!(
+        "Successfully rewrote {} match(es) in {} file(s):\n{}",
+        matches.len(),
+        files.len(),
+        report
+    )
+}
+
+/// `ast-grep` is the unambiguous binary name; `sg` is only trusted when it identifies as
+/// ast-grep, because on Linux `sg` is usually shadow-utils' "switch group".
+pub(crate) fn ast_grep_available() -> Option<&'static str> {
+    static BIN: std::sync::LazyLock<Option<&'static str>> = std::sync::LazyLock::new(|| {
+        ["ast-grep", "sg"].into_iter().find(|bin| {
+            Command::new(bin)
+                .arg("--version")
+                .output()
+                .map(|o| {
+                    o.status.success() && String::from_utf8_lossy(&o.stdout).contains("ast-grep")
+                })
+                .unwrap_or(false)
+        })
+    });
+    *BIN
+}

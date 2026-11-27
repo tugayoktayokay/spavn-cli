@@ -2913,6 +2913,10 @@ replace example.com/auth => ./services/auth
             &mut delta,
         )
         .unwrap_err();
-        assert!(err.contains("COMPACTED_PLACEHOLDER_REJECTED"), "got: {}", err);
+        assert!(
+            err.contains("COMPACTED_PLACEHOLDER_REJECTED"),
+            "got: {}",
+            err
+        );
     }
 }

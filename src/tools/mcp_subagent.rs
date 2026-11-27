@@ -288,6 +288,275 @@ pub(crate) fn is_mutating_mcp_tool(
     })
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveredMcpTool {
+    pub qualified_name: String,
+    /// Configured `mcpServers` key and the server's own tool name; `qualified_name` is a
+    /// sanitized form and cannot be split back into these.
+    pub server: String,
+    pub remote_name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub mutating: bool,
+}
+
+/// Servers exposing more tools than this stay behind `lsp op=mcp` instead of the schema: one
+/// large server (200+ tools is common) would add tens of thousands of tokens to every request
+/// and exceed provider tool-count limits (OpenAI caps a request at 128 tools).
+pub(crate) const MCP_FIRST_CLASS_PER_SERVER: usize = 24;
+/// Upper bound for all first-class MCP tools across servers.
+pub(crate) const MCP_FIRST_CLASS_TOTAL: usize = 48;
+
+pub(crate) fn sanitize_mcp_segment(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Parses a raw JSON-RPC `tools/list` reply (plain JSON or SSE) into first-class tool descriptors.
+pub(crate) fn parse_mcp_tool_list_json(
+    server_name: &str,
+    server_is_read_only: bool,
+    raw_json: &str,
+) -> Vec<DiscoveredMcpTool> {
+    let trimmed = raw_json.trim();
+    let v: Value = if trimmed.starts_with('{') {
+        match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        }
+    } else if let Some(sse_v) = trimmed
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("data:"))
+        .find_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+    {
+        sse_v
+    } else {
+        return Vec::new();
+    };
+    let Some(tools) = v
+        .pointer("/result/tools")
+        .or_else(|| v.get("tools"))
+        .and_then(|t| t.as_array())
+    else {
+        return Vec::new();
+    };
+    let srv_seg = sanitize_mcp_segment(server_name);
+    let mut out = Vec::new();
+    for t in tools {
+        let Some(remote_name) = t.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if remote_name.trim().is_empty() {
+            continue;
+        }
+        let desc = t
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .trim();
+        let input_schema = t
+            .get("inputSchema")
+            .filter(|s| s.is_object())
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+        let tool_seg = sanitize_mcp_segment(remote_name);
+        let qualified_name = format!("mcp__{}__{}", srv_seg, tool_seg);
+        let mutating = is_mutating_mcp_tool(server_name, remote_name, server_is_read_only);
+        out.push(DiscoveredMcpTool {
+            qualified_name,
+            server: server_name.to_string(),
+            remote_name: remote_name.to_string(),
+            description: if desc.is_empty() {
+                format!("[MCP {}] {}", server_name, remote_name)
+            } else {
+                format!("[MCP {}] {}", server_name, desc)
+            },
+            input_schema,
+            mutating,
+        });
+    }
+    out
+}
+
+fn fetch_raw_mcp_tool_list(srv: &crate::config::McpServerConfig) -> Option<String> {
+    if let Some(url) = &srv.url {
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {}
+        });
+        let mut headers: Vec<(&str, &str)> =
+            vec![("Accept", "application/json, text/event-stream")];
+        for (k, v) in &srv.headers {
+            headers.push((k.as_str(), v.as_str()));
+        }
+        if let Ok((200..=299, body)) =
+            crate::http::post_json(url, &req_body.to_string(), &headers, 4)
+        {
+            return Some(body);
+        }
+        return None;
+    }
+    let cmd_bin = srv.command.as_ref()?;
+    let expanded_bin = crate::config::expand_user_path(cmd_bin);
+    let expanded_args: Vec<String> = srv
+        .args
+        .iter()
+        .map(|a| {
+            if a.starts_with("~/") {
+                crate::config::expand_user_path(a).display().to_string()
+            } else {
+                a.clone()
+            }
+        })
+        .collect();
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let expanded_env: Vec<(String, String)> = srv
+        .env
+        .iter()
+        .map(|(k, v)| {
+            let value = if v.starts_with("~/") {
+                crate::config::expand_user_path(v).display().to_string()
+            } else {
+                v.clone()
+            };
+            (k.clone(), value)
+        })
+        .collect();
+    let mut child = Command::new(&expanded_bin)
+        .args(&expanded_args)
+        .env_clear()
+        .env("PATH", inherited_path)
+        .env("HOME", crate::config::home_dir())
+        .envs(expanded_env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let init_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "spavn", "version": env!("CARGO_PKG_VERSION") }
+        }
+    });
+    let list_msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = writeln!(stdin, "{}", init_msg);
+        let _ = writeln!(
+            stdin,
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}"
+        );
+        let _ = writeln!(stdin, "{}", list_msg);
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.starts_with('{') {
+                    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                        if v.get("id").and_then(|id| id.as_i64()) == Some(2) {
+                            let _ = tx.send(trimmed.to_string());
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let received = rx.recv_timeout(std::time::Duration::from_secs(5)).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    received
+}
+
+/// First-class MCP tools for the schema, discovered once per process.
+///
+/// Servers are probed in parallel (stdio 5s / HTTP 4s each), so startup pays the slowest server,
+/// not their sum. Oversized servers are skipped whole rather than truncated, so the model never
+/// sees half a toolset. Skipped in tests so they never spawn the user's configured servers.
+pub(crate) fn discover_configured_mcp_tools() -> &'static [DiscoveredMcpTool] {
+    if cfg!(test) {
+        return &[];
+    }
+    static CACHE: std::sync::LazyLock<Vec<DiscoveredMcpTool>> = std::sync::LazyLock::new(|| {
+        let cfg = crate::config::load_user_config();
+        let mut servers: Vec<(String, crate::config::McpServerConfig)> = cfg
+            .mcp_servers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        servers.sort_by(|a, b| a.0.cmp(&b.0));
+        let per_server: Vec<Vec<DiscoveredMcpTool>> = std::thread::scope(|s| {
+            let handles: Vec<_> = servers
+                .iter()
+                .map(|(name, srv)| {
+                    s.spawn(move || {
+                        fetch_raw_mcp_tool_list(srv)
+                            .map(|raw| parse_mcp_tool_list_json(name, srv.read_only, &raw))
+                            .unwrap_or_default()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+        let mut all = Vec::new();
+        for tools in per_server {
+            if tools.len() > MCP_FIRST_CLASS_PER_SERVER
+                || all.len() + tools.len() > MCP_FIRST_CLASS_TOTAL
+            {
+                continue;
+            }
+            all.extend(tools);
+        }
+        all
+    });
+    &CACHE
+}
+
+/// Runs a first-class `mcp__<server>__<tool>` call through the same phase/approval gates as
+/// `lsp op=mcp`, using the real server and tool names recorded at discovery.
+pub(crate) fn exec_mcp_direct(
+    ctx: &mut ToolContext,
+    qualified_name: &str,
+    mcp_args: &Value,
+) -> String {
+    let Some(tool) = discover_configured_mcp_tools()
+        .iter()
+        .find(|t| t.qualified_name == qualified_name)
+    else {
+        return format!(
+            "Unknown MCP tool '{}'. Use `lsp` with op='mcp' and server=<name> to list a server's tools.",
+            qualified_name
+        );
+    };
+    let wrapped = json!({
+        "op": "mcp",
+        "server": tool.server,
+        "tool": tool.remote_name,
+        "arguments": mcp_args
+    });
+    exec_lsp_and_mcp(ctx, &wrapped)
+}
+
 pub(crate) fn exec_lsp_and_mcp(ctx: &mut ToolContext, args: &Value) -> String {
     let op = get_str_alias(args, &["op", "action", "mode"]).to_ascii_lowercase();
     if op == "mcp" || !get_str_alias(args, &["server", "mcp_server"]).is_empty() {

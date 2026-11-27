@@ -122,6 +122,9 @@ pub struct ToolContext {
     /// human, so a context that cannot ask must decide on policy alone instead of hanging or
     /// silently answering "no" on every call.
     pub can_prompt: bool,
+    /// When true (`--sandbox` / `SPAVN_SANDBOX=1`), local shell/script commands run inside an
+    /// OS sandbox (macOS `sandbox-exec` / Linux `bwrap`) with provider API keys scrubbed from env.
+    pub sandbox: bool,
 }
 
 pub(crate) fn fnv1a_hash64(bytes: &[u8]) -> u64 {
@@ -157,6 +160,7 @@ impl ToolContext {
             last_cwd,
             approver: crate::approval::terminal(),
             can_prompt: true,
+            sandbox: false,
         }
     }
 
@@ -862,10 +866,75 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
         "lsp" | "mcp" | "goto_definition" | "find_references" | "document_symbols" => {
             exec_lsp_and_mcp(ctx, &args)
         }
+        "ast_grep" | "ast_edit" | "sg" => exec_ast_grep(ctx, &args),
+        other if other.starts_with("mcp__") => exec_mcp_direct(ctx, other, &args),
+        "ask" | "ask_user" | "clarify" => exec_ask(ctx, &args),
         _ => format!(
-            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp.",
+            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp, ast_grep, ask.",
             name
         ),
+    }
+}
+
+/// Asks the human a clarifying question. Without someone to answer (sub-agent, headless run,
+/// desktop bridge, no TTY) it returns the stated default immediately instead of blocking.
+pub(crate) fn exec_ask(ctx: &ToolContext, args: &Value) -> String {
+    let question = get_str_alias(args, &["question", "prompt", "message"]).trim();
+    if question.is_empty() {
+        return "ask error: missing required 'question' parameter.".to_string();
+    }
+    let options: Vec<String> = args
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::trim))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let default_val = get_str_alias(args, &["default", "recommended"]).trim();
+    let fallback = if !default_val.is_empty() {
+        default_val.to_string()
+    } else if let Some(first) = options.first() {
+        first.clone()
+    } else {
+        "proceed with the safest conservative default".to_string()
+    };
+
+    if !ctx.can_prompt || crate::events::is_installed() || !crate::hud::stdin_is_tty() {
+        return format!(
+            "[SPAVN ask — no interactive user; using default]: {}",
+            fallback
+        );
+    }
+
+    crate::hud::pause_active_spinner();
+    println!("\n{}❓ {}{}", CYAN, gate_safe(question), RESET);
+    for (idx, opt) in options.iter().enumerate() {
+        let mark = if *opt == fallback { " (default)" } else { "" };
+        println!("  {}. {}{}", idx + 1, gate_safe(opt), mark);
+    }
+    print!(
+        "{}→ Answer [Enter = {}]: {}",
+        YELLOW,
+        gate_safe(&fallback),
+        RESET
+    );
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    crate::hud::resume_active_spinner();
+    let trimmed = line.trim();
+    if !matches!(read, Ok(n) if n > 0) || trimmed.is_empty() {
+        return format!("User accepted default: {}", fallback);
+    }
+    match trimmed.parse::<usize>() {
+        Ok(n) if (1..=options.len()).contains(&n) => {
+            format!("User selected option {}: {}", n, options[n - 1])
+        }
+        _ => format!("User answered: {}", trimmed),
     }
 }
 
@@ -900,6 +969,89 @@ pub fn parallel_safe_tool(name: &str) -> bool {
     )
 }
 
+/// Checks whether a single read-only tool call is guaranteed not to trigger an interactive
+/// approval prompt, so it can safely join a parallel batch without contending on stdin.
+///
+/// - `Safe` mode may prompt on any call -> never batched.
+/// - `Auto` mode never prompts on `web`/`skill`, and only prompts on `read`/`search`/`glob`
+///   when `PathPolicy::check(_, false)` returns `PathRisk::Ask` (outside workspace or secrets).
+/// - `Sovereign` mode waives ordinary `PathRisk::Ask`, but `even_sovereign` secret paths
+///   still prompt and therefore stay serial.
+pub fn batch_call_safe(ctx: &ToolContext, name: &str, args_json: &str) -> bool {
+    if ctx.access == AccessMode::Safe || !parallel_safe_tool(name) {
+        return false;
+    }
+    let norm = name.trim().to_lowercase();
+    if matches!(
+        norm.as_str(),
+        "skill"
+            | "load_skill"
+            | "use_skill"
+            | "web"
+            | "web_search"
+            | "websearch"
+            | "webfetch"
+            | "web_fetch"
+    ) {
+        return true;
+    }
+    let args = parse_args_resilient(args_json);
+    let raw_path = args
+        .get("path")
+        .or_else(|| args.get("file_path"))
+        .or_else(|| args.get("file"))
+        .or_else(|| args.get("dir"))
+        .or_else(|| args.get("root"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let default_target = if matches!(norm.as_str(), "read" | "read_file" | "cat" | "view") {
+        match raw_path {
+            Some(p) => p,
+            None => return true, // missing-path error returns immediately without prompting
+        }
+    } else {
+        raw_path.unwrap_or(".")
+    };
+
+    let mut policy = ctx.policy.clone();
+    if ctx.last_cwd.is_dir() {
+        policy.cwd = ctx.last_cwd.clone();
+    }
+
+    // `search` supports `;`-separated paths; every segment must be prompt-free.
+    for seg in default_target.split(';') {
+        let seg = seg.trim();
+        if seg.is_empty() || split_remote_prefix(seg).is_some() {
+            continue;
+        }
+        let no_query = seg.split('?').next().unwrap_or(seg);
+        let clean = match no_query.rsplit_once(':') {
+            Some((base, tail))
+                if !base.is_empty()
+                    && tail
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit() || c == '-')
+                        .unwrap_or(false) =>
+            {
+                base.trim()
+            }
+            _ => no_query,
+        };
+        match policy.check(clean, false) {
+            PathRisk::Allow | PathRisk::Deny { .. } => {}
+            PathRisk::Ask { even_sovereign, .. } => {
+                if even_sovereign || ctx.access != AccessMode::Sovereign {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Runs a run of independent read-only calls concurrently and returns their results in the
 /// order they were declared.
 ///
@@ -913,9 +1065,10 @@ pub fn execute_read_only_batch(ctx: &mut ToolContext, calls: &[(String, String)]
         return Vec::new();
     }
     // Two workers could both reach `prompt_user_approval`, and two prompts read the same stdin.
-    // Outside SOVEREIGN any path may prompt, so a batch is refused outright.
-    if ctx.access != AccessMode::Sovereign
-        || calls.iter().any(|(name, _)| !parallel_safe_tool(name))
+    // Refuse the batch if any call might prompt under the active access mode and path policy.
+    if calls
+        .iter()
+        .any(|(name, args)| !batch_call_safe(ctx, name, args))
     {
         return Vec::new();
     }

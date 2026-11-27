@@ -173,6 +173,192 @@ mod phase_tests {
     }
 
     #[test]
+    fn batch_call_safe_allows_workspace_reads_in_auto_and_blocks_prompting_paths() {
+        let dir = std::env::temp_dir().join(format!("spavn-batch-auto-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("a.txt"), "alpha\n").unwrap();
+        fs::write(dir.join("b.txt"), "beta\n").unwrap();
+
+        let mut auto_ctx = ToolContext::new(
+            AccessMode::Auto,
+            "local".into(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        assert!(super::batch_call_safe(
+            &auto_ctx,
+            "read",
+            r#"{"path":"a.txt"}"#
+        ));
+        assert!(super::batch_call_safe(
+            &auto_ctx,
+            "web",
+            r#"{"op":"search","query":"rust"}"#
+        ));
+        assert!(
+            !super::batch_call_safe(&auto_ctx, "read", r#"{"path":"/etc/hosts"}"#),
+            "outside-workspace path may prompt in Auto and must stay serial"
+        );
+
+        let out = super::execute_read_only_batch(
+            &mut auto_ctx,
+            &[
+                ("read".into(), r#"{"path":"a.txt"}"#.into()),
+                ("read".into(), r#"{"path":"b.txt"}"#.into()),
+            ],
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out[0].contains("alpha"));
+        assert!(out[1].contains("beta"));
+
+        let safe_ctx = ToolContext::new(
+            AccessMode::Safe,
+            "local".into(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        assert!(!super::batch_call_safe(
+            &safe_ctx,
+            "read",
+            r#"{"path":"a.txt"}"#
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ast_grep_blocks_rewrite_in_plan_phase() {
+        let mut c = ctx(AgentPhase::Plan);
+        let missing = execute_tool(&mut c, "ast_grep", "{}");
+        assert!(missing.contains("missing required 'pattern'"), "{missing}");
+        let locked = execute_tool(
+            &mut c,
+            "ast_grep",
+            r#"{"pattern":"foo($X)","rewrite":"bar($X)"}"#,
+        );
+        assert!(locked.contains("READ-ONLY PHASE (PLAN)"), "{locked}");
+    }
+
+    /// A rewrite must be undoable like `edit`; a dry run must not touch the file.
+    #[test]
+    fn ast_grep_rewrite_is_previewable_and_undoable() {
+        if super::search::ast_grep_available().is_none() {
+            eprintln!("skipping: ast-grep not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("spavn-astgrep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("x.rs");
+        fs::write(&file, "fn a() { foo(1, 2); }\n").unwrap();
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".into(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        let args =
+            r#"{"pattern":"foo($A, $B)","rewrite":"bar($B, $A)","lang":"rust","apply":false}"#;
+        let preview = execute_tool(&mut c, "ast_grep", args);
+        assert!(preview.contains("dry run"), "{preview}");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "fn a() { foo(1, 2); }\n"
+        );
+
+        let applied = execute_tool(
+            &mut c,
+            "ast_grep",
+            r#"{"pattern":"foo($A, $B)","rewrite":"bar($B, $A)","lang":"rust"}"#,
+        );
+        assert!(applied.starts_with("Successfully"), "{applied}");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "fn a() { bar(2, 1); }\n"
+        );
+        assert!(c.pop_undo().is_some());
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "fn a() { foo(1, 2); }\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_tool_list_keeps_real_names_and_flags_mutators() {
+        let raw = r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"search_issues/v2","description":"Search issues","inputSchema":{"type":"object","properties":{"q":{"type":"string"}}}},{"name":"create_issue"}]}}"#;
+        let tools = super::parse_mcp_tool_list_json("git hub", false, raw);
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].qualified_name, "mcp__git_hub__search_issues_v2");
+        // Dispatch uses the original names; the sanitized schema name is not reversible.
+        assert_eq!(tools[0].server, "git hub");
+        assert_eq!(tools[0].remote_name, "search_issues/v2");
+        assert!(!tools[0].mutating);
+        assert!(tools[1].mutating);
+        assert_eq!(tools[1].input_schema["type"], "object");
+
+        let mut c = ctx(AgentPhase::Code);
+        let unknown = execute_tool(&mut c, "mcp__nope__x", "{}");
+        assert!(unknown.contains("Unknown MCP tool"), "{unknown}");
+    }
+
+    #[test]
+    fn ask_returns_default_without_an_interactive_user() {
+        let mut c = ctx(AgentPhase::Code);
+        c.can_prompt = false;
+        let out = execute_tool(
+            &mut c,
+            "ask",
+            r#"{"question":"Pick DB","options":["sqlite","postgres"],"default":"postgres"}"#,
+        );
+        assert!(out.ends_with("postgres"), "{out}");
+        let no_default = execute_tool(
+            &mut c,
+            "ask",
+            r#"{"question":"Pick DB","options":["sqlite","postgres"]}"#,
+        );
+        assert!(no_default.ends_with("sqlite"), "{no_default}");
+    }
+
+    #[test]
+    fn sandbox_profile_restricts_writes_and_hides_host_secrets() {
+        let profile = super::shell::build_macos_sandbox_profile(Path::new("/tmp/ws"), true);
+        assert!(profile.contains("(deny file-write* (subpath \"/\"))"));
+        assert!(profile.contains("(subpath \"/tmp/ws\")"));
+        for secret in ["/.ssh\"", "/.aws\"", "/.spavn/secrets.env\""] {
+            assert!(profile.contains(secret), "missing {secret}: {profile}");
+        }
+        let relaxed = super::shell::build_macos_sandbox_profile(Path::new("/tmp/ws"), false);
+        assert!(!relaxed.contains("file-read*"));
+    }
+
+    /// `--sandbox` is a promise: on macOS the command really cannot write outside the workspace.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandboxed_bash_cannot_write_outside_the_workspace() {
+        let dir = std::env::temp_dir().join(format!("spavn-sbx-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mut c = ToolContext::new(
+            AccessMode::Sovereign,
+            "local".into(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        c.sandbox = true;
+        let outside =
+            crate::config::home_dir().join(format!(".spavn-sbx-probe-{}", std::process::id()));
+        let cmd = format!(
+            r#"{{"command":"echo ok > inside.txt; echo x > '{}' || echo DENIED"}}"#,
+            outside.display()
+        );
+        let out = execute_tool(&mut c, "bash", &cmd);
+        assert!(dir.join("inside.txt").exists(), "{out}");
+        assert!(!outside.exists(), "sandbox leaked a write: {out}");
+        assert!(out.contains("DENIED"), "{out}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn phase_from_str_and_toggle() {
         assert_eq!(AgentPhase::parse_alias("plan"), Some(AgentPhase::Plan));
         assert_eq!(AgentPhase::parse_alias("CODE"), Some(AgentPhase::Code));

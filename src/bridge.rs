@@ -1005,6 +1005,7 @@ mod tests {
 
     #[test]
     fn phase_and_access_requests_move_the_shared_state() {
+        let _g = events::test_sink_lock();
         let shared = Arc::new(Mutex::new(test_shared()));
         let ctl = Arc::new(Ctl {
             busy: AtomicBool::new(false),

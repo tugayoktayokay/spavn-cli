@@ -53,6 +53,14 @@ where
         };
         match res {
             Ok(ok) => {
+                // Single funnel for every model call (main turn, local retry, cloud fallback and
+                // sub-agents), so --warn-cost/--max-cost can never miss a billed request.
+                crate::state::record_model_cost(
+                    &endpoint.model,
+                    endpoint.is_local(),
+                    ok.usage.prompt_tokens,
+                    ok.usage.completion_tokens,
+                );
                 if endpoint.is_ollama() {
                     crate::router::refresh_ollama_context_window_async(
                         endpoint.base_url.clone(),

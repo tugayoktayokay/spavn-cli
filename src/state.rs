@@ -16,6 +16,102 @@ static RESIZED: AtomicBool = AtomicBool::new(false);
 static STEER_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static PROMPT_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 
+/// Estimated session spend for `--warn-cost` / `--max-cost`. Every model call is recorded once,
+/// in `router::stream_chat_completion`, so turns, fallbacks and sub-agents share one meter.
+#[derive(Debug)]
+struct CostGuardState {
+    spent_usd: f64,
+    warn_usd: Option<f64>,
+    max_usd: Option<f64>,
+    warned: bool,
+    pending_warning: Option<(f64, f64)>,
+}
+
+static COST_GUARD: Mutex<CostGuardState> = Mutex::new(CostGuardState {
+    spent_usd: 0.0,
+    warn_usd: None,
+    max_usd: None,
+    warned: false,
+    pending_warning: None,
+});
+
+fn cost_guard() -> std::sync::MutexGuard<'static, CostGuardState> {
+    match COST_GUARD.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+pub fn set_cost_limits(warn_usd: Option<f64>, max_usd: Option<f64>) {
+    let mut g = cost_guard();
+    g.warn_usd = warn_usd.filter(|v| v.is_finite() && *v > 0.0);
+    g.max_usd = max_usd.filter(|v| v.is_finite() && *v > 0.0);
+    g.warned = false;
+    g.pending_warning = None;
+}
+
+pub fn session_cost_usd() -> f64 {
+    cost_guard().spent_usd
+}
+
+/// `(spent, limit)` once the `--max-cost` ceiling is reached.
+pub fn cost_limit_exceeded() -> Option<(f64, f64)> {
+    let g = cost_guard();
+    let max = g.max_usd?;
+    (g.spent_usd >= max).then_some((g.spent_usd, max))
+}
+
+/// The one-shot `--warn-cost` crossing, consumed by whoever reports it.
+pub fn take_cost_warning() -> Option<(f64, f64)> {
+    cost_guard().pending_warning.take()
+}
+
+/// Rough USD estimate from token counts; local endpoints are free. Prices are list-price
+/// approximations per million tokens, so this is a guard rail, not an invoice.
+pub fn estimate_token_cost_usd(
+    model_id: &str,
+    is_local: bool,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) -> f64 {
+    if is_local || (prompt_tokens == 0 && completion_tokens == 0) {
+        return 0.0;
+    }
+    let m = model_id.to_ascii_lowercase();
+    let (in_per_m, out_per_m) = if m.contains("opus") {
+        (15.0, 75.0)
+    } else if m.contains("haiku") {
+        (0.8, 4.0)
+    } else if m.contains("mini") || m.contains("nano") || m.contains("flash") || m.contains("luna")
+    {
+        (0.25, 1.0)
+    } else if m.contains("deepseek") {
+        (0.55, 2.19)
+    } else if m.contains("astra") || m.contains("o1") || m.contains("o3") {
+        (10.0, 40.0)
+    } else {
+        (3.0, 15.0)
+    };
+    (prompt_tokens as f64 * in_per_m + completion_tokens as f64 * out_per_m) / 1_000_000.0
+}
+
+pub fn record_model_cost(
+    model_id: &str,
+    is_local: bool,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) {
+    let delta = estimate_token_cost_usd(model_id, is_local, prompt_tokens, completion_tokens);
+    let mut g = cost_guard();
+    g.spent_usd += delta;
+    if !g.warned {
+        if let Some(w) = g.warn_usd.filter(|w| g.spent_usd >= *w) {
+            g.warned = true;
+            g.pending_warning = Some((g.spent_usd, w));
+        }
+    }
+}
+
 pub fn push_steer_message(msg: String) {
     if let Ok(mut q) = STEER_QUEUE.lock() {
         q.push_back(msg);
@@ -565,5 +661,29 @@ mod tests {
             hud::visible_width(&bar)
         );
         clear_live_tasks();
+    }
+
+    #[test]
+    fn cost_guard_is_free_for_local_warns_once_and_stops_at_max() {
+        let _g = locked();
+        cost_guard().spent_usd = 0.0;
+        set_cost_limits(Some(0.01), Some(0.05));
+
+        record_model_cost("qwen2.5-coder", true, 50_000, 10_000);
+        assert_eq!(session_cost_usd(), 0.0, "local endpoints are free");
+        assert!(take_cost_warning().is_none());
+
+        // $0.006 + $0.015 = $0.021: crosses warn ($0.01), stays under max ($0.05).
+        record_model_cost("claude-sonnet-4-6", false, 2_000, 1_000);
+        assert!(take_cost_warning().is_some());
+        assert!(take_cost_warning().is_none(), "warning is consumed once");
+        assert!(cost_limit_exceeded().is_none());
+
+        record_model_cost("claude-sonnet-4-6", false, 10_000, 2_000);
+        assert!(take_cost_warning().is_none(), "warn fires once per session");
+        assert!(cost_limit_exceeded().is_some());
+
+        set_cost_limits(None, None);
+        cost_guard().spent_usd = 0.0;
     }
 }

@@ -296,18 +296,19 @@ Compare two models, or one model before and after a harness change, by running b
 | Hard 6 (`hard-*`) | Semver spec, toposort cycle, 5-site keyword migration, atomic rollback, `O(n²)` → `O(n)`, mutant-killing tests | **6 / 6** (`claude-sonnet-5-5-medium`) |
 | Extended 10 (`x-*`, 3 repeats) | JS (`node --test`), Rust (`cargo test`), failure-log triage, 60-function file edit, non-ASCII report | **30 / 30** across 3 repeats (`26 / 26` suite total) |
 
-## 🔌 Desktop bridge (not shipped yet)
+## 🔌 Desktop bridge
 
-This release has no `--rpc` or `--bridge` flag; passing one is read as prompt text. A headless bridge for desktop and IDE hosts is in progress:
+`spavn --bridge <unix-socket>` runs the CLI as a headless child of a desktop/IDE host over the NDJSON protocol in `spavn-desktop/docs/PROTOCOL.md` (v1). The host owns the socket and the token (`SPAVN_BRIDGE_TOKEN` or `<socket dir>/bridge.env`).
 
-- **In the tree**: `src/bridge.rs` and `src/events.rs` hold the Unix-socket NDJSON transport, token handshake, request handling and event envelope. They are compiled and unit-tested on Unix.
-- **Missing**: a flag that starts the bridge, and the turn loop publishing its events. Until then, script the CLI with `-q` / `-j`.
+- **Streamed today**: `session.ready`, `turn.started`, `thinking.delta`, `message.delta`, `message.final`, `tool.started`, `tool.finished`, `usage`, `approval.request` / `approval.resolved`, `error`, `turn.finished` (with `steps`), `bridge.closed`.
+- **Not yet streamed**: incremental mid-tool `tool.output` chunks.
+- Requests (`state.get`, `approval.answer`, `prompt.steer`, `turn.interrupt`) are answered while a turn runs. Unix only.
 
 ---
 
 ## 🧰 The tool surface
 
-Eleven builtins, each a hard-coded contract in `tool_definitions()`. Plus anything an `mcpServers` entry exposes.
+Thirteen builtins, each a hard-coded contract in `tool_definitions()`, plus MCP tools.
 
 | Tool | Purpose | Gate |
 | :--- | :--- | :--- |
@@ -322,6 +323,10 @@ Eleven builtins, each a hard-coded contract in `tool_definitions()`. Plus anythi
 | 🌐 `web` | Search (ordered keyless + API provider chain with fallback) or fetch as Markdown; redirects re-validated per hop | egress classifier |
 | 🐝 `subagent` | Up to 8 concurrent `scout` (read-only) or `worker` (isolated `git worktree` + atomic `git apply`) sub-agents | phase & access gate |
 | 🧭 `lsp` | Real LSP client (`definition`, `references`, `hover`, `symbols`, `diagnostics`, `implementation`, `type_definition`, `workspace_symbol`) + generic MCP client | read-only / MCP gate |
+| 🌳 `ast_grep` | Structural search / codemod through the optional `ast-grep` binary; `apply=false` previews, a rewrite is undoable and feeds the verification gate | write gate (as `edit`) |
+| ❓ `ask` | Clarifying question with options; returns `default` when nobody can answer (headless, bridge, sub-agent) | — |
+
+**First-class MCP tools.** At startup each `mcpServers` entry is probed in parallel (≤5 s) and its tools join the schema as `mcp__<server>__<tool>` with their real input schema. A server with more than 24 tools (or past 48 in total) stays behind `lsp op='mcp'` so one large server cannot flood every request. Mutating MCP tools are dropped from the PLAN schema and refused at call time.
 
 <details>
 <summary><b>🔌 MCP servers — the extension path</b></summary>
@@ -580,6 +585,9 @@ flowchart TD
 | `SPAVN_LANG` | Initial UI language (`tr` / `en`). |
 | `SPAVN_HOME` | Config/state root instead of `~/.spavn`. |
 | `SPAVN_SHELL` | Shell used for `bash` tool invocations. |
+| `SPAVN_SANDBOX` | `1` = `--sandbox`. |
+| `SPAVN_WARN_COST`, `SPAVN_MAX_COST` | Same as `--warn-cost` / `--max-cost` (USD). |
+| `SPAVN_BRIDGE_TOKEN` | Handshake token for `--bridge`. |
 | `SPAVN_BASE_URL`, `SPAVN_API_KEY` | Fallback endpoint when no provider resolves. |
 | `SPAVN_FORCE_ANTHROPIC` | Force the Anthropic wire format. |
 | `SPAVN_INSTALL_DIR` | Installer target (default `$HOME/.local/bin`). |
@@ -660,7 +668,7 @@ src/
 ├── session.rs         JSONL sessions, fork/resume, compaction, per-session model
 ├── session_title.rs   auto session title
 ├── slash_commands.rs  command dispatch + /help
-├── bridge.rs          desktop bridge transport (Unix only; no flag starts it yet)
+├── bridge.rs          desktop bridge transport (Unix only; started by --bridge)
 ├── events.rs          structured turn events for the bridge
 ├── update.rs          release check and in-place upgrade
 ├── clipboard.rs       clipboard write via the platform CLI tool
@@ -774,6 +782,8 @@ Nothing is rebuilt per channel: one tag, three distribution paths.
 - **Windows** ships as a build target but is the least exercised path.
 - **No `cargo deny` in CI.** The dependency tree is three direct crates deep on purpose, so the audit surface stays small by construction rather than by tooling.
 - **MCP is client-only.** Servers are consumed, not served.
+- **`--sandbox` needs an OS sandbox.** macOS `sandbox-exec` or Linux `bwrap`; without one, `bash` refuses to run rather than run unconfined. It confines `bash` and `py`/`js` scripts only — `lsp`, the verification gate and MCP servers run unsandboxed.
+- **Cost limits are estimates.** `--warn-cost` / `--max-cost` price tokens from a built-in per-model table (cache tokens at full input price), so they over-count rather than under-count. `--max-cost` is checked before each request; the request that crosses it still completes.
 - **`/bench` costs tokens.** It runs a real prompt per candidate model.
 
 ---

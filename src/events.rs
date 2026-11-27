@@ -38,6 +38,23 @@ pub fn install(sink: Sink) {
     *guard = Some(sink);
 }
 
+#[cfg(test)]
+pub(crate) fn clear_sink() {
+    let mut guard = match slot().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = None;
+}
+
+#[cfg(test)]
+pub(crate) fn test_sink_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    match LOCK.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 /// True once a host asked for events — callers that would otherwise format for a human can skip
 /// the work when nobody is listening.
 pub fn is_installed() -> bool {
@@ -641,6 +658,7 @@ mod tests {
 
     #[test]
     fn install_routes_every_event_to_the_sink() {
+        let _g = test_sink_lock();
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink_seen = seen.clone();
         install(Arc::new(move |line: &str| {
@@ -650,8 +668,11 @@ mod tests {
             from: "plan".into(),
             to: "code".into(),
         });
-        assert_eq!(seen.lock().unwrap().len(), 1);
-        assert!(is_installed());
+        let count = seen.lock().unwrap().len();
+        let installed = is_installed();
+        clear_sink();
+        assert_eq!(count, 1);
+        assert!(installed);
     }
 
     #[test]
