@@ -456,11 +456,141 @@ pub(crate) fn eval_json_pointer_view(content: &str, pointer: &str) -> Result<Str
     Err(format!("JSON pointer '{}' not found{}", pointer, available))
 }
 
+/// Deterministic 4-hex content snapshot tag (FNV-1a folded to 16 bits) emitted as
+/// `[path#XXXX]` on `read` and optionally verified by `edit(tag=...)` to prevent stale edits.
+pub(crate) fn content_snapshot_tag(content: &str) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in content.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{:04X}", ((h >> 16) ^ (h & 0xFFFF)) & 0xFFFF)
+}
+
+pub(crate) fn detect_image_mime(content_type: &str, url: &str, bytes: &[u8]) -> Option<&'static str> {
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match ct.as_str() {
+        "image/png" => return Some("image/png"),
+        "image/jpeg" | "image/jpg" => return Some("image/jpeg"),
+        "image/webp" => return Some("image/webp"),
+        "image/gif" => return Some("image/gif"),
+        _ => {}
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    let clean_url = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    if clean_url.ends_with(".png") {
+        Some("image/png")
+    } else if clean_url.ends_with(".jpg") || clean_url.ends_with(".jpeg") {
+        Some("image/jpeg")
+    } else if clean_url.ends_with(".webp") {
+        Some("image/webp")
+    } else if clean_url.ends_with(".gif") {
+        Some("image/gif")
+    } else {
+        None
+    }
+}
+
+fn exec_read_url(url: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+    const MAX_URL_BYTES: usize = 15 * 1024 * 1024;
+    let fetched = crate::http::get_bytes_public(
+        url,
+        &[
+            (
+                "User-Agent",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
+            ),
+            (
+                "Accept",
+                "image/webp,image/png,image/jpeg,image/gif,text/markdown,text/plain;q=0.9,text/html;q=0.8",
+            ),
+        ],
+        15,
+        MAX_URL_BYTES,
+    );
+    match fetched {
+        Ok((status, content_type, bytes)) if (200..300).contains(&status) => {
+            if let Some(mime) = detect_image_mime(&content_type, url, &bytes) {
+                let kb = (bytes.len() as f64 / 1024.0).max(0.1);
+                let fname = url
+                    .split(['?', '#'])
+                    .next()
+                    .and_then(|u| u.rsplit('/').next())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("image")
+                    .to_string();
+                let b64 = crate::router::base64_encode_bytes(&bytes);
+                let drag_img = crate::router::DraggedImage {
+                    raw_span: url.to_string(),
+                    path: url.to_string(),
+                    filename: fname,
+                    mime,
+                    size_bytes: bytes.len(),
+                    base64: b64,
+                };
+                crate::hud::render_inline_image_preview(&drag_img);
+                crate::router::register_read_image(url, drag_img);
+                return format!(
+                    "[SPAVN Vision Image Loaded: {} ({}, {:.1} KB) — multimodal image attached to your visual context]",
+                    url, mime, kb
+                );
+            }
+            let body = String::from_utf8_lossy(&bytes);
+            let text = if body.contains("<html")
+                || body.contains("<body")
+                || body.contains("<!DOCTYPE")
+                || content_type.to_ascii_lowercase().contains("text/html")
+            {
+                super::web::strip_html_to_clean_text(&body)
+            } else {
+                body.chars().take(16_000).collect()
+            };
+            if start_line.is_some() || end_line.is_some() {
+                format_lines(&text, start_line, end_line)
+            } else {
+                text
+            }
+        }
+        Ok((status, _, bytes)) => {
+            let preview: String = String::from_utf8_lossy(&bytes).trim().chars().take(300).collect();
+            format!("Read URL failed ({}): HTTP {} — {}", url, status, preview)
+        }
+        Err(e) => format!("Read URL error ({}): {}", url, e),
+    }
+}
+
 pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
-    let raw_input_path = ctx.apply_default_host(get_str_alias(
-        args,
-        &["path", "file_path", "file", "filepath"],
-    ));
+    let raw_arg = get_str_alias(args, &["path", "file_path", "file", "filepath"]);
+    let raw_trimmed = raw_arg.trim();
+    if raw_trimmed.starts_with("http://") || raw_trimmed.starts_with("https://") {
+        let s = args
+            .get("start_line")
+            .or_else(|| args.get("offset"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+        let e = args
+            .get("end_line")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+        return exec_read_url(raw_trimmed, s, e);
+    }
+    let raw_input_path = ctx.apply_default_host(raw_arg);
     let (path_no_query, inline_raw_q) = split_inline_raw_query(&raw_input_path);
     let explicit_raw_q = get_str_alias(args, &["q", "json_pointer", "pointer"]);
     let raw_query = if !explicit_raw_q.is_empty() {
@@ -700,10 +830,12 @@ pub(crate) fn exec_read(ctx: &mut ToolContext, args: &Value) -> String {
                 ctx.read_ranges
                     .insert(key, (mtime, eff_s, eff_e, ctx.tool_step_counter));
             }
-            match inline_spans.as_deref() {
+            let tag = content_snapshot_tag(&content);
+            let body = match inline_spans.as_deref() {
                 Some(spans) if spans.len() > 1 => format_spans(&content, spans),
                 _ => format_lines(&content, eff_s, eff_e),
-            }
+            };
+            format!("[{}#{}]\n{}", raw_path, tag, body)
         }
         Err(e) => {
             let hint = suggest_similar_path(raw_path);

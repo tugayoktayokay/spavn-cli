@@ -216,6 +216,75 @@ pub fn get_text_public(
     call_with_manual_redirects(&agent, url.to_string(), headers, true)
 }
 
+/// Unattended binary fetch with the same egress/DNS pinning and manual redirect checks as
+/// [`get_text_public`]. Returns `(status, content_type, bytes)`, capped at `max_bytes`.
+pub fn get_bytes_public(
+    url: &str,
+    headers: &[(&str, &str)],
+    timeout_secs: u64,
+    max_bytes: usize,
+) -> Result<(u16, String, Vec<u8>), String> {
+    if crate::guard::egress_is_blocked(url) {
+        return Err(format!("{url} is not a public address (egress policy)"));
+    }
+    const MAX_HOPS: usize = 5;
+    let agent = agent_public_only(timeout_secs);
+    let mut current = url.to_string();
+    let mut hops = 0usize;
+    loop {
+        let mut request = agent.get(&current);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let mut response = request.call().map_err(|e| e.to_string())?;
+        let status = response.status().as_u16();
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let Some(next) = location else {
+                let ct = response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let bytes = response
+                    .body_mut()
+                    .with_config()
+                    .limit(max_bytes as u64)
+                    .read_to_vec()
+                    .unwrap_or_default();
+                return Ok((status, ct, bytes));
+            };
+            hops += 1;
+            if hops > MAX_HOPS {
+                return Err(format!("redirect limit exceeded (>{MAX_HOPS})"));
+            }
+            if crate::guard::egress_is_blocked(&next) {
+                return Err(format!("redirect to a non-public address refused: {next}"));
+            }
+            current = next;
+            continue;
+        }
+        let ct = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = response
+            .body_mut()
+            .with_config()
+            .limit(max_bytes as u64)
+            .read_to_vec()
+            .map_err(|e| e.to_string())?;
+        return Ok((status, ct, bytes));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

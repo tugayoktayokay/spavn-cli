@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.25 (2026-11-28) — Precision Artifact Recall & Web Research Discipline
+
+### Context Recall, Edit Safety & Direct URL/Vision Read (`src/spavn_engine.rs`, `src/tools/read.rs`, `src/tools/edit.rs`, `src/http.rs`, `src/memory.rs`, `src/main.rs`)
+- **New, snapshot-tag `read` + `edit(tag=...)` guard (`src/tools/read.rs`, `src/tools/edit.rs`, `src/tools/schema.rs`)**: `read` now prepends a 4-hex content hash header `[path#XXXX]` and `edit` returns the updated tag; passing `tag` to single or multi-hunk `edit` rejects stale edits with `[FS_STALE_TAG]` if the file changed underneath.
+- **New, direct `http(s)://` URL & image support in `read` (`src/tools/read.rs`, `src/http.rs`, `src/tools/schema.rs`)**: `read` fetches public `http(s)://` pages and images directly via SSRF-pinned `http::get_bytes_public` and attaches fetched images straight to multimodal vision context — eliminating `bash curl -o /tmp/...` round trips and temp-file clutter.
+- **Fix, clean role dispatch on non-code prompts (`src/spavn_engine.rs`, `src/main.rs`)**: Added `dispatch_optional_role_from_prompt` so `Auto` mode no longer prepends `[SPAVN ROLE: CODER]` to general chat, research, or bare-URL turns while keeping explicit `/role` overrides and keyword-matched engineering roles intact.
+- **Fix, whole-token artifact recall & URL stripping (`src/spavn_engine.rs`)**: `extract_artifact_query_terms` strips `http(s)://` URLs before tokenizing and `retrieve_relevant_artifacts` uses exact token matching with specificity guards (`>= 4` chars or path punctuation for file hits, `>= 2` summary hits), preventing unrelated repo artifacts from leaking into general or home-directory sessions.
+- **New, web research & constraint discipline (`src/memory.rs`)**: Added explicit guidance to `FULL_CONSTITUTION` and `COMPACT_CONSTITUTION` to preserve Turn-1 user constraints, use targeted `site:` queries for regional/marketplace lookups, cap redundant search rounds, and avoid retrying 403/404/429 URLs.
+
 ## v0.2.24 (2026-11-28) — Harness Guardrails, First-Class MCP & Desktop Bridge
 
 ### Execution & Tools (`src/turn.rs`, `src/tools/mod.rs`, `src/tools/search.rs`, `src/tools/schema.rs`)

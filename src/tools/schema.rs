@@ -22,11 +22,11 @@ pub fn tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "read",
-                "description": "Read a file, directory, SQLite DB (`.db`/`.sqlite`), PDF, or image. Supports disjoint line ranges (`path:1-12,640-665`), tail lines (`path:-50`), JSON pointer queries (`file.json?q=.a.b`), and SQLite table/SQL queries (`app.db?q=SELECT ...` or `app.db?q=users`).",
+                "description": "Read a file, directory, `http(s)://` URL (web page or image decoded inline for vision), SQLite DB (`.db`/`.sqlite`), PDF, or local image. Text reads include a `[path#TAG]` snapshot tag for `edit(tag=...)`. Supports disjoint line ranges (`path:1-12,640-665`), tail lines (`path:-50`), JSON pointer queries (`file.json?q=.a.b`), and SQLite queries (`app.db?q=users`).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Path (optional `<host>:` prefix); may embed ranges (`src/x.rs:1-12,640-665`), tail (`log.txt:-50`), or query (`config.json?q=.a.b`, `data.db?q=users`)" },
+                        "path": { "type": "string", "description": "Local path, `<host>:/path`, or `http(s)://` URL/image; local paths may embed ranges (`src/x.rs:1-12,640-665`), tail (`log.txt:-50`), or query (`config.json?q=.a.b`, `data.db?q=users`)" },
                         "start_line": { "type": "integer", "description": "Start line (1-based)" },
                         "end_line": { "type": "integer", "description": "End line (1-based, inclusive)" },
                         "q": { "type": "string", "description": "Optional JSON pointer (`.a.b`) for `.json` or table/SQL query for `.db`/`.sqlite`" }
@@ -49,6 +49,7 @@ pub fn tool_definitions() -> Value {
                         "start_line": { "type": "integer", "description": "1-based start line for token-free range replacement" },
                         "end_line": { "type": "integer", "description": "1-based inclusive end line for token-free range replacement" },
                         "insert_after_line": { "type": "integer", "description": "Insert `new_text` after this 1-based line (0 = top of file)" },
+                        "tag": { "type": "string", "description": "Optional 4-hex snapshot tag from the latest `read` (`[path#TAG]`) or `edit`; rejects the edit if the file changed underneath" },
                         "edits": {
                             "type": "array",
                             "description": "Batch of hunks (`{old_text, new_text}` or `{start_line, end_line, new_text}` or `{insert_after_line, new_text}`) applied in-memory with auto line-delta tracking and single atomic disk write",

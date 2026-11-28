@@ -1563,6 +1563,21 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 Ok(c) => c,
                 Err(e) => return e,
             };
+            if let Some(expected_tag) = args
+                .get("tag")
+                .or_else(|| args.get("snapshot_tag"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().trim_start_matches('#').to_ascii_uppercase())
+                .filter(|s| !s.is_empty())
+            {
+                let current_tag = super::read::content_snapshot_tag(&original_content);
+                if current_tag != expected_tag {
+                    return format!(
+                        "Edit error [FS_STALE_TAG]: {} snapshot tag mismatch (expected {}, current {}). Re-read the file before editing.",
+                        raw_path, expected_tag, current_tag
+                    );
+                }
+            }
             let mut working = original_content.clone();
             let mut line_delta: isize = 0;
             let mut combined_old = String::new();
@@ -1638,10 +1653,12 @@ pub(crate) fn exec_edit(ctx: &mut ToolContext, args: &Value) -> String {
                 String::new()
             };
             let impact = compute_caller_impact_hint(ctx, raw_path, &combined_old, &combined_new);
+            let new_tag = super::read::content_snapshot_tag(&working);
             return format!(
-                "Successfully edited {} ({} hunks applied in-memory — file state is current in context, no need to re-read){}{}{}{}",
+                "Successfully edited {} ({} hunks applied in-memory [tag: {}] — file state is current in context, no need to re-read){}{}{}{}",
                 raw_path,
                 edits_arr.len(),
+                new_tag,
                 mtime_warn,
                 diag,
                 stub_warn,
@@ -1799,6 +1816,21 @@ fn exec_edit_single_with_range(
         Ok(c) => c,
         Err(e) => return e,
     };
+    if let Some(expected_tag) = args
+        .get("tag")
+        .or_else(|| args.get("snapshot_tag"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().trim_start_matches('#').to_ascii_uppercase())
+        .filter(|s| !s.is_empty())
+    {
+        let current_tag = super::read::content_snapshot_tag(&content);
+        if current_tag != expected_tag {
+            return format!(
+                "Edit error [FS_STALE_TAG]: {} snapshot tag mismatch (expected {}, current {}). Re-read the file before editing.",
+                raw_path, expected_tag, current_tag
+            );
+        }
+    }
     let mut delta: isize = 0;
     match apply_edit_hunk_in_memory(
         &content,
@@ -1836,9 +1868,10 @@ fn exec_edit_single_with_range(
                 String::new()
             };
             let impact = compute_caller_impact_hint(ctx, raw_path, &eff_old, &eff_new);
+            let new_tag = super::read::content_snapshot_tag(&updated);
             format!(
-                "Successfully edited {} ({}){}{}{}{}",
-                raw_path, match_label, mtime_warn, diag, stub_warn, impact
+                "Successfully edited {} ({}, tag: {}){}{}{}{}",
+                raw_path, match_label, new_tag, mtime_warn, diag, stub_warn, impact
             )
         }
         Err(err_msg) => err_msg,

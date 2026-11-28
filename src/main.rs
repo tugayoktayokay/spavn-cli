@@ -18,7 +18,8 @@ use spavn::session::{
 use spavn::skills::expand_inline_skills;
 use spavn::slash_commands::{dispatch_slash_command, SlashCtx, SlashOutcome};
 use spavn::spavn_engine::{
-    dispatch_role_from_prompt, record_knowledge_artifact, retrieve_relevant_artifacts, AgentPhase,
+    dispatch_optional_role_from_prompt, record_knowledge_artifact, retrieve_relevant_artifacts,
+    AgentPhase,
     AgentRoleKey,
 };
 use spavn::state::{install_sigint_handler, push_queued_message, queued_message_count};
@@ -504,7 +505,7 @@ fn main() {
         let raw_text = prompt_parts.join(" ");
         hud::set_window_topic(&raw_text);
         let (mut expanded_text, activated_skills) = expand_inline_skills(&raw_text);
-        let dispatched_role = dispatch_role_from_prompt(&raw_text);
+        let optional_role = dispatch_optional_role_from_prompt(&raw_text);
         ctx.current_model = endpoint.key.clone();
         ctx.current_prompt = raw_text.clone();
         if !endpoint.is_local() {
@@ -539,15 +540,17 @@ fn main() {
             );
         }
         if let Some(phase_preamble) = ctx.phase.preamble() {
-            if matches!(
-                dispatched_role,
-                AgentRoleKey::Reviewer | AgentRoleKey::Security | AgentRoleKey::Docs
-            ) {
-                expanded_text = format!("{}\n\n{}", dispatched_role.preamble(), expanded_text);
+            if let Some(r) = optional_role {
+                if matches!(
+                    r,
+                    AgentRoleKey::Reviewer | AgentRoleKey::Security | AgentRoleKey::Docs
+                ) {
+                    expanded_text = format!("{}\n\n{}", r.preamble(), expanded_text);
+                }
             }
             expanded_text = format!("{}\n\n{}", phase_preamble, expanded_text);
-        } else {
-            expanded_text = format!("{}\n\n{}", dispatched_role.preamble(), expanded_text);
+        } else if let Some(r) = optional_role {
+            expanded_text = format!("{}\n\n{}", r.preamble(), expanded_text);
         }
         let user_msg = ChatMessage::user(expanded_text);
         append_message(&session_file, &user_msg);
@@ -840,11 +843,12 @@ fn main() {
         }
 
         let (mut expanded_input, activated_skills) = expand_inline_skills(&input);
-        let dispatched_role = if active_role == AgentRoleKey::Auto {
-            dispatch_role_from_prompt(&input)
+        let optional_role = if active_role == AgentRoleKey::Auto {
+            dispatch_optional_role_from_prompt(&input)
         } else {
-            active_role
+            Some(active_role)
         };
+        let dispatched_role = optional_role.unwrap_or(AgentRoleKey::Coder);
         if !endpoint.is_local() {
             let relevant_artifacts = retrieve_relevant_artifacts(&cwd, &input, 2);
             if !relevant_artifacts.is_empty() {
@@ -868,15 +872,17 @@ fn main() {
             }
         }
         if let Some(phase_preamble) = active_phase.preamble() {
-            if matches!(
-                dispatched_role,
-                AgentRoleKey::Reviewer | AgentRoleKey::Security | AgentRoleKey::Docs
-            ) {
-                expanded_input = format!("{}\n\n{}", dispatched_role.preamble(), expanded_input);
+            if let Some(r) = optional_role {
+                if matches!(
+                    r,
+                    AgentRoleKey::Reviewer | AgentRoleKey::Security | AgentRoleKey::Docs
+                ) {
+                    expanded_input = format!("{}\n\n{}", r.preamble(), expanded_input);
+                }
             }
             expanded_input = format!("{}\n\n{}", phase_preamble, expanded_input);
-        } else {
-            expanded_input = format!("{}\n\n{}", dispatched_role.preamble(), expanded_input);
+        } else if let Some(r) = optional_role {
+            expanded_input = format!("{}\n\n{}", r.preamble(), expanded_input);
         }
 
         let user_header_badge = if active_phase == AgentPhase::Plan {

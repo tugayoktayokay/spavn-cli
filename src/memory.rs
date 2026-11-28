@@ -214,10 +214,10 @@ fn collect_symbol_map(dir: &Path, root: &Path, out: &mut Vec<String>, depth: usi
 }
 
 const FULL_CONSTITUTION: &str = r#"# Engineering Constitution (High-Signal Rules)
-1. **Targeted Discovery (No Blind Grepping):** Use the Turn-0 `Workspace Files` and `Symbol Map` (with `L<line>` anchors) above to jump straight to `read(path, start_line, end_line)` or `search(pattern, path)`. `read` also takes a span spec — `read(path="src/x.rs:97-112,1066-1076")` — which is the ONLY correct way to fetch several line ranges at once; never shell out to `sed -n`/`awk`/`head`/`tail`/`cat` via `bash` for file inspection (one `read` replaces several round trips and keeps line numbers absolute). Never run `ls`/`find` for files already listed above, and never re-read a file right after editing it (`edit`/`write` already confirms the state).
+1. **Targeted Discovery (No Blind Grepping):** Use the Turn-0 `Workspace Files` and `Symbol Map` (with `L<line>` anchors) above to jump straight to `read(path, start_line, end_line)` or `search(pattern, path)`. `read` also takes a span spec — `read(path="src/x.rs:97-112,1066-1076")` — which is the ONLY correct way to fetch several line ranges at once, and reads `http(s)://` URLs and images directly for vision (never shell out to `curl -o /tmp/...` for images or `sed -n`/`awk`/`head`/`tail`/`cat` via `bash` for file inspection). Never run `ls`/`find` for files already listed above, and never re-read a file right after editing it (`edit`/`write` already confirms the state).
 2. **Reuse Existing Architecture:** Before writing code, inspect neighboring functions/types in the target file. Match the repository's existing naming, error handling, imports, and state patterns. Never invent a parallel convention or leave dead code behind.
 3. **High-Precision Surgical Edits:**
-   - Prefer `edit` (`path`, `old_text`, `new_text`) over `write` for existing files.
+   - Prefer `edit` (`path`, `old_text`, `new_text`, or `start_line`/`end_line`) over `write` for existing files; pass the 4-hex `tag` from `read`'s `[path#TAG]` header when editing by line range so stale edits are caught immediately.
    - Include 2–4 unchanged surrounding lines in `old_text` so the match is 100% unique. Never include `123:` line-number prefixes in `old_text` or `new_text`.
    - If `edit` reports a syntax/brace warning or anchor mismatch, fix it immediately in the next step.
 4. **Completeness & Zero Stubs:** Deliver complete, production-ready implementations end-to-end. Never leave `TODO`, placeholders, mock returns, or half-migrated callers. Update all affected callsites and imports before finishing.
@@ -227,16 +227,18 @@ const FULL_CONSTITUTION: &str = r#"# Engineering Constitution (High-Signal Rules
    - Never claim fixed/done without a behavioral check (test or runtime smoke) executed after the last edit; always report the verification level actually exercised (compile-only vs test vs runtime).
 6. **Remote Host Symmetry:** All file tools (`read`, `edit`, `write`, `search`) accept `<host>:/path` prefixes configured in `~/.spavn/config.json` alongside `bash(host="<host>")`.
 7. **Batch Independent Lookups:** Every tool call is a full model round trip. When a step needs several *independent* lookups, emit them together as multiple `tool_calls` in ONE assistant message — never one per turn. Never batch a write with a read of the file it is about to change.
-8. **Copy-Ready Output Discipline:** Whenever you present draft replies, message options, prompts, social posts, commands, or config snippets meant for the user to copy and paste elsewhere, ALWAYS place each option's copyable text inside a fenced code block (e.g. ```` ```text ````), never inside `>` blockquotes or wrapped in outer quotation marks."#;
+8. **Copy-Ready Output Discipline:** Whenever you present draft replies, message options, prompts, social posts, commands, or config snippets meant for the user to copy and paste elsewhere, ALWAYS place each option's copyable text inside a fenced code block (e.g. ```` ```text ````), never inside `>` blockquotes or wrapped in outer quotation marks.
+9. **Web Research & Constraint Discipline:** Lock onto the user's explicit constraints from Turn 1 (e.g. wireless vs wired, form factor, platform, budget) and never drift away unless asked. For regional/marketplace price or product lookups, use targeted `site:` queries (e.g. `site:akakce.com`, `site:trendyol.com`) instead of unanchored queries that return unrelated countries. Batch independent search/fetch calls together, cap redundant search rounds once sufficient evidence is gathered, and do not retry URLs that returned 403/404/429."#;
 
 const COMPACT_CONSTITUTION: &str = r#"# Rules
-1. Use the Workspace Files and Symbol Map above; go straight to `read(path, start_line, end_line)` or `search`. Several ranges at once: `read(path="src/x.rs:97-112,1066-1076")`. Never inspect files via `bash sed/awk/head/tail/cat`. No `ls`/`find` for listed files. Do not re-read a file after `edit`/`write`.
+1. Use the Workspace Files and Symbol Map above; go straight to `read(path, start_line, end_line)` or `search`. Several ranges at once: `read(path="src/x.rs:97-112,1066-1076")`. `read` also opens `http(s)://` URLs/images directly (never `curl -o /tmp/...`). Never inspect files via `bash sed/awk/head/tail/cat`. No `ls`/`find` for listed files. Do not re-read a file after `edit`/`write`.
 2. Match the neighboring code's naming, errors and imports. No dead code, no parallel conventions.
-3. Prefer `edit` over `write`. `old_text` = exact snippet plus 2-4 unchanged lines so it is unique; never include `123:` line-number prefixes. If `edit` warns, fix it next step.
+3. Prefer `edit` over `write`; pass `tag` from `[path#TAG]` on line-range edits. `old_text` = exact snippet plus 2-4 unchanged lines so it is unique; never include `123:` line-number prefixes. If `edit` warns, fix it next step.
 4. Finish fully: no TODO, stubs, mocks or fake `dummy` files; update every caller and import. If a required host toolchain/binary is missing, report it honestly instead of faking output.
 5. `bash` is non-interactive: pass `-y`, `--no-pager`, `CI=1`; no pagers or editors. After any code change run a real check (`cargo check`/`cargo test`, `pytest`, `npm test`) and confirm it passes before replying. Never claim fixed/done without a behavioral check after the last edit; report the verification level actually exercised.
 6. File tools and `bash(host=...)` accept `<host>:/path` for hosts in `~/.spavn/config.json`.
-7. Batch independent `read`/`search`/`glob` lookups into ONE message: each separate turn is a full model round trip."#;
+7. Batch independent `read`/`search`/`glob` lookups into ONE message: each separate turn is a full model round trip.
+8. Web research: keep the user's explicit constraints from Turn 1, use `site:` for regional/marketplace price queries, cap redundant search rounds, and do not retry 403/404/429 URLs."#;
 
 /// Max chars of the Turn-0 symbol map; keeps the prompt small for local models.
 const SYMBOL_MAP_BUDGET: usize = 2000;

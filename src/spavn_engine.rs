@@ -247,7 +247,9 @@ fn starts_a_word(text: &str, kw: &str) -> bool {
     })
 }
 
-pub fn dispatch_role_from_prompt(prompt: &str) -> AgentRoleKey {
+/// Keyword router that returns `None` when no engineering role keyword matched (general chat,
+/// product research, bare URLs), so callers avoid injecting `[SPAVN ROLE: CODER]` into non-coding turns.
+pub fn dispatch_optional_role_from_prompt(prompt: &str) -> Option<AgentRoleKey> {
     // URLs carry file names and query strings (`Test%20Bulgular.xlsx`), not intent.
     let lower = prompt
         .to_lowercase()
@@ -334,16 +336,20 @@ pub fn dispatch_role_from_prompt(prompt: &str) -> AgentRoleKey {
         ),
     ];
 
-    let mut best = AgentRoleKey::Coder;
+    let mut best: Option<AgentRoleKey> = None;
     let mut best_score = 0usize;
     for (role, kws) in rules {
         let score = kws.iter().filter(|kw| starts_a_word(&lower, kw)).count();
         if score > best_score {
             best_score = score;
-            best = *role;
+            best = Some(*role);
         }
     }
     best
+}
+
+pub fn dispatch_role_from_prompt(prompt: &str) -> AgentRoleKey {
+    dispatch_optional_role_from_prompt(prompt).unwrap_or(AgentRoleKey::Coder)
 }
 
 pub fn detect_secrets_in_text(text: &str) -> Vec<&'static str> {
@@ -828,24 +834,84 @@ fn is_artifact_stopword(w: &str) -> bool {
             | "yes"
             | "please"
             | "thanks"
+            | "bul"
+            | "bana"
+            | "lazım"
+            | "olmasın"
+            | "kesinlikle"
+            | "ozaman"
+            | "zaman"
+            | "peki"
+            | "kardeş"
+            | "find"
+            | "give"
+            | "need"
+            | "want"
             | "continue"
     )
 }
 
-pub fn extract_artifact_query_terms(query: &str) -> Vec<String> {
-    if query.trim().chars().count() < 16 {
-        return Vec::new();
-    }
-    let mut terms: Vec<String> = query
+fn strip_urls(s: &str) -> String {
+    s.split_whitespace()
+        .filter(|tok| {
+            let lower = tok.to_ascii_lowercase();
+            !lower.starts_with("http://") && !lower.starts_with("https://")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn tokenize_artifact_text(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = s
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.')
-        .map(|s| s.trim_matches('.'))
-        .filter(|s| s.chars().count() >= 3 && !is_artifact_stopword(s))
-        .map(|s| s.to_string())
+        .map(|w| w.trim_matches('.'))
+        .filter(|w| w.chars().count() >= 3)
+        .map(|w| w.to_string())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub fn extract_artifact_query_terms(query: &str) -> Vec<String> {
+    let cleaned = strip_urls(query);
+    if cleaned.trim().chars().count() < 16 {
+        return Vec::new();
+    }
+    let mut terms: Vec<String> = tokenize_artifact_text(&cleaned)
+        .into_iter()
+        .filter(|s| !is_artifact_stopword(s))
         .collect();
     terms.sort();
     terms.dedup();
     terms
+}
+
+fn is_specific_file_term(term: &str) -> bool {
+    term.chars().count() >= 4 || term.contains('.') || term.contains('_') || term.contains('-')
+}
+
+fn score_artifact_match(q_terms: &[String], art: &KnowledgeArtifact) -> Option<usize> {
+    if q_terms.is_empty() {
+        return None;
+    }
+    let file_tokens = tokenize_artifact_text(&art.files.join(" "));
+    let summary_tokens = tokenize_artifact_text(&art.summary);
+    let file_hits = q_terms
+        .iter()
+        .filter(|t| is_specific_file_term(t) && file_tokens.iter().any(|ft| ft == *t))
+        .count();
+    let summary_hits = q_terms
+        .iter()
+        .filter(|t| summary_tokens.iter().any(|st| st == *t))
+        .count();
+    let hits = file_hits + summary_hits;
+    if file_hits >= 1 || hits >= 2 {
+        Some(hits + file_hits)
+    } else {
+        None
+    }
 }
 
 pub fn retrieve_relevant_artifacts(cwd: &str, query: &str, k: usize) -> Vec<KnowledgeArtifact> {
@@ -866,23 +932,9 @@ pub fn retrieve_relevant_artifacts(cwd: &str, query: &str, k: usize) -> Vec<Know
         .filter_map(|l| serde_json::from_str::<KnowledgeArtifact>(&l).ok())
         .collect();
 
-    let min_hits = if q_terms.len() >= 2 { 2 } else { 1 };
     let mut scored: Vec<(usize, KnowledgeArtifact)> = items
         .into_iter()
-        .filter_map(|art| {
-            let files_lc = art.files.join(" ").to_lowercase();
-            let hay = format!("{} {}", files_lc, art.summary.to_lowercase());
-            let file_hits = q_terms
-                .iter()
-                .filter(|t| files_lc.contains(t.as_str()))
-                .count();
-            let hits = q_terms.iter().filter(|t| hay.contains(t.as_str())).count();
-            if hits >= min_hits || file_hits >= 1 {
-                Some((hits + file_hits, art))
-            } else {
-                None
-            }
-        })
+        .filter_map(|art| score_artifact_match(&q_terms, &art).map(|s| (s, art)))
         .collect();
     scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     scored.into_iter().take(k).map(|(_, a)| a).collect()
@@ -1266,6 +1318,33 @@ mod engine_tests {
         let terms = extract_artifact_query_terms("proxy.mjs içinde thinkingConfig ayarına bak");
         assert!(terms.contains(&"proxy.mjs".to_string()));
         assert!(terms.contains(&"thinkingconfig".to_string()));
+    }
+
+    #[test]
+    fn extract_artifact_query_terms_strips_urls() {
+        assert!(extract_artifact_query_terms(
+            "https://www.trendyol.com/chiconom/vox-pro-p-1132347404?link_userID=123&product_free=1"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn score_artifact_match_rejects_substring_false_positives_and_matches_exact_tokens() {
+        let art = KnowledgeArtifact {
+            ts: "2026-11-23 11:37:46".to_string(),
+            project: "remasterhr".to_string(),
+            files: vec!["/Users/u/apps/remasterhr/backend/src/routes/enterprise/bulk.ts".to_string()],
+            summary: "enterprise bulk upload validation fix".to_string(),
+        };
+        // "bul" must NOT substring-match "bulk.ts"
+        let noisy = extract_artifact_query_terms(
+            "ps5 uyumlu ucuza ürün bul ozaman bana fp olan kalitesiz kesinlikle olmasın",
+        );
+        assert_eq!(score_artifact_match(&noisy, &art), None);
+
+        // Exact file token MUST match
+        let real = extract_artifact_query_terms("bulk.ts içindeki enterprise endpointine bak");
+        assert!(score_artifact_match(&real, &art).is_some());
     }
 
     #[test]

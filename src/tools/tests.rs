@@ -1903,4 +1903,103 @@ mod harness_intelligence_tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn read_snapshot_tag_and_edit_stale_tag_guard() {
+        let dir = std::env::temp_dir().join(format!(
+            "spavn_tag_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("sample.rs");
+        fs::write(&f, "fn one() -> i32 {\n    1\n}\n").unwrap();
+        let mut c = ToolContext::new(
+            AccessMode::Auto,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        let out = exec_read(&mut c, &json!({ "path": "sample.rs" }));
+        let first_line = out.lines().next().unwrap_or("");
+        assert!(
+            first_line.starts_with("[sample.rs#") && first_line.ends_with(']'),
+            "expected snapshot tag header, got: {first_line}"
+        );
+        let tag = first_line
+            .trim_start_matches("[sample.rs#")
+            .trim_end_matches(']')
+            .to_string();
+        assert_eq!(tag.len(), 4);
+
+        // Wrong tag must reject edit without modifying file
+        let bad = exec_edit(
+            &mut c,
+            &json!({
+                "path": "sample.rs",
+                "start_line": 2,
+                "end_line": 2,
+                "new_text": "    99",
+                "tag": "0000"
+            }),
+        );
+        assert!(bad.contains("[FS_STALE_TAG]"), "{bad}");
+        assert!(fs::read_to_string(&f).unwrap().contains("    1"));
+
+        // Correct tag must succeed and emit updated tag
+        let ok = exec_edit(
+            &mut c,
+            &json!({
+                "path": "sample.rs",
+                "start_line": 2,
+                "end_line": 2,
+                "new_text": "    42",
+                "tag": tag
+            }),
+        );
+        assert!(ok.starts_with("Successfully edited"), "{ok}");
+        assert!(ok.contains("tag: "), "{ok}");
+        assert!(fs::read_to_string(&f).unwrap().contains("    42"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_image_mime_and_optional_role_dispatch() {
+        assert_eq!(
+            super::super::read::detect_image_mime("image/webp; charset=binary", "https://x/a", b""),
+            Some("image/webp")
+        );
+        assert_eq!(
+            super::super::read::detect_image_mime("application/octet-stream", "https://x/img", b"\x89PNG\r\n\x1a\nxxxx"),
+            Some("image/png")
+        );
+        assert_eq!(
+            super::super::read::detect_image_mime("text/html", "https://x/page.html", b"<html></html>"),
+            None
+        );
+        // Loopback URL read must be refused by SSRF egress policy
+        let dir = std::env::temp_dir();
+        let mut c = ToolContext::new(
+            AccessMode::Auto,
+            "local".to_string(),
+            dir.clone(),
+            AgentPhase::Code,
+        );
+        let blocked = exec_read(&mut c, &json!({ "path": "http://127.0.0.1:9/secret.png" }));
+        assert!(blocked.to_lowercase().contains("egress policy"), "{blocked}");
+
+        // Non-code prompts should not receive a CODER role preamble
+        assert_eq!(
+            crate::spavn_engine::dispatch_optional_role_from_prompt(
+                "ps5 uyumlu kablosuz yaka mikrofonu öner"
+            ),
+            None
+        );
+        assert_eq!(
+            crate::spavn_engine::dispatch_optional_role_from_prompt("src/main.rs bug'ını düzelt"),
+            Some(crate::spavn_engine::AgentRoleKey::Coder)
+        );
+    }
 }
