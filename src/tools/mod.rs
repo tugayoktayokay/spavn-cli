@@ -1,3 +1,5 @@
+pub mod browser;
+pub mod eval;
 pub mod edit;
 pub mod lsp;
 pub mod mcp_subagent;
@@ -11,6 +13,8 @@ mod tests;
 pub mod web;
 pub mod web_search;
 
+pub(crate) use browser::*;
+pub(crate) use eval::*;
 pub(crate) use edit::*;
 pub use edit::{
     build_live_project_signatures, check_unfinished_placeholders, find_manifest_dir_for_gate,
@@ -867,10 +871,12 @@ pub fn execute_tool(ctx: &mut ToolContext, name: &str, args_json: &str) -> Strin
             exec_lsp_and_mcp(ctx, &args)
         }
         "ast_grep" | "ast_edit" | "sg" => exec_ast_grep(ctx, &args),
+        "eval" | "repl" | "python" | "notebook" => exec_eval(ctx, &args),
+        "browser" | "browse" | "screenshot" => exec_browser(ctx, &args),
         other if other.starts_with("mcp__") => exec_mcp_direct(ctx, other, &args),
         "ask" | "ask_user" | "clarify" => exec_ask(ctx, &args),
         _ => format!(
-            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp, ast_grep, ask.",
+            "Unknown tool '{}'. Valid tools are: read, edit, write, bash, search, glob, memory, skill, web, subagent, lsp, ast_grep, eval, browser, ask.",
             name
         ),
     }
@@ -1125,5 +1131,9 @@ pub fn phase_locked_tool(name: &str) -> bool {
             | "shell"
             | "exec"
             | "terminal"
+            | "eval"
+            | "repl"
+            | "python"
+            | "notebook"
     )
 }

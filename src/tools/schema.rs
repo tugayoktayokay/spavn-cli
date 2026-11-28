@@ -306,6 +306,46 @@ pub fn tool_definitions() -> Value {
                 }
             }
         }
+        ,
+        {
+            "type": "function",
+            "function": {
+                "name": "eval",
+                "description": "Run code in a persistent stateful Python (`py`) or JavaScript (`js`) kernel. Variables, imports, and functions persist across calls until `reset: true`. Ideal for data analysis, multi-step calculations, JSON/CSV transforms, and quick prototyping.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "language": { "type": "string", "enum": ["py", "js"], "description": "Kernel language: `py` (Python 3) or `js` (Node/Bun)" },
+                        "code": { "type": "string", "description": "Code cell to execute in the persistent kernel" },
+                        "reset": { "type": "boolean", "description": "Restart the kernel before running (clears state)" },
+                        "timeout_sec": { "type": "integer", "description": "Cell deadline in seconds (default 30, max 300)" }
+                    },
+                    "required": ["language", "code"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser",
+                "description": "Open a URL in real headless Chrome/Chromium (supports JS-rendered pages and `localhost` dev servers). Extract rendered text/DOM, capture a PNG screenshot attached directly to vision context, or interact via CDP (`click`, `fill`, `selector`, `eval_js`).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "op": { "type": "string", "enum": ["open", "text", "screenshot", "eval_js"], "description": "Action: `open`/`text` (rendered text), `screenshot` (PNG attached to vision), `eval_js` (run JS in page)" },
+                        "url": { "type": "string", "description": "Target `http(s)://` URL (public or localhost dev server)" },
+                        "selector": { "type": "string", "description": "Optional CSS selector to extract text from" },
+                        "click": { "type": "string", "description": "Optional CSS selector to click before reading/screenshotting" },
+                        "fill": { "type": "object", "properties": { "selector": { "type": "string" }, "value": { "type": "string" } }, "description": "Optional input field to fill before clicking/reading" },
+                        "script": { "type": "string", "description": "JavaScript expression to evaluate when `op='eval_js'`" },
+                        "width": { "type": "integer", "description": "Viewport width (default 1280)" },
+                        "height": { "type": "integer", "description": "Viewport height (default 900)" },
+                        "wait_ms": { "type": "integer", "description": "Wait time after navigation in ms (default 2500)" }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }
     ]);
     if let Some(arr) = val.as_array_mut() {
         for mcp in discover_configured_mcp_tools() {
@@ -374,6 +414,18 @@ pub fn tool_definitions_for_turn(
         || lower.contains("refactor")
         || lower.contains("ast-grep")
         || lower.contains("ast_grep");
+    let want_eval = lower.contains("eval")
+        || lower.contains("python")
+        || lower.contains("hesapla")
+        || lower.contains("analiz")
+        || lower.contains("csv")
+        || lower.contains("repl");
+    let want_browser = lower.contains("browser")
+        || lower.contains("tarayıcı")
+        || lower.contains("screenshot")
+        || lower.contains("ekran görüntüsü")
+        || lower.contains("localhost:")
+        || lower.contains("127.0.0.1:");
     if let Value::Array(items) = base {
         let filtered: Vec<Value> = items
             .into_iter()
@@ -391,6 +443,8 @@ pub fn tool_definitions_for_turn(
                     "subagent" => want_subagent,
                     "lsp" => want_lsp,
                     "ast_grep" => want_ast,
+                    "eval" => want_eval,
+                    "browser" => want_browser,
                     "ask" => false,
                     other if other.starts_with("mcp__") => want_lsp,
                     _ => true,

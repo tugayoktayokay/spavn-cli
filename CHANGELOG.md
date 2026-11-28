@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.26 (2026-11-28) — Persistent `eval` Kernels & Built-In `browser` Tool
+
+### New First-Class Tools (`src/tools/eval.rs`, `src/tools/browser.rs`, `src/tools/mod.rs`, `src/tools/schema.rs`)
+- **New, persistent `eval` tool (`py` / `js`)**: Long-lived stateful Python 3 and Node/Bun REPL kernels over newline-delimited JSON stdio — variables, imports, and helper functions survive across calls with expression value display, `reset: true`, per-cell timeouts, SAFE approval, PLAN lock, and automatic crash/timeout recovery.
+- **New, built-in `browser` tool (Chrome/Chromium headless + CDP)**: Renders JS-heavy web pages and `localhost` dev servers without extra Rust crates; supports `open`/`text`, `screenshot` (PNG decoded straight into multimodal vision context), and interactive CDP actions (`click`, `fill`, `selector`, `eval_js`) with egress protection blocking `file://` and cloud metadata endpoints.
+
 ## v0.2.25 (2026-11-28) — Precision Artifact Recall & Web Research Discipline
 
 ### Context Recall, Edit Safety & Direct URL/Vision Read (`src/spavn_engine.rs`, `src/tools/read.rs`, `src/tools/edit.rs`, `src/http.rs`, `src/memory.rs`, `src/main.rs`)
